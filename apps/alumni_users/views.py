@@ -1,0 +1,137 @@
+"""
+This app intentionally does not define its own models. All alumni-related models are located in apps.shared.models for reusability across multiple apps.
+"""
+
+import logging
+from django.shortcuts import render
+from django.http import JsonResponse
+from django.core.files.storage import default_storage
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from apps.shared.models import User, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo
+from apps.shared.services import UserService
+from apps.shared.serializers import AlumniListSerializer
+
+logger = logging.getLogger(__name__)
+
+# Helper functions
+
+def _build_profile_pic_url(user):
+    try:
+        profile = getattr(user, 'profile', None)
+        pic = getattr(profile, 'profile_pic', None) if profile else None
+        if pic:
+            url = pic.url
+            try:
+                modified = default_storage.get_modified_time(pic.name)
+                if modified:
+                    return f"{url}?t={int(modified.timestamp())}"
+            except Exception:
+                pass
+            return url
+    except Exception:
+        pass
+    return None
+
+
+def build_alumni_data(a):
+    profile = getattr(a, 'profile', None)
+    academic = getattr(a, 'academic_info', None)
+    return {
+        'id': a.user_id,
+        'ctu_id': a.acc_username,
+        'name': f"{a.f_name} {a.m_name or ''} {a.l_name}",
+        'course': getattr(academic, 'course', None) if academic else None,
+        'batch': getattr(academic, 'year_graduated', None) if academic else None,
+        'status': a.user_status,
+        'gender': a.gender,
+        'birthdate': str(getattr(profile, 'birthdate', None)) if profile and getattr(profile, 'birthdate', None) else None,
+        'phone': getattr(profile, 'phone_num', None) if profile else None,
+        'address': getattr(profile, 'address', None) if profile else None,
+        'email': getattr(profile, 'email', None) if profile else None,
+        'program': getattr(academic, 'program', None) if academic else None,
+        'civil_status': getattr(profile, 'civil_status', None) if profile else None,
+        'age': getattr(profile, 'age', None) if profile else None,
+        'social_media': getattr(profile, 'social_media', None) if profile else None,
+        'school_name': getattr(academic, 'school_name', None) if academic else None,
+        'profile_pic': _build_profile_pic_url(a),
+    }
+
+def get_field_from_question_map(user, question_text_map, field, *question_labels):
+    for label in question_labels:
+        for qtext, answer in question_text_map.items():
+            if label in qtext:
+                return answer
+    # Special handling for birthdate to avoid 'None' string
+    if field == 'birthdate':
+        val = getattr(user, field, None)
+        return str(val) if val else ''
+    return getattr(user, field, '')
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def alumni_list_view(request):
+    """
+    Returns a list of alumni with selected fields. Uses models from apps.shared.models.
+    """
+    year = request.GET.get('year')
+    alumni_qs = User.objects.select_related('profile', 'academic_info', 'employment', 'tracker_data').filter(account_type__user=True)
+    if year:
+        alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
+    alumni_data = [build_alumni_data(a) for a in alumni_qs]
+    return JsonResponse({'success': True, 'alumni': alumni_data})
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def alumni_detail_view(request, user_id):
+    """
+    Returns detailed information for a single alumni, including tracker answers if available.
+    Uses models from apps.shared.models.
+    """
+    from apps.shared.models import TrackerResponse, Question
+    try:
+        # Always pull related data to avoid extra queries and ensure academic_info is available
+        user = User.objects.select_related('profile', 'academic_info').get(user_id=user_id)
+        tracker_responses = TrackerResponse.objects.filter(user=user).order_by('-submitted_at')
+        latest_tracker = tracker_responses.first() if tracker_responses.exists() else None
+        tracker_answers = latest_tracker.answers if latest_tracker and latest_tracker.answers else {}
+        question_text_map = {}
+        if tracker_answers:
+            qids = [int(qid) for qid in tracker_answers.keys() if str(qid).isdigit()]
+            for q in Question.objects.filter(id__in=qids):
+                question_text_map[q.text.lower()] = tracker_answers.get(str(q.id)) or tracker_answers.get(q.id)
+
+        def get_field(field, *question_labels):
+            return get_field_from_question_map(user, question_text_map, field, *question_labels)
+
+        academic_info = getattr(user, 'academic_info', None)
+        batch_year = getattr(academic_info, 'year_graduated', None)
+
+        data = {
+            'id': user.user_id,
+            'ctu_id': user.acc_username,
+            'name': f"{get_field('f_name', 'first name')} {get_field('m_name', 'middle name') or ''} {get_field('l_name', 'last name')}".strip(),
+            'first_name': get_field('f_name', 'first name'),
+            'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else None,
+            'middle_name': get_field('m_name', 'middle name'),
+            'last_name': get_field('l_name', 'last name'),
+            'course': getattr(academic_info, 'course', None) if academic_info else get_field('course', 'course'),
+            # Always prefer academic_info.year_graduated for batch
+            'batch': batch_year if batch_year is not None else get_field('year_graduated', 'batch', 'year graduated'),
+            'status': get_field('user_status', 'status'),
+            'gender': get_field('gender', 'gender'),
+            'birthdate': get_field('birthdate', 'birthdate', 'birth date', 'birthday', 'date of birth', 'dob', 'bday'),
+            'phone': get_field('phone_num', 'phone', 'contact', 'mobile'),
+            'address': get_field('address', 'address'),
+            'email': get_field('email', 'email'),
+            'program': getattr(academic_info, 'program', None) if academic_info else get_field('program', 'program'),
+            'civil_status': get_field('civil_status', 'civil status'),
+            'age': get_field('age', 'age'),
+            'social_media': get_field('social_media', 'social media'),
+            'school_name': getattr(academic_info, 'school_name', None) if academic_info else get_field('school_name', 'school name'),
+            'profile_pic': _build_profile_pic_url(user),
+        }
+        return JsonResponse({'success': True, 'alumni': data})
+    except User.DoesNotExist as e:
+        logger.error(f"User with id {user_id} not found: {e}")
+        return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
