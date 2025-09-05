@@ -520,6 +520,27 @@ def notifications_view(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def notifications_count_view(request):
+    user_id = request.GET.get('user_id')
+    if not user_id:
+        return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
+    try:
+        user = User.objects.get(user_id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
+
+    # Count notifications based on user type
+    if hasattr(user.account_type, 'user') and user.account_type.user:
+        count = Notification.objects.filter(user_id=user_id).count()
+    elif hasattr(user.account_type, 'ojt') and user.account_type.ojt:
+        count = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').count()
+    else:
+        count = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').count()
+
+    return JsonResponse({'success': True, 'count': count})
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def users_list_view(request):
     user = request.user
     # Allow any authenticated user to fetch suggested users
@@ -1035,202 +1056,89 @@ def delete_alumni_profile_pic(request):
 
 # mobile side
 
-@api_view(["GET", "POST"])
+@api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticatedOrReadOnly])
-def posts_view(request):
+def post_detail_view(request, post_id):
+    try:
+        post = Post.objects.get(post_id=post_id)
+    except Post.DoesNotExist:
+        return JsonResponse({'error': 'Post not found'}, status=404)
+
     if request.method == "GET":
         try:
-            # Get all posts with user and category information
-            posts = Post.objects.select_related('user', 'post_cat').order_by('-post_id')
-            posts_data = []
+            # Get repost information for THIS specific post
+            reposts = Repost.objects.filter(post=post).select_related('user')
+            repost_data = []
+            for repost in reposts:
+                repost_data.append({
+                    'repost_id': repost.repost_id,
+                    'repost_date': repost.repost_date.isoformat(),
+                    'user': {
+                        'user_id': repost.user.user_id,
+                        'f_name': repost.user.f_name,
+                        'l_name': repost.user.l_name,
+                        'profile_pic': build_profile_pic_url(repost.user),
+                    }
+                })
 
-            for post in posts:
-                try:
-                    # Get repost information for THIS specific post
-                    reposts = Repost.objects.filter(post=post).select_related('user')
-                    repost_data = []
-                    for repost in reposts:
-                        repost_data.append({
-                            'repost_id': repost.repost_id,
-                            'repost_date': repost.repost_date.isoformat(),
-                            'user': {
-                                'user_id': repost.user.user_id,
-                                'f_name': repost.user.f_name,
-                                'l_name': repost.user.l_name,
-                                'profile_pic': build_profile_pic_url(repost.user),
-                            }
-                        })
+            # Get comments for THIS specific post
+            comments = Comment.objects.filter(post=post).select_related('user').order_by('-date_created')
+            comments_data = []
+            for comment in comments:
+                comments_data.append({
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': build_profile_pic_url(comment.user),
+                    }
+                })
 
-                    # Get comments for THIS specific post
-                    comments = Comment.objects.filter(post=post).select_related('user').order_by('-date_created')
-                    comments_data = []
-                    for comment in comments:
-                        comments_data.append({
-                            'comment_id': comment.comment_id,
-                            'comment_content': comment.comment_content,
-                            'date_created': comment.date_created.isoformat() if comment.date_created else None,
-                            'user': {
-                                'user_id': comment.user.user_id,
-                                'f_name': comment.user.f_name,
-                                'l_name': comment.user.l_name,
-                                'profile_pic': build_profile_pic_url(comment.user),
-                            }
-                        })
+            # Get likes for THIS specific post with user information
+            likes = Like.objects.filter(post=post).select_related('user')
+            likes_data = []
+            for like in likes:
+                likes_data.append({
+                    'like_id': like.like_id,
+                    'user_id': like.user.user_id,
+                    'f_name': like.user.f_name,
+                    'l_name': like.user.l_name,
+                    'profile_pic': build_profile_pic_url(like.user),
+                })
 
-                    # Get likes for THIS specific post with user information
-                    likes = Like.objects.filter(post=post).select_related('user')
-                    likes_data = []
-                    for like in likes:
-                        likes_data.append({
-                            'like_id': like.like_id,
-                            'user_id': like.user.user_id,
-                            'f_name': like.user.f_name,
-                            'l_name': like.user.l_name,
-                            'profile_pic': build_profile_pic_url(like.user),
-                        })
-
-                    posts_data.append({
-                        'post_id': post.post_id,
-                        'post_title': post.post_title,
-                        'post_content': post.post_content,
-                        'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
-                        'type': post.type,
-                        'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
-                        'likes_count': len(likes_data),
-                        'comments_count': post.comments.count() if hasattr(post, 'comments') else 0,
-                        'reposts_count': post.reposts.count() if hasattr(post, 'reposts') else 0,
-                        'likes': likes_data,
-                        'reposts': repost_data,
-                        'comments': comments_data,
-                        'user': {
-                            'user_id': post.user.user_id,
-                            'f_name': post.user.f_name,
-                            'l_name': post.user.l_name,
-                            'profile_pic': build_profile_pic_url(post.user),
-                        },
-                        'category': {
-                            'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
-                            'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
-                            'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
-                            'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
-                            'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
-                        }
-                    })
-                except Exception:
-                    # Skip malformed post records instead of failing the entire response
-                    continue
-
-            return JsonResponse({'posts': posts_data})
-        except Exception as e:
-            logger.error(f"posts_view GET failed: {e}")
-            return JsonResponse({'posts': []}, status=200)
-
-    elif request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            print(f"DEBUG: Received post data: {data}")
-
-            # Authenticate explicitly from Authorization header (more reliable with custom user model)
-            auth_header = request.headers.get('Authorization') or request.META.get('HTTP_AUTHORIZATION')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                return JsonResponse({'error': 'Authentication required'}, status=401)
-            token = auth_header.split(' ')[1]
-            try:
-                from rest_framework_simplejwt.tokens import AccessToken
-                user_id = AccessToken(token).get('user_id') or AccessToken(token).get('id')
-                user = User.objects.get(user_id=int(user_id))
-            except Exception:
-                return JsonResponse({'error': 'Invalid token'}, status=401)
-
-            # Validate post category exists
-            post_cat_id = data.get('post_cat_id')
-            if not post_cat_id:
-                # If missing, fallback to a default category
-                post_category = ensure_default_post_categories()
-                if not post_category:
-                    return JsonResponse({'error': 'post_cat_id is required'}, status=400)
-            else:
-                try:
-                    post_category = PostCategory.objects.get(post_cat_id=post_cat_id)
-                except PostCategory.DoesNotExist:
-                    # Fallback to default if provided id doesn't exist
-                    post_category = ensure_default_post_categories()
-                    if not post_category:
-                        return JsonResponse({'error': 'Invalid post category'}, status=400)
-
-            # Create the post
-            post_image = data.get('post_image', '')
-            post = None  # Initialize post variable
-
-            if not post_image or (isinstance(post_image, str) and post_image.startswith('file://')):
-                post_image = None  # Convert empty string or local file path to None for ImageField
-                post = Post.objects.create(
-                    user=user,
-                    post_cat=post_category,
-                    post_title=data.get('post_title', ''),
-                    post_content=data.get('post_content', ''),
-                    post_image=post_image,
-                    type=data.get('type', 'personal')
-                )
-            elif isinstance(post_image, str) and post_image.startswith('data:image/'):
-                # Handle base64 image data
-                import base64
-                from django.core.files.base import ContentFile
-                import uuid
-                try:
-                    # Extract base64 data
-                    format, imgstr = post_image.split(';base64,')
-                    ext = format.split('/')[-1]
-
-                    # Create file name
-                    filename = f"post_image_{uuid.uuid4()}.{ext}"
-
-                    # Convert base64 to file
-                    image_data = base64.b64decode(imgstr)
-                    image_file = ContentFile(image_data, name=filename)
-
-                    post = Post.objects.create(
-                        user=user,
-                        post_cat=post_category,
-                        post_title=data.get('post_title', ''),
-                        post_content=data.get('post_content', ''),
-                        post_image=image_file,
-                        type=data.get('type', 'personal')
-                    )
-                except Exception as e:
-                    print(f"DEBUG: Error handling base64 image: {e}")
-                    post = Post.objects.create(
-                        user=user,
-                        post_cat=post_category,
-                        post_title=data.get('post_title', ''),
-                        post_content=data.get('post_content', ''),
-                        post_image=None,
-                        type=data.get('type', 'personal')
-                    )
-            else:
-                # If it's a URL or path, try to use it directly (rare)
-                post = Post.objects.create(
-                    user=user,
-                    post_cat=post_category,
-                    post_title=data.get('post_title', ''),
-                    post_content=data.get('post_content', ''),
-                    post_image=None,
-                    type=data.get('type', 'personal')
-                )
-            print(f"DEBUG: Created post: {post.post_id}")
-
-            return JsonResponse({
-                'success': True,
+            post_data = {
                 'post_id': post.post_id,
-                'post_image': post.post_image.url if post.post_image else None,
-                'message': 'Post created successfully'
-            })
+                'post_title': post.post_title,
+                'post_content': post.post_content,
+                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                'type': post.type,
+                'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                'likes_count': len(likes_data),
+                'comments_count': post.comments.count() if hasattr(post, 'comments') else 0,
+                'reposts_count': post.reposts.count() if hasattr(post, 'reposts') else 0,
+                'likes': likes_data,
+                'reposts': repost_data,
+                'comments': comments_data,
+                'user': {
+                    'user_id': post.user.user_id,
+                    'f_name': post.user.f_name,
+                    'l_name': post.user.l_name,
+                    'profile_pic': build_profile_pic_url(post.user),
+                },
+                'category': {
+                    'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
+                    'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
+                    'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
+                    'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
+                    'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
+                }
+            }
+            return JsonResponse(post_data)
         except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            logger.error(f"posts_view POST failed: {e}\n{tb}")
-            # Return a client-friendly error so UI can show a clear message
-            return JsonResponse({'success': False, 'message': 'Failed to create post', 'detail': str(e)}, status=400)
+            return JsonResponse({'error': str(e)}, status=500)
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
@@ -1265,6 +1173,70 @@ def post_like_view(request, post_id):
                 return JsonResponse({'success': False, 'message': 'Post not liked'})
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def post_edit_view(request, post_id):
+    try:
+        post = Post.objects.get(post_id=post_id)
+        user = request.user
+
+        # Check if user owns the post
+        if post.user.user_id != user.user_id:
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == "PUT":
+            data = json.loads(request.body)
+            post_title = data.get('post_title')
+            post_content = data.get('post_content')
+
+            if post_title is not None:
+                post.post_title = post_title
+            if post_content is not None:
+                post.post_content = post_content
+
+            post.save()
+            return JsonResponse({'success': True, 'message': 'Post updated'})
+
+        elif request.method == "DELETE":
+            post.delete()
+            return JsonResponse({'success': True, 'message': 'Post deleted'})
+
+    except Post.DoesNotExist:
+        return JsonResponse({'error': 'Post not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def comment_edit_view(request, post_id, comment_id):
+    try:
+        comment = Comment.objects.get(comment_id=comment_id)
+        user = request.user
+
+        # Check if user owns the comment
+        if comment.user.user_id != user.user_id:
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == "PUT":
+            data = json.loads(request.body)
+            comment_content = data.get('comment_content')
+
+            if comment_content is not None:
+                comment.comment_content = comment_content
+                comment.save()
+                return JsonResponse({'success': True, 'message': 'Comment updated'})
+            else:
+                return JsonResponse({'error': 'No content provided'}, status=400)
+
+        elif request.method == "DELETE":
+            comment.delete()
+            return JsonResponse({'success': True, 'message': 'Comment deleted'})
+
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
@@ -1681,23 +1653,13 @@ def check_follow_status_view(request, user_id):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def posts_by_user_type_view(request):
-    """Get posts filtered by user type (alumni, OJT, etc.)"""
+def posts_view(request):
+    """Get all posts - main posts endpoint"""
     try:
-        user_type = request.GET.get('user_type', 'all')
-        
-        if user_type == 'alumni':
-            users = User.objects.filter(account_type__user=True)
-        elif user_type == 'ojt':
-            users = User.objects.filter(account_type__ojt=True)
-        elif user_type == 'coordinator':
-            users = User.objects.filter(account_type__coordinator=True)
-        else:
-            users = User.objects.all()
-        
-        posts = Post.objects.filter(user__in=users).select_related('user', 'post_cat').order_by('-post_id')
+        # Get all posts ordered by most recent
+        posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         posts_data = []
-        
+
         for post in posts:
             try:
                 # Get likes count
@@ -1706,7 +1668,112 @@ def posts_by_user_type_view(request):
                 comments_count = Comment.objects.filter(post=post).count()
                 # Get reposts count
                 reposts_count = Repost.objects.filter(post=post).count()
-                
+
+                # Get reposts data for the feed
+                reposts = Repost.objects.filter(post=post).select_related('user')
+                reposts_data = []
+                for repost in reposts:
+                    reposts_data.append({
+                        'repost_id': repost.repost_id,
+                        'repost_date': repost.repost_date.isoformat(),
+                        'user': {
+                            'user_id': repost.user.user_id,
+                            'f_name': repost.user.f_name,
+                            'l_name': repost.user.l_name,
+                            'profile_pic': build_profile_pic_url(repost.user),
+                        }
+                    })
+
+                # Get likes data
+                likes = Like.objects.filter(post=post).select_related('user')
+                likes_data = []
+                for like in likes:
+                    likes_data.append({
+                        'user_id': like.user.user_id,
+                        'f_name': like.user.f_name,
+                        'l_name': like.user.l_name,
+                        'profile_pic': build_profile_pic_url(like.user),
+                    })
+
+                # Get comments for the post
+                comments = Comment.objects.filter(post=post).select_related('user').order_by('-date_created')
+                comments_data = []
+                for comment in comments:
+                    comments_data.append({
+                        'comment_id': comment.comment_id,
+                        'comment_content': comment.comment_content,
+                        'date_created': comment.date_created.isoformat(),
+                        'user': {
+                            'user_id': comment.user.user_id,
+                            'f_name': comment.user.f_name,
+                            'l_name': comment.user.l_name,
+                            'profile_pic': build_profile_pic_url(comment.user),
+                        }
+                    })
+
+                posts_data.append({
+                    'post_id': post.post_id,
+                    'post_title': post.post_title,
+                    'post_content': post.post_content,
+                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                    'type': post.type,
+                    'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                    'likes_count': likes_count,
+                    'comments_count': comments_count,
+                    'reposts_count': reposts_count,
+                    'likes': likes_data,
+                    'reposts': reposts_data,
+                    'comments': comments_data,
+                    'user': {
+                        'user_id': post.user.user_id,
+                        'f_name': post.user.f_name,
+                        'l_name': post.user.l_name,
+                        'profile_pic': build_profile_pic_url(post.user),
+                    },
+                    'category': {
+                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
+                        'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
+                        'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
+                        'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
+                        'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
+                    }
+                })
+            except Exception:
+                continue
+
+        return JsonResponse({'posts': posts_data})
+    except Exception as e:
+        logger.error(f"posts_view failed: {e}")
+        return JsonResponse({'posts': []}, status=200)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def posts_by_user_type_view(request):
+    """Get posts filtered by user type (alumni, OJT, etc.)"""
+    try:
+        user_type = request.GET.get('user_type', 'all')
+
+        if user_type == 'alumni':
+            users = User.objects.filter(account_type__user=True)
+        elif user_type == 'ojt':
+            users = User.objects.filter(account_type__ojt=True)
+        elif user_type == 'coordinator':
+            users = User.objects.filter(account_type__coordinator=True)
+        else:
+            users = User.objects.all()
+
+        posts = Post.objects.filter(user__in=users).select_related('user', 'post_cat').order_by('-post_id')
+        posts_data = []
+
+        for post in posts:
+            try:
+                # Get likes count
+                likes_count = Like.objects.filter(post=post).count()
+                # Get comments count
+                comments_count = Comment.objects.filter(post=post).count()
+                # Get reposts count
+                reposts_count = Repost.objects.filter(post=post).count()
+
                 posts_data.append({
                     'post_id': post.post_id,
                     'post_title': post.post_title,
@@ -1733,7 +1800,7 @@ def posts_by_user_type_view(request):
                 })
             except Exception:
                 continue
-                
+
         return JsonResponse({'posts': posts_data})
     except Exception as e:
         logger.error(f"posts_by_user_type_view failed: {e}")
