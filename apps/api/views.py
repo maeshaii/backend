@@ -843,7 +843,7 @@ def ojt_statistics_view(request):
         })
 
     except Exception as e:
-        # Don’t fail the whole dashboard; return an empty set with a message
+        # Don't fail the whole dashboard; return an empty set with a message
         return JsonResponse({'success': True, 'years': [], 'total_records': 0, 'note': str(e)})
 
 # OJT data by year for coordinators
@@ -1715,7 +1715,63 @@ def posts_view(request):
             logger.error(f"Post creation failed: {e}")
             return JsonResponse({'error': str(e)}, status=500)
 
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def posts_view(request):
+    """Get all posts or create a new post"""
     try:
+        if request.method == "POST":
+            data = json.loads(request.body or "{}")
+            post_title = data.get('post_title') or ''
+            post_content = data.get('post_content') or ''
+            post_cat_id = data.get('post_cat_id')
+            post_type = data.get('type') or 'personal'
+
+            if not post_content.strip() and not post_title.strip():
+                return JsonResponse({'success': False, 'message': 'post_content or post_title is required'}, status=400)
+
+            # Resolve category if provided
+            post_cat = None
+            if post_cat_id is not None:
+                try:
+                    post_cat = PostCategory.objects.get(post_cat_id=int(post_cat_id))
+                except Exception:
+                    post_cat = None
+
+            new_post = Post.objects.create(
+                user=request.user,
+                post_title=post_title,
+                post_content=post_content,
+                post_cat=post_cat,
+                type=post_type,
+            )
+
+            return JsonResponse({
+                'success': True,
+                'post': {
+                    'post_id': new_post.post_id,
+                    'post_title': new_post.post_title,
+                    'post_content': new_post.post_content,
+                    'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),
+                    'type': new_post.type,
+                    'created_at': new_post.created_at.isoformat() if hasattr(new_post, 'created_at') else None,
+                    'user': {
+                        'user_id': request.user.user_id,
+                        'f_name': request.user.f_name,
+                        'l_name': request.user.l_name,
+                        'profile_pic': build_profile_pic_url(request.user),
+                    },
+                    'category': {
+                        'post_cat_id': post_cat.post_cat_id if post_cat else None,
+                        'events': getattr(post_cat, 'events', False) if post_cat else False,
+                        'announcements': getattr(post_cat, 'announcements', False) if post_cat else False,
+                        'donation': getattr(post_cat, 'donation', False) if post_cat else False,
+                        'personal': getattr(post_cat, 'personal', False) if post_cat else False,
+                    }
+                }
+            }, status=201)
+
+        # Existing GET behavior
         # Get all posts ordered by most recent
         posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         posts_data = []

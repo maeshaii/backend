@@ -70,33 +70,32 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000').split(',')
 CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
 
-# Force CORS to work in development - more robust than just DEBUG check
-ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
-if ENVIRONMENT == 'development' or DEBUG or os.getenv('CORS_ALLOW_ALL_ORIGINS', 'True').lower() == 'true':
-    CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOW_CREDENTIALS = True
-    # Additional CORS headers for development
-    CORS_ALLOW_HEADERS = [
-        'accept',
-        'accept-encoding',
-        'authorization',
-        'content-type',
-        'dnt',
-        'origin',
-        'user-agent',
-        'x-csrftoken',
-        'x-requested-with',
-    ]
-    CORS_ALLOW_METHODS = [
-        'DELETE',
-        'GET',
-        'OPTIONS',
-        'PATCH',
-        'POST',
-        'PUT',
-    ]
-else:
-    CORS_ALLOW_ALL_ORIGINS = False
+# Do not use wildcard '*' when credentials are included. Prefer specific origins and regex for ngrok.
+CORS_ALLOW_ALL_ORIGINS = False
+
+# Allow typical headers/methods during development
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Permit any ngrok-free.app subdomain over https
+CORS_ALLOWED_ORIGIN_REGEXES = [r'^https://[a-z0-9-]+\.ngrok-free\.app$']
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
@@ -108,7 +107,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://192.168.254.135:8000",
 
     "http://192.168.1.5:8000",
-
+    "https://*.ngrok-free.app",
 ]
 ROOT_URLCONF = 'backend.urls'
 
@@ -136,7 +135,8 @@ WSGI_APPLICATION = 'backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
-        'NAME': os.getenv('DB_NAME', 'db'),
+
+        'NAME': os.getenv('DB_NAME', 'capstones'),
         'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
         'HOST': os.getenv('DB_HOST', 'localhost'),
