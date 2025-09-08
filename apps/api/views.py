@@ -1651,10 +1651,70 @@ def check_follow_status_view(request, user_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["GET"])
+import base64
+import uuid
+from django.core.files.base import ContentFile
+
+@api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def posts_view(request):
     """Get all posts - main posts endpoint"""
+    if request.method == "POST":
+        try:
+            # Handle post creation
+            user = request.user
+            post_title = request.data.get('post_title', '')
+            post_content = request.data.get('post_content', '')
+            post_type = request.data.get('type', 'post')
+            category_id = request.data.get('category_id')
+
+            # Get or create default category
+            if category_id:
+                try:
+                    category = PostCategory.objects.get(post_cat_id=category_id)
+                except PostCategory.DoesNotExist:
+                    category = ensure_default_post_categories()
+            else:
+                category = ensure_default_post_categories()
+
+            # Create the post
+            post = Post.objects.create(
+                user=user,
+                post_title=post_title,
+                post_content=post_content,
+                type=post_type,
+                post_cat=category
+            )
+
+            # Handle image upload if present (check both FILES and data)
+            image_url = None
+            if hasattr(request, 'FILES') and 'post_image' in request.FILES:
+                post.post_image = request.FILES['post_image']
+                post.save()
+                image_url = post.post_image.url if post.post_image else None
+            elif 'post_image' in request.data and request.data['post_image']:
+                # Handle base64 image data
+                post_image_data = request.data['post_image']
+                # Expected format: "data:image/<ext>;base64,<data>"
+                if post_image_data.startswith('data:image'):
+                    format, imgstr = post_image_data.split(';base64,')
+                    ext = format.split('/')[-1]
+                    img_data = base64.b64decode(imgstr)
+                    file_name = f"{uuid.uuid4()}.{ext}"
+                    post.post_image.save(file_name, ContentFile(img_data), save=True)
+                    image_url = post.post_image.url if post.post_image else None
+
+            return JsonResponse({
+                'success': True,
+                'message': 'Post created successfully',
+                'post_id': post.post_id,
+                'post_image': image_url
+            }, status=201)
+
+        except Exception as e:
+            logger.error(f"Post creation failed: {e}")
+            return JsonResponse({'error': str(e)}, status=500)
+
     try:
         # Get all posts ordered by most recent
         posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')

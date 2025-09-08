@@ -227,12 +227,29 @@ class PostCategory(models.Model):
     donation = models.BooleanField()
     personal = models.BooleanField()
 
+class PostImage(models.Model):
+    """Multiple images attached to a post"""
+    post_image_id = models.AutoField(primary_key=True)
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='post_images/', null=False, blank=False)
+    image_order = models.PositiveIntegerField(default=0)  # For ordering images
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['image_order', 'created_at']
+        indexes = [
+            models.Index(fields=['post', 'image_order']),
+        ]
+
+    def __str__(self):
+        return f"Image for Post {self.post.post_id} (Order: {self.image_order})"
+
 class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
     post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='posts')
     post_title = models.CharField(max_length=255)
-    post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)
+    post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
