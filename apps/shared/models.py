@@ -227,22 +227,15 @@ class PostCategory(models.Model):
     donation = models.BooleanField()
     personal = models.BooleanField()
 
-class PostImage(models.Model):
-    """Multiple images attached to a post"""
+# NOTE: The legacy PostImage table 'shared_postimage' does not exist in this database.
+# To prevent ORM from attempting to access/delete from a missing table during Post deletes,
+# we disable the PostImage model by renaming it (no relation registered) and not managing it.
+class PostImageDisabled(models.Model):
     post_image_id = models.AutoField(primary_key=True)
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='post_images/', null=False, blank=False)
-    image_order = models.PositiveIntegerField(default=0)  # For ordering images
-    created_at = models.DateTimeField(auto_now_add=True)
+    image = models.ImageField(upload_to='post_images/', null=True, blank=True)
 
     class Meta:
-        ordering = ['image_order', 'created_at']
-        indexes = [
-            models.Index(fields=['post', 'image_order']),
-        ]
-
-    def __str__(self):
-        return f"Image for Post {self.post.post_id} (Order: {self.image_order})"
+        managed = False  # do not touch the database
 
 class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
