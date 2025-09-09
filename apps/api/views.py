@@ -459,8 +459,17 @@ def send_reminder_view(request):
     if not (emails or user_ids) or not message:
         return JsonResponse({'success': False, 'message': 'Missing users or message'}, status=400)
     sent = 0
-    # Send by user_ids if provided, else by emails
-    users = list(User.objects.filter(user_id__in=user_ids)) if user_ids else list(User.objects.filter(email__in=emails))
+    # Resolve recipients: prefer user_ids; if emails provided, match via related profile.email
+    if user_ids:
+        users = list(User.objects.filter(user_id__in=user_ids))
+    elif emails:
+        # Many deployments store email on UserProfile, not User
+        try:
+            users = list(User.objects.filter(profile__email__in=emails).select_related('profile'))
+        except Exception:
+            users = list(User.objects.none())
+    else:
+        users = []
     tracker_form_base_url = "https://yourdomain.com/tracker/fill"  # Change to your actual domain/path
     for user in users:
         try:
@@ -489,13 +498,23 @@ def notifications_view(request):
         user = User.objects.get(user_id=user_id)
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
-    # Alumni: show all notifications; OJT: filter out tracker notifications
-    if hasattr(user.account_type, 'user') and user.account_type.user:
-        notifications = Notification.objects.filter(user_id=user_id).order_by('-notif_date')
-    elif hasattr(user.account_type, 'ojt') and user.account_type.ojt:
-        notifications = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').order_by('-notif_date')
+    # Role-based filtering:
+    # - Admin: receive like/comment/repost + tracker submission notifications (hide tracker reminders to admin)
+    # - Alumni/OJT/PESO: receive tracker reminders + thank you + like/comment/repost (hide admin-only tracker submissions)
+    if getattr(user.account_type, 'admin', False):
+        notifications = (
+            Notification.objects
+            .filter(user_id=user_id)
+            .exclude(notif_type__iexact='CCICT')  # exclude tracker reminder/thank-you format if not needed
+            .order_by('-notif_date')
+        )
     else:
-        notifications = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').order_by('-notif_date')
+        notifications = (
+            Notification.objects
+            .filter(user_id=user_id)
+            .exclude(notif_type__iexact='tracker_submission')
+            .order_by('-notif_date')
+        )
     notif_list = []
     import re
     for n in notifications:
@@ -569,6 +588,13 @@ def users_list_view(request):
                     'name': f"{u.f_name} {u.l_name}",
                     'profile_pic': build_profile_pic_url(u),
                     'batch': getattr(u.academic_info, 'year_graduated', None),
+                    'account_type': {
+                        'admin': u.account_type.admin,
+                        'peso': u.account_type.peso,
+                        'user': u.account_type.user,
+                        'coordinator': u.account_type.coordinator,
+                        'ojt': u.account_type.ojt,
+                    },
                 })
             except Exception:
                 continue
@@ -1183,8 +1209,8 @@ def post_edit_view(request, post_id):
         post = Post.objects.get(post_id=post_id)
         user = request.user
 
-        # Check if user owns the post
-        if post.user.user_id != user.user_id:
+        # Allow if owner or admin
+        if post.user.user_id != user.user_id and not getattr(user.account_type, 'admin', False):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
 
         if request.method == "PUT":
@@ -1201,8 +1227,33 @@ def post_edit_view(request, post_id):
             return JsonResponse({'success': True, 'message': 'Post updated'})
 
         elif request.method == "DELETE":
-            post.delete()
-            return JsonResponse({'success': True, 'message': 'Post deleted'})
+            try:
+                # Best-effort cleanup of associated uploaded files before deletion
+                try:
+                    if getattr(post, 'post_image', None):
+                        try:
+                            post.post_image.delete(save=False)
+                        except Exception:
+                            pass
+                    try:
+                        images_rel = getattr(post, 'images', None)
+                        if images_rel is not None:
+                            for img in list(images_rel.all()):
+                                try:
+                                    if getattr(img, 'image', None):
+                                        img.image.delete(save=False)
+                                except Exception:
+                                    pass
+                            images_rel.all().delete()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                post.delete()
+                return JsonResponse({'success': True, 'message': 'Post deleted'})
+            except Exception as e:
+                logger.error(f"post_edit_view DELETE failed for post_id={post_id}: {e}")
+                return JsonResponse({'success': False, 'message': 'Delete failed', 'error': str(e)}, status=500)
 
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
@@ -1304,12 +1355,37 @@ def post_delete_view(request, post_id):
         post = Post.objects.get(post_id=post_id)
         user = request.user
 
-        # Check if user owns the post
-        if post.user.user_id != user.user_id:
+        # Allow deletion if user owns the post OR user is admin
+        if post.user.user_id != user.user_id and not getattr(user.account_type, 'admin', False):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
 
-        post.delete()
-        return JsonResponse({'success': True, 'message': 'Post deleted'})
+        try:
+            # Best-effort cleanup of associated uploaded files before deletion
+            try:
+                if getattr(post, 'post_image', None):
+                    try:
+                        post.post_image.delete(save=False)
+                    except Exception:
+                        pass
+                try:
+                    images_rel = getattr(post, 'images', None)
+                    if images_rel is not None:
+                        for img in list(images_rel.all()):
+                            try:
+                                if getattr(img, 'image', None):
+                                    img.image.delete(save=False)
+                            except Exception:
+                                pass
+                        images_rel.all().delete()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            post.delete()
+            return JsonResponse({'success': True, 'message': 'Post deleted'})
+        except Exception as e:
+            logger.error(f"post_delete_view failed for post_id={post_id}: {e}")
+            return JsonResponse({'success': False, 'message': 'Delete failed', 'error': str(e)}, status=500)
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
     except Exception as e:
@@ -1716,8 +1792,23 @@ def posts_view(request):
             return JsonResponse({'error': str(e)}, status=500)
 
     try:
-        # Get all posts ordered by most recent
-        posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
+        # Get posts based on user type
+        user = request.user
+        if user.account_type.admin or user.account_type.coordinator or user.account_type.peso:
+            # Admin, coordinator, peso see all posts
+            posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
+        elif user.account_type.user or user.account_type.ojt:
+            # Alumni and OJT see posts from followed users and PESO/admin posts automatically
+            from apps.shared.models import Follow
+            followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
+            posts = Post.objects.filter(
+                Q(user__in=followed_users) |
+                Q(user__account_type__peso=True) |
+                Q(user__account_type__admin=True)
+            ).select_related('user', 'post_cat').order_by('-post_id')
+        else:
+            # Fallback to all posts
+            posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         posts_data = []
 
         for post in posts:
