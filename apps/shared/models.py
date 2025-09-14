@@ -634,6 +634,8 @@ class TrackerData(models.Model):
     q_company_name = models.CharField(max_length=255, null=True, blank=True)
     q_current_position = models.CharField(max_length=255, null=True, blank=True)
     q_job_sector = models.CharField(max_length=50, null=True, blank=True)
+    q_sector_current = models.CharField(max_length=50, null=True, blank=True)  # Public/Private
+    q_scope_current = models.CharField(max_length=50, null=True, blank=True)   # Local/International
     q_employment_duration = models.CharField(max_length=100, null=True, blank=True)
     q_salary_range = models.CharField(max_length=100, null=True, blank=True)
     q_awards_received = models.CharField(max_length=10, null=True, blank=True)
@@ -666,7 +668,6 @@ class OJTInfo(models.Model):
     ojt_end_date = models.DateField(null=True, blank=True)
     job_code = models.CharField(max_length=20, null=True, blank=True)
     ojtstatus = models.CharField(max_length=50, null=True, blank=True)
-    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -811,38 +812,40 @@ class TrackerResponse(models.Model):
                     tracker.q_current_position = str(answer) if answer else tracker.q_current_position
                     if answer:
                         employment.position_current = str(answer)
-                elif question_id == 27:
-                    tracker.q_job_sector = str(answer) if answer else tracker.q_job_sector
+                elif question_id == 27:  # Current Sector of your Job (Public/Private)
+                    tracker.q_sector_current = str(answer) if answer else tracker.q_sector_current
                     if answer:
                         employment.sector_current = str(answer)
-                elif question_id == 28:
+                elif question_id == 28:  # How long have you been employed?
                     tracker.q_employment_duration = str(answer) if answer else tracker.q_employment_duration
                     if answer:
                         employment.employment_duration_current = str(answer)
-                elif question_id == 29:
+                elif question_id == 38:  # Employment Sector (Local/International)
+                    tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
+                elif question_id == 30:  # Current Salary range (was 29)
                     tracker.q_salary_range = str(answer) if answer else tracker.q_salary_range
                     if answer:
                         employment.salary_current = str(answer)
-                elif question_id == 30:
+                elif question_id == 31:  # Have you received any awards... (was 30)
                     tracker.q_awards_received = str(answer) if answer else tracker.q_awards_received
 
-                # 31 and 32 are file uploads; skipped above
+                # 32 and 33 are file uploads; skipped above
 
                 # Part 4: Unemployment & Further Study
-                elif question_id == 33:
+                elif question_id == 34:  # Reason for unemployment (was 33)
                     if isinstance(answer, list):
                         tracker.q_unemployment_reason = answer
                     else:
                         tracker.q_unemployment_reason = [answer] if answer else []
-                elif question_id == 34:
+                elif question_id == 35:  # Date Started (was 34)
                     sd = parse_date_value(answer)
                     if sd:
                         academic.q_study_start_date = sd
-                elif question_id == 35:
+                elif question_id == 36:  # Post graduate degree (was 35)
                     academic.q_post_graduate_degree = str(answer) if answer else academic.q_post_graduate_degree
-                elif question_id == 36:
+                elif question_id == 37:  # Institution name (was 36)
                     academic.q_institution_name = str(answer) if answer else academic.q_institution_name
-                elif question_id == 37:
+                elif question_id == 38:  # Units obtained (was 37)
                     academic.q_units_obtained = str(answer) if answer else academic.q_units_obtained
 
             except Exception:

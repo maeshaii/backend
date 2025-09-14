@@ -62,10 +62,32 @@ def get_field_from_question_map(user, question_text_map, field, *question_labels
         for qtext, answer in question_text_map.items():
             if label in qtext:
                 return answer
-    # Special handling for birthdate to avoid 'None' string
-    if field == 'birthdate':
-        val = getattr(user, field, None)
-        return str(val) if val else ''
+    
+    # Handle fields that are in the User model
+    user_fields = ['f_name', 'm_name', 'l_name', 'gender', 'user_status', 'acc_username']
+    if field in user_fields:
+        return getattr(user, field, '')
+    
+    # Handle fields that are in the UserProfile model
+    profile_fields = ['birthdate', 'phone_num', 'address', 'email', 'civil_status', 'age', 'social_media']
+    if field in profile_fields:
+        if hasattr(user, 'profile') and user.profile:
+            val = getattr(user.profile, field, None)
+            # Special handling for birthdate to avoid 'None' string
+            if field == 'birthdate':
+                return str(val) if val else ''
+            return val if val is not None else ''
+        return ''
+    
+    # Handle fields that are in the AcademicInfo model
+    academic_fields = ['course', 'year_graduated', 'program']
+    if field in academic_fields:
+        if hasattr(user, 'academic_info') and user.academic_info:
+            val = getattr(user.academic_info, field, None)
+            return val if val is not None else ''
+        return ''
+    
+    # Fallback to direct user attribute access
     return getattr(user, field, '')
 
 @api_view(["GET"])

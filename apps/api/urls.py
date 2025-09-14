@@ -28,8 +28,10 @@ from .views import *
 urlpatterns = [
     path('csrf/', views.get_csrf_token, name='get_csrf_token'),
     path('login/', views.login_view, name='login_view'),
+    path('forgot-password/', views.forgot_password_view, name='forgot_password'),
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('change-password/', views.change_password_view, name='change_password'),
     # Alumni import/export (keep single implementation)
     path('alumni/statistics/', views.alumni_statistics_view, name='alumni_statistics'),
     path('alumni/list/', views.alumni_list_view, name='alumni_list'),

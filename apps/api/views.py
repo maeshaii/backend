@@ -188,6 +188,14 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         if not user.check_password(acc_password):
             raise serializers.ValidationError('Invalid credentials')
         refresh = RefreshToken.for_user(user)
+        # Determine if the user must change password on first login
+        must_change_password = False
+        try:
+            initial = getattr(user, 'initial_password', None)
+            if initial and getattr(initial, 'is_active', False):
+                must_change_password = True
+        except Exception:
+            must_change_password = False
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
         data = {
@@ -206,12 +214,80 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
                     'coordinator': user.account_type.coordinator,
                     'ojt': user.account_type.ojt,
                 }
-            }
+            },
+            'must_change_password': must_change_password,
         }
         return data
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+
+# ---- Password management ----
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+
+@api_view(["POST"]) 
+@permission_classes([IsAuthenticated])
+def change_password_view(request):
+    """Allow authenticated users to change their password securely.
+
+    Request JSON: { "old_password": str, "new_password": str }
+    Returns: { success: bool, message: str }
+    Also deactivates any active UserInitialPassword record.
+    """
+    try:
+        data = json.loads(request.body or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'success': False, 'message': 'Invalid JSON'}, status=400)
+
+    old_password = (data.get('old_password') or '').strip()
+    new_password = (data.get('new_password') or '').strip()
+
+    if not old_password or not new_password:
+        return JsonResponse({'success': False, 'message': 'Both old and new passwords are required.'}, status=400)
+
+    user = get_current_user_from_request(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    if not user.check_password(old_password):
+        return JsonResponse({'success': False, 'message': 'Old password is incorrect.'}, status=400)
+
+    # Enforce strong password via Django validators and custom rules
+    try:
+        validate_password(new_password)
+        # Additional custom rules (at least 10 chars, one upper, one lower, one digit, one symbol)
+        import re
+        if len(new_password) < 10:
+            raise DjangoValidationError('Password must be at least 10 characters long.')
+        if not re.search(r"[A-Z]", new_password):
+            raise DjangoValidationError('Password must contain an uppercase letter.')
+        if not re.search(r"[a-z]", new_password):
+            raise DjangoValidationError('Password must contain a lowercase letter.')
+        if not re.search(r"\d", new_password):
+            raise DjangoValidationError('Password must contain a number.')
+        if not re.search(r"[^A-Za-z0-9]", new_password):
+            raise DjangoValidationError('Password must contain a symbol.')
+    except DjangoValidationError as e:
+        message = '; '.join([str(m) for m in (e.messages if hasattr(e, 'messages') else [str(e)])])
+        return JsonResponse({'success': False, 'message': message}, status=400)
+
+    # Save new password
+    user.set_password(new_password)
+    user.save(update_fields=['acc_password', 'updated_at'])
+
+    # Deactivate initial password record if present
+    try:
+        initial = getattr(user, 'initial_password', None)
+        if initial:
+            initial.is_active = False
+            initial.save(update_fields=['is_active'])
+    except Exception:
+        pass
+
+    return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -289,7 +365,7 @@ def import_alumni_view(request):
                 ctu_id = str(row['CTU_ID']).strip()
                 first_name = str(row['First_Name']).strip()
                 middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
-                last_name = str(row['Last_Name']).strip()
+                last_name = str(row.get('Last_Nam', row.get('Last_Name', ''))).strip()
                 gender = str(row['Gender']).strip().upper()
                 password_raw = str(row.get('Password', '')).strip()
                 birthdate_val = row.get('Birthdate') if 'Birthdate' in df.columns else None
@@ -994,6 +1070,7 @@ def delete_resume(request):
 
 @api_view(['PUT'])
 @parser_classes([MultiPartParser])
+@permission_classes([IsAuthenticated])
 def update_alumni_profile(request):
     user_id = request.GET.get('user_id')
     if not user_id:
@@ -1050,6 +1127,7 @@ def search_alumni(request):
 
 
 @api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
 def delete_alumni_profile_pic(request):
     user_id = request.GET.get('user_id')
     if not user_id:
@@ -2078,3 +2156,104 @@ def get_all_alumni(request):
     except Exception as e:
         logger.error(f"get_all_alumni failed: {e}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(["POST"])
+def forgot_password_view(request):
+    """
+    Forgot password endpoint - validates user credentials and generates temporary password.
+    Only available for alumni (user=True) and OJT (ojt=True) account types.
+    """
+    if request.method == "OPTIONS":
+        response = JsonResponse({'detail': 'OK'})
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
+        return response
+
+    try:
+        data = json.loads(request.body)
+        ctu_id = data.get('ctu_id', '').strip()
+        email = data.get('email', '').strip()
+        last_name = data.get('last_name', '').strip()
+        first_name = data.get('first_name', '').strip()
+        middle_name = data.get('middle_name', '').strip()
+
+        # Validate required fields
+        if not all([ctu_id, email, last_name, first_name]):
+            return JsonResponse({
+                'success': False, 
+                'message': 'All fields are required: CTU ID, Email, Last Name, First Name'
+            }, status=400)
+
+        # Find user by CTU ID
+        try:
+            user = User.objects.select_related('profile', 'account_type').get(acc_username=ctu_id)
+        except User.DoesNotExist:
+            logger.warning(f"Forgot password failed: CTU ID {ctu_id} does not exist.")
+            return JsonResponse({
+                'success': False, 
+                'message': 'Invalid credentials. Please check your information and try again.'
+            }, status=404)
+
+        # Check if user is alumni or OJT (not admin, peso, or coordinator)
+        if not (user.account_type.user or user.account_type.ojt):
+            logger.warning(f"Forgot password denied: User {ctu_id} is not alumni or OJT.")
+            return JsonResponse({
+                'success': False, 
+                'message': 'Password reset is only available for alumni and OJT students.'
+            }, status=403)
+
+        # Validate credentials against user data
+        profile = getattr(user, 'profile', None)
+        user_email = getattr(profile, 'email', None) if profile else None
+        
+        # Case-insensitive comparison for names and email
+        # Check middle name if provided, otherwise allow empty middle name
+        middle_name_match = True
+        if middle_name:  # If middle name is provided, it must match
+            user_middle_name = user.m_name or ''
+            middle_name_match = user_middle_name.lower() == middle_name.lower()
+        
+        if (user.f_name.lower() != first_name.lower() or 
+            user.l_name.lower() != last_name.lower() or
+            not middle_name_match or
+            (user_email and user_email.lower() != email.lower())):
+            logger.warning(f"Forgot password failed: Credential mismatch for user {ctu_id}.")
+            return JsonResponse({
+                'success': False, 
+                'message': 'Invalid credentials. Please check your information and try again.'
+            }, status=400)
+
+        # Generate temporary password
+        alphabet = string.ascii_letters + string.digits
+        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        
+        # Update user password
+        user.set_password(temp_password)
+        user.save()
+        
+        # Store temporary password for tracking
+        try:
+            initial_password, created = UserInitialPassword.objects.get_or_create(user=user)
+            initial_password.set_plaintext(temp_password)
+            initial_password.is_active = True
+            initial_password.save()
+        except Exception as e:
+            logger.error(f"Failed to store initial password for user {ctu_id}: {e}")
+            # Continue anyway - password was already updated
+
+        logger.info(f"Temporary password generated for user {ctu_id} ({user.full_name})")
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Temporary password generated successfully',
+            'temp_password': temp_password,
+            'user_name': user.full_name
+        })
+
+    except json.JSONDecodeError:
+        logger.error("Forgot password failed: Invalid JSON in request body.")
+        return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
+    except Exception as e:
+        logger.error(f"Forgot password failed: Unexpected error: {e}")
+        return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
