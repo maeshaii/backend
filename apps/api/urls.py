@@ -1,7 +1,7 @@
 from django.urls import path, include
 from . import views
 from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view
+from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view
 from apps.tracker.views import (
     tracker_questions_view,
     tracker_responses_view,
@@ -43,6 +43,9 @@ urlpatterns = [
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
+    path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
+    path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
+    path('ojt/status/', ojt_status_update_view, name='ojt_status_update'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
     
