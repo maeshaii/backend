@@ -665,6 +665,7 @@ class TrackerData(models.Model):
 class OJTInfo(models.Model):
     """On-the-job training and internship information"""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='ojt_info')
+    ojt_start_date = models.DateField(null=True, blank=True)
     ojt_end_date = models.DateField(null=True, blank=True)
     job_code = models.CharField(max_length=20, null=True, blank=True)
     ojtstatus = models.CharField(max_length=50, null=True, blank=True)
@@ -675,6 +676,7 @@ class OJTInfo(models.Model):
         indexes = [
             models.Index(fields=['ojtstatus']),
             models.Index(fields=['ojt_end_date']),
+            models.Index(fields=['ojt_start_date']),
         ]
     
     def __str__(self):

@@ -45,6 +45,7 @@ from django.db.models.functions import Concat, Coalesce
 from rest_framework.decorators import api_view
 import tempfile
 from django.http import FileResponse
+from django.db import transaction
 
 # --- Helpers for Posts ---
 def ensure_default_post_categories():
@@ -360,6 +361,14 @@ def import_alumni_view(request):
         errors = []
         exported_passwords = []  # List to collect (username, password) for export
         
+        # Ensure an OJT account type exists; create if missing to avoid failures on fresh DBs
+        try:
+            ojt_account_type, _ = AccountType.objects.get_or_create(
+                ojt=True, admin=False, peso=False, user=False, coordinator=False
+            )
+        except Exception:
+            ojt_account_type = None
+
         for index, row in df.iterrows():
             try:
                 ctu_id = str(row['CTU_ID']).strip()
@@ -727,6 +736,23 @@ def import_ojt_view(request):
         except Exception as e:
             return JsonResponse({'success': False, 'message': f'Error reading Excel file: {str(e)}'}, status=400)
 
+        # Normalize flexible header names for common variants
+        try:
+            df.rename(columns={
+                'Company Name': 'Company',
+                'company name': 'Company',
+                'company': 'Company',
+                'company_name': 'Company',
+                'OJT_Start_Date': 'Ojt_Start_Date',
+                'OJT_End_Date': 'Ojt_End_Date',
+                'ojt_start_date': 'Ojt_Start_Date',
+                'ojt_end_date': 'Ojt_End_Date',
+                'Civil Status': 'Civil_Status',
+                'Social Media': 'Social_Media',
+            }, inplace=True)
+        except Exception:
+            pass
+
         # OJT-specific required columns: keep Birthdate; Password is optional and can be generated
         required_columns = ['CTU_ID', 'First_Name', 'Last_Name', 'Gender']
         optional_columns = ['Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil_Status', 'Social_Media']
@@ -739,9 +765,17 @@ def import_ojt_view(request):
         # OJT_Company and OJT_Position are now optional
 
         # Create import record
+        # Normalize batch_year to a single 4-digit year if possible
+        try:
+            import re
+            match = re.search(r"(20\d{2})", str(batch_year))
+            normalized_year = int(match.group(1)) if match else int(str(batch_year).strip())
+        except Exception:
+            normalized_year = batch_year
+
         import_record = OJTImport.objects.create(
             coordinator=coordinator_username,
-            batch_year=batch_year,
+            batch_year=normalized_year,
             course=course,
             file_name=file.name
         )
@@ -750,6 +784,19 @@ def import_ojt_view(request):
         skipped_count = 0
         errors = []
         exported_passwords = []  # List to collect (username, password) for export
+        total_rows = int(getattr(df, 'shape', [0])[0] or 0)
+
+        # Ensure OJT account type exists for new OJT users
+        try:
+            ojt_account_type, _ = AccountType.objects.get_or_create(
+                admin=False,
+                peso=False,
+                user=False,
+                coordinator=False,
+                ojt=True,
+            )
+        except Exception:
+            ojt_account_type = None
 
         for index, row in df.iterrows():
             print(f"--- Processing Row {index+2} ---")
@@ -820,13 +867,77 @@ def import_ojt_view(request):
                     skipped_count += 1
                     continue
 
-                # Check if OJT record already exists
-                if User.objects.filter(acc_username=ctu_id).exists():
-                    error_msg = f"Row {index + 2}: CTU ID {ctu_id} already exists in OJT data"
-                    print(f"SKIPPING: {error_msg}")
-                    errors.append(error_msg)
-                    skipped_count += 1
-                    continue
+                # If a user with this CTU_ID already exists, update academic year/course
+                existing_user = User.objects.filter(acc_username=ctu_id).first()
+                if existing_user:
+                    try:
+                        # Ensure related models exist
+                        from apps.shared.models import UserProfile, AcademicInfo, OJTInfo, EmploymentHistory
+                        profile, _ = UserProfile.objects.get_or_create(user=existing_user)
+                        academic, _ = AcademicInfo.objects.get_or_create(user=existing_user)
+                        ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
+                        employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
+
+                        # Update names to match latest import where present
+                        if first_name:
+                            existing_user.f_name = first_name
+                        if middle_name:
+                            existing_user.m_name = middle_name
+                        if last_name:
+                            existing_user.l_name = last_name
+                        if gender:
+                            existing_user.gender = gender
+                        existing_user.save()
+
+                        # Update academic info from batch and course
+                        # Save normalized batch year
+                        try:
+                            academic.year_graduated = int(normalized_year)
+                        except Exception:
+                            pass
+                        if course:
+                            academic.course = course
+                        academic.save()
+
+                        # Update profile birthdate if present
+                        if pd.notna(row.get('Birthdate')):
+                            try:
+                                bd = pd.to_datetime(row.get('Birthdate'), errors='coerce').date()
+                                if bd:
+                                    profile.birthdate = bd
+                            except Exception:
+                                pass
+                        profile.save()
+
+                        # Update employment company and start date from spreadsheet
+                        company_name = (
+                            row.get('Company Name')
+                            or row.get('Company')
+                            or row.get('Company name current')
+                        )
+                        if pd.notna(company_name) and str(company_name).strip():
+                            employment.company_name_current = str(company_name).strip()
+                        if 'ojt_start_date' in locals() and ojt_start_date:
+                            employment.date_started = ojt_start_date
+                        employment.save()
+
+                        # Update OJT info (status, dates if parsed)
+                        ojt_info.ojtstatus = str(row.get('Status') or row.get('status') or '').strip() or ojt_info.ojtstatus
+                        # Start/End already parsed above if available
+                        if 'ojt_start_date' in locals() and ojt_start_date:
+                            # model has only end date field; keep for future extension
+                            pass
+                        if 'ojt_end_date' in locals() and ojt_end_date:
+                            ojt_info.ojt_end_date = ojt_end_date
+                        ojt_info.save()
+
+                        # Count as updated instead of skipped
+                        skipped_count += 0
+                        created_count += 0
+                        continue
+                    except Exception as _e:
+                        # Fall through to try creating a new one if update fails
+                        print(f"Row {index+2} - failed to update existing user {ctu_id}: {_e}")
 
                 # --- Create OJT user securely ---
                 ojt_user = User.objects.create(
@@ -836,7 +947,7 @@ def import_ojt_view(request):
                     m_name=middle_name,
                     l_name=last_name,
                     gender=gender,
-                    account_type=AccountType.objects.get(ojt=True, admin=False, peso=False, user=False, coordinator=False),
+                    account_type=ojt_account_type or AccountType.objects.get(ojt=True, admin=False, peso=False, user=False, coordinator=False),
                 )
                 ojt_user.set_password(password_raw)
                 ojt_user.save()
@@ -848,7 +959,7 @@ def import_ojt_view(request):
                     up.save()
                 except Exception:
                     pass
-                from apps.shared.models import UserProfile, AcademicInfo
+                from apps.shared.models import UserProfile, AcademicInfo, EmploymentHistory, OJTInfo
                 birthdate_val = row.get('Birthdate')
                 profile_kwargs = dict(
                     user=ojt_user,
@@ -866,11 +977,32 @@ def import_ojt_view(request):
                     if bd:
                         profile_kwargs['birthdate'] = bd
                 UserProfile.objects.create(**profile_kwargs)
+                # Employment: company name
+                company_name_new = (
+                    row.get('Company Name')
+                    or row.get('Company')
+                    or row.get('Company name current')
+                )
+                if pd.notna(company_name_new) and str(company_name_new).strip():
+                    EmploymentHistory.objects.create(
+                        user=ojt_user,
+                        company_name_current=str(company_name_new).strip(),
+                        date_started=ojt_start_date if 'ojt_start_date' in locals() else None,
+                    )
                 AcademicInfo.objects.create(
                     user=ojt_user,
-                    year_graduated=int(batch_year) if batch_year.isdigit() else None,
+                    year_graduated=int(normalized_year) if str(normalized_year).isdigit() else None,
                     course=course,
                 )
+                # Create OJT info
+                try:
+                    OJTInfo.objects.create(
+                        user=ojt_user,
+                        ojt_end_date=ojt_end_date,
+                        ojtstatus=str(row.get('Status') or row.get('status') or '').strip() or None,
+                    )
+                except Exception:
+                    pass
                 exported_passwords.append({
                     'CTU_ID': ctu_id,
                     'First_Name': first_name,
@@ -889,13 +1021,19 @@ def import_ojt_view(request):
                 continue
 
         # Update import record
-        import_record.records_imported = created_count
+        import_record.records_imported = total_rows
         if errors:
             import_record.status = 'Partial' if created_count > 0 else 'Failed'
         import_record.save()
 
         # Export passwords to Excel after import
         if exported_passwords:
+            # Ensure the import record reflects counts before any early return
+            import_record.records_imported = total_rows
+            if errors:
+                import_record.status = 'Partial' if created_count > 0 else 'Failed'
+            import_record.save()
+
             df_export = pd.DataFrame(exported_passwords)
             with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
                 df_export.to_excel(tmp.name, index=False)
@@ -921,31 +1059,38 @@ def import_ojt_view(request):
 def ojt_statistics_view(request):
     try:
         coordinator_username = request.GET.get('coordinator', '')
-        try:
-            # Fetch OJT users and include academic info; if the query itself fails, fall back to empty
-            ojt_data = User.objects.filter(account_type__ojt=True).select_related('academic_info')
-        except Exception:
-            ojt_data = User.objects.none()
 
-        years_data = {}
-        for ojt in ojt_data:
+        # Build cards from OJT users' academic years and also any years from OJTImport
+        users_qs = User.objects.filter(account_type__ojt=True).select_related('academic_info')
+        years_to_counts = {}
+        for u in users_qs:
             try:
-                year = getattr(ojt.academic_info, 'year_graduated', None)
-                years_data[year] = years_data.get(year, 0) + 1
+                year = getattr(u.academic_info, 'year_graduated', None)
+                if year is None:
+                    continue
+                years_to_counts[year] = years_to_counts.get(year, 0) + 1
             except Exception:
                 continue
 
-        years_list = [{'year': year, 'count': count} for year, count in years_data.items()]
+        # Also include any batch years that were imported, so a card appears immediately after import
+        try:
+            from apps.shared.models import OJTImport
+            for imp in OJTImport.objects.all():
+                y = getattr(imp, 'batch_year', None)
+                if y is None:
+                    continue
+                if y not in years_to_counts:
+                    # Show at least 1 so a card appears; clicking will query users by year
+                    years_to_counts[y] = max(int(getattr(imp, 'records_imported', 0) or 1), 1)
+        except Exception:
+            pass
+
+        years_list = [{'year': y, 'count': c} for y, c in years_to_counts.items()]
         years_list.sort(key=lambda x: (x['year'] is None, x['year'] or 0), reverse=True)
 
-        return JsonResponse({
-            'success': True,
-            'years': years_list,
-            'total_records': getattr(ojt_data, 'count', lambda: 0)()
-        })
+        return JsonResponse({'success': True, 'years': years_list, 'total_records': sum(years_to_counts.values())})
 
     except Exception as e:
-        # Don't fail the whole dashboard; return an empty set with a message
         return JsonResponse({'success': True, 'years': [], 'total_records': 0, 'note': str(e)})
 
 # OJT data by year for coordinators
@@ -959,17 +1104,53 @@ def ojt_by_year_view(request):
         if not year:
             return JsonResponse({'success': False, 'message': 'Year parameter is required'}, status=400)
 
+        # Be lenient: extract a 4-digit year from the string (e.g., "2025 ", "2025-2026")
+        try:
+            import re
+            match = re.search(r"(20\d{2})", str(year))
+            year_int = int(match.group(1)) if match else int(str(year).strip())
+        except Exception:
+            return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
+
+        # Include all users for the batch year so data shows even if they were not created as OJT type
         ojt_data = (
             User.objects
-            .filter(account_type__ojt=True, academic_info__year_graduated=year)
-            .select_related('profile', 'academic_info')
+            .filter(academic_info__year_graduated=year_int)
+            .select_related('profile', 'academic_info', 'ojt_info')
+            .order_by('l_name', 'f_name')
         )
+
+        # Fallbacks to avoid empty UI and help coordinators verify recent imports
+        if not ojt_data.exists():
+            # 1) Prefer recently created/updated users (likely the ones just imported)
+            try:
+                recent_since = timezone.now() - timezone.timedelta(days=1)
+                recent_users = (
+                    User.objects
+                    .filter(updated_at__gte=recent_since)
+                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .order_by('-updated_at', 'l_name', 'f_name')
+                )
+            except Exception:
+                recent_users = User.objects.none()
+
+            if recent_users.exists():
+                ojt_data = recent_users
+            else:
+                # 2) As a last resort, show all OJT-type users
+                ojt_data = (
+                    User.objects
+                    .filter(account_type__ojt=True)
+                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .order_by('l_name', 'f_name')
+                )
 
         ojt_list = []
         for ojt in ojt_data:
             ojt_list.append({
                 'id': ojt.user_id,
                 'ctu_id': ojt.acc_username,
+                'name': f"{ojt.f_name} {ojt.l_name}",
                 'first_name': ojt.f_name,
                 'middle_name': ojt.m_name,
                 'last_name': ojt.l_name,
@@ -981,8 +1162,10 @@ def ojt_by_year_view(request):
                 'civil_status': getattr(ojt.profile, 'civil_status', None),
                 'social_media': getattr(ojt.profile, 'social_media', None),
                 'course': getattr(ojt.academic_info, 'course', None),
+                'company': getattr(ojt.employment, 'company_name_current', None),
                 'ojt_start_date': None,
-                'ojt_end_date': None,
+                'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
+                'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
             })
 
@@ -991,6 +1174,83 @@ def ojt_by_year_view(request):
             'ojt_data': ojt_list
         })
 
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Clear OJT data for a specific batch year
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ojt_clear_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        year = data.get('batch_year')
+        if not year:
+            return JsonResponse({'success': False, 'message': 'batch_year is required'}, status=400)
+
+        try:
+            import re
+            match = re.search(r"(20\d{2})", str(year))
+            year_int = int(match.group(1)) if match else int(str(year).strip())
+        except Exception:
+            return JsonResponse({'success': False, 'message': 'Invalid batch_year'}, status=400)
+
+        # Delete AcademicInfo with that year and any OJTInfo for those users
+        from apps.shared.models import AcademicInfo, OJTInfo, OJTImport
+        with transaction.atomic():
+            users_qs = User.objects.filter(academic_info__year_graduated=year_int)
+            OJTInfo.objects.filter(user__in=users_qs).delete()
+            AcademicInfo.objects.filter(user__in=users_qs, year_graduated=year_int).delete()
+            # Remove import records for this batch so the card disappears
+            OJTImport.objects.filter(batch_year=year_int).delete()
+
+        return JsonResponse({'success': True, 'message': f'Cleared OJT data for batch {year_int}'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Update OJT status for a specific user
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ojt_status_update_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        user_id = data.get('user_id')
+        status_val = (data.get('status') or '').strip()
+        if not user_id or not status_val:
+            return JsonResponse({'success': False, 'message': 'user_id and status are required'}, status=400)
+        try:
+            user = User.objects.get(user_id=int(user_id))
+        except User.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
+        from apps.shared.models import OJTInfo
+        ojt_info, _ = OJTInfo.objects.get_or_create(user=user)
+        ojt_info.ojtstatus = status_val
+        ojt_info.save()
+        return JsonResponse({'success': True})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Clear ALL OJT-related data imported (OJT users, OJTInfo, OJTImport, and AcademicInfo for OJT users)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ojt_clear_all_view(request):
+    try:
+        from apps.shared.models import OJTImport, OJTInfo, AcademicInfo
+        with transaction.atomic():
+            # Identify OJT users
+            ojt_users = User.objects.filter(account_type__ojt=True)
+            # Delete OJTInfo for those users
+            OJTInfo.objects.filter(user__in=ojt_users).delete()
+            # Delete AcademicInfo for those users
+            AcademicInfo.objects.filter(user__in=ojt_users).delete()
+            # Optionally delete the users themselves or convert their account type
+            # Here, we delete OJT users completely for a clean re-import
+            ojt_users.delete()
+            # Remove import history to hide cards
+            OJTImport.objects.all().delete()
+        return JsonResponse({'success': True, 'message': 'All OJT data cleared successfully'})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
