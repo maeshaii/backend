@@ -92,6 +92,7 @@ urlpatterns = [
     path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
     path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
     path('post-categories/', views.post_categories_view, name='post_categories'),
+    path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
 ]
 

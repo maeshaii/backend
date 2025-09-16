@@ -1202,16 +1202,20 @@ def post_like_view(request, post_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["PUT", "DELETE"])
+@api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def post_edit_view(request, post_id):
     try:
         post = Post.objects.get(post_id=post_id)
         user = request.user
 
-        # Allow if owner or admin
+        # Allow only if owner or admin
         if post.user.user_id != user.user_id and not getattr(user.account_type, 'admin', False):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == "GET":
+            # Reuse the detailed serialization from post_detail_view
+            return post_detail_view(request, post_id)
 
         if request.method == "PUT":
             data = json.loads(request.body)
@@ -1228,37 +1232,35 @@ def post_edit_view(request, post_id):
 
         elif request.method == "DELETE":
             try:
-                # Best-effort cleanup of associated uploaded files before deletion
-                try:
-                    if getattr(post, 'post_image', None):
-                        try:
-                            post.post_image.delete(save=False)
-                        except Exception:
-                            pass
-                    try:
-                        images_rel = getattr(post, 'images', None)
-                        if images_rel is not None:
-                            for img in list(images_rel.all()):
-                                try:
-                                    if getattr(img, 'image', None):
-                                        img.image.delete(save=False)
-                                except Exception:
-                                    pass
-                            images_rel.all().delete()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                # Delete main post image if it exists
+                if getattr(post, 'post_image', None):
+                    post.post_image.delete(save=False)
+
+                # Delete related images if they exist
+                images_rel = getattr(post, 'images', None)
+                if images_rel is not None:
+                    for img in list(images_rel.all()):
+                        if getattr(img, 'image', None):
+                            img.image.delete(save=False)
+                    images_rel.all().delete()
+
+                # Finally delete the post itself
                 post.delete()
                 return JsonResponse({'success': True, 'message': 'Post deleted'})
+
             except Exception as e:
                 logger.error(f"post_edit_view DELETE failed for post_id={post_id}: {e}")
-                return JsonResponse({'success': False, 'message': 'Delete failed', 'error': str(e)}, status=500)
+                return JsonResponse(
+                    {'success': False, 'message': 'Delete failed', 'error': str(e)},
+                    status=500
+                )
 
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
+
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
 
 @api_view(["PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
@@ -1361,35 +1363,39 @@ def post_delete_view(request, post_id):
 
         try:
             # Best-effort cleanup of associated uploaded files before deletion
-            try:
-                if getattr(post, 'post_image', None):
-                    try:
-                        post.post_image.delete(save=False)
-                    except Exception:
-                        pass
+            if getattr(post, 'post_image', None):
                 try:
-                    images_rel = getattr(post, 'images', None)
-                    if images_rel is not None:
-                        for img in list(images_rel.all()):
-                            try:
-                                if getattr(img, 'image', None):
-                                    img.image.delete(save=False)
-                            except Exception:
-                                pass
-                        images_rel.all().delete()
+                    post.post_image.delete(save=False)
                 except Exception:
                     pass
-            except Exception:
-                pass
+
+            images_rel = getattr(post, 'images', None)
+            if images_rel is not None:
+                for img in list(images_rel.all()):
+                    try:
+                        if getattr(img, 'image', None):
+                            img.image.delete(save=False)
+                    except Exception:
+                        pass
+                images_rel.all().delete()
+
+            # Finally delete the post itself
             post.delete()
             return JsonResponse({'success': True, 'message': 'Post deleted'})
+
         except Exception as e:
             logger.error(f"post_delete_view failed for post_id={post_id}: {e}")
-            return JsonResponse({'success': False, 'message': 'Delete failed', 'error': str(e)}, status=500)
+            return JsonResponse(
+                {'success': False, 'message': 'Delete failed', 'error': str(e)},
+                status=500
+            )
+
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
+
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -1731,65 +1737,6 @@ import base64
 import uuid
 from django.core.files.base import ContentFile
 
-@api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
-def posts_view(request):
-    """Get all posts - main posts endpoint"""
-    if request.method == "POST":
-        try:
-            # Handle post creation
-            user = request.user
-            post_title = request.data.get('post_title', '')
-            post_content = request.data.get('post_content', '')
-            post_type = request.data.get('type', 'post')
-            category_id = request.data.get('category_id')
-
-            # Get or create default category
-            if category_id:
-                try:
-                    category = PostCategory.objects.get(post_cat_id=category_id)
-                except PostCategory.DoesNotExist:
-                    category = ensure_default_post_categories()
-            else:
-                category = ensure_default_post_categories()
-
-            # Create the post
-            post = Post.objects.create(
-                user=user,
-                post_title=post_title,
-                post_content=post_content,
-                type=post_type,
-                post_cat=category
-            )
-
-            # Handle image upload if present (check both FILES and data)
-            image_url = None
-            if hasattr(request, 'FILES') and 'post_image' in request.FILES:
-                post.post_image = request.FILES['post_image']
-                post.save()
-                image_url = post.post_image.url if post.post_image else None
-            elif 'post_image' in request.data and request.data['post_image']:
-                # Handle base64 image data
-                post_image_data = request.data['post_image']
-                # Expected format: "data:image/<ext>;base64,<data>"
-                if post_image_data.startswith('data:image'):
-                    format, imgstr = post_image_data.split(';base64,')
-                    ext = format.split('/')[-1]
-                    img_data = base64.b64decode(imgstr)
-                    file_name = f"{uuid.uuid4()}.{ext}"
-                    post.post_image.save(file_name, ContentFile(img_data), save=True)
-                    image_url = post.post_image.url if post.post_image else None
-
-            return JsonResponse({
-                'success': True,
-                'message': 'Post created successfully',
-                'post_id': post.post_id,
-                'post_image': image_url
-            }, status=201)
-
-        except Exception as e:
-            logger.error(f"Post creation failed: {e}")
-            return JsonResponse({'error': str(e)}, status=500)
 
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
@@ -1808,7 +1755,8 @@ def posts_view(request):
             posts = Post.objects.filter(
                 Q(user__in=followed_users) |
                 Q(user__account_type__peso=True) |
-                Q(user__account_type__admin=True)
+                Q(user__account_type__admin=True) |
+                Q(user=user)
             ).select_related('user', 'post_cat').order_by('-post_id')
         else:
             # Fallback to all posts
@@ -1839,6 +1787,32 @@ def posts_view(request):
                 type=post_type,
             )
 
+            # --- DEBUG LOGGING FOR IMAGE UPLOAD ---
+            import sys
+            try:
+                if 'post_image' in data and data['post_image']:
+                    print('Received post_image in data', file=sys.stderr)
+                    post_image_data = data['post_image']
+                    if post_image_data.startswith('data:image'):
+                        try:
+                            format, imgstr = post_image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            import base64, uuid
+                            from django.core.files.base import ContentFile
+                            img_data = base64.b64decode(imgstr)
+                            file_name = f"{uuid.uuid4()}.{ext}"
+                            new_post.post_image.save(file_name, ContentFile(img_data), save=True)
+                            print(f'Saved image: {new_post.post_image.url}', file=sys.stderr)
+                        except Exception as img_exc:
+                            print(f'Error saving image: {img_exc}', file=sys.stderr)
+                    else:
+                        print('post_image does not start with data:image', file=sys.stderr)
+                else:
+                    print('No post_image in data', file=sys.stderr)
+            except Exception as e:
+                print(f'Exception in image handling: {e}', file=sys.stderr)
+            # --- END DEBUG LOGGING ---
+
             return JsonResponse({
                 'success': True,
                 'post': {
@@ -1864,9 +1838,7 @@ def posts_view(request):
                 }
             }, status=201)
 
-        # Existing GET behavior
-        # Get all posts ordered by most recent
-        posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
+        # Use the filtered posts from above (don't override with all posts)
         posts_data = []
 
         for post in posts:
@@ -2078,3 +2050,45 @@ def get_all_alumni(request):
     except Exception as e:
         logger.error(f"get_all_alumni failed: {e}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_posts_view(request, user_id):
+    """Get all posts for a specific user, including like, comment, and repost counts."""
+    try:
+        posts = Post.objects.filter(user__user_id=user_id).select_related('user', 'post_cat').order_by('-post_id')
+        posts_data = []
+        for post in posts:
+            try:
+                likes_count = Like.objects.filter(post=post).count()
+                comments_count = Comment.objects.filter(post=post).count()
+                reposts_count = Repost.objects.filter(post=post).count()
+                posts_data.append({
+                    'post_id': post.post_id,
+                    'post_title': post.post_title,
+                    'post_content': post.post_content,
+                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                    'type': post.type,
+                    'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                    'likes_count': likes_count,
+                    'comments_count': comments_count,
+                    'reposts_count': reposts_count,
+                    'user': {
+                        'user_id': post.user.user_id,
+                        'f_name': post.user.f_name,
+                        'l_name': post.user.l_name,
+                        'profile_pic': build_profile_pic_url(post.user),
+                    },
+                    'category': {
+                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
+                        'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
+                        'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
+                        'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
+                        'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
+                    }
+                })
+            except Exception:
+                continue
+        return JsonResponse({'posts': posts_data})
+    except Exception as e:
+        return JsonResponse({'posts': [], 'error': str(e)}, status=500)
