@@ -149,6 +149,7 @@ def import_alumni_excel(request):
                     'First_Name': 'f_name',
                     'Middle_Name': 'm_name',
                     'Last_Name': 'l_name',
+                    'Last_Nam': 'l_name',  # Handle truncated column name
                     'Gender': 'gender',
                 }
                 
@@ -156,6 +157,7 @@ def import_alumni_excel(request):
                 profile_field_map = {
                     'Phone_Number': 'phone_num',
                     'Address': 'address',
+                    'Birthdate': 'birthdate',
                     'Social Media Acc Link': 'social_media',
                     'Civil Status': 'civil_status',
                 }
@@ -192,8 +194,18 @@ def import_alumni_excel(request):
                     for excel_col, model_field in profile_field_map.items():
                         excel_value = row.get(excel_col)
                         if excel_value and (not hasattr(profile, model_field) or not getattr(profile, model_field) or getattr(profile, model_field) == ''):
-                            setattr(profile, model_field, excel_value)
-                            profile_updated = True
+                            # Special handling for birthdate - convert string to date
+                            if model_field == 'birthdate' and excel_value:
+                                try:
+                                    bd = pd.to_datetime(excel_value, errors='coerce').date()
+                                    if bd:
+                                        setattr(profile, model_field, bd)
+                                        profile_updated = True
+                                except Exception as e:
+                                    print(f"DEBUG: Error parsing birthdate for {ctu_id}: {e}")
+                            else:
+                                setattr(profile, model_field, excel_value)
+                                profile_updated = True
                     if profile_updated:
                         profile.save()
                     
@@ -256,7 +268,16 @@ def import_alumni_excel(request):
                     for excel_col, model_field in profile_field_map.items():
                         excel_value = row.get(excel_col)
                         if excel_value:
-                            profile_data[model_field] = excel_value
+                            # Special handling for birthdate - convert string to date
+                            if model_field == 'birthdate':
+                                try:
+                                    bd = pd.to_datetime(excel_value, errors='coerce').date()
+                                    if bd:
+                                        profile_data[model_field] = bd
+                                except Exception as e:
+                                    print(f"DEBUG: Error parsing birthdate for {ctu_id}: {e}")
+                            else:
+                                profile_data[model_field] = excel_value
                     if profile_data:
                         UserProfile.objects.create(user=user, **profile_data)
                     
@@ -370,6 +391,7 @@ def import_exported_alumni_excel(request):
                     'First_Name': 'f_name',
                     'Middle_Name': 'm_name',
                     'Last_Name': 'l_name',
+                    'Last_Nam': 'l_name',  # Handle truncated column name
                     'Gender': 'gender',
                     'Phone_Number': 'phone_num',
                     'Address': 'address',
