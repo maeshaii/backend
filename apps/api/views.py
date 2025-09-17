@@ -1369,19 +1369,24 @@ def search_alumni(request):
     if not query:
         return JsonResponse({'results': []})
     # Search by first, middle, or last name (case-insensitive)
-    alumni = User.objects.filter(
+    users = User.objects.filter(
         Q(f_name__icontains=query) |
         Q(m_name__icontains=query) |
         Q(l_name__icontains=query),
-        account_type__user=True
+        Q(account_type__user=True) | Q(account_type__admin=True) | Q(account_type__peso=True)
     )[:10]
     results = [
         {
-            'id': a.user_id,
-            'name': f"{a.f_name} {a.l_name}",
-            'profile_pic': a.profile.profile_pic.url if hasattr(a, 'profile') and a.profile and a.profile.profile_pic else None
+            'id': u.user_id,
+            'name': f"{u.f_name} {u.l_name}",
+            'profile_pic': u.profile.profile_pic.url if hasattr(u, 'profile') and u.profile and u.profile.profile_pic else None,
+            'account_type': {
+                'user': getattr(u.account_type, 'user', False),
+                'admin': getattr(u.account_type, 'admin', False),
+                'peso': getattr(u.account_type, 'peso', False),
+            }
         }
-        for a in alumni
+        for u in users
     ]
     return JsonResponse({'results': results})
 
@@ -1606,26 +1611,26 @@ def comment_edit_view(request, post_id, comment_id):
     try:
         comment = Comment.objects.get(comment_id=comment_id)
         user = request.user
-
-        # Check if user owns the comment
-        if comment.user.user_id != user.user_id:
+        post = comment.post
+        # Allow if user owns the comment, or user owns the post, or user is admin
+        if not (
+            comment.user.user_id == user.user_id or
+            post.user.user_id == user.user_id or
+            getattr(user.account_type, 'admin', False)
+        ):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
-
         if request.method == "PUT":
             data = json.loads(request.body)
             comment_content = data.get('comment_content')
-
             if comment_content is not None:
                 comment.comment_content = comment_content
                 comment.save()
                 return JsonResponse({'success': True, 'message': 'Comment updated'})
             else:
                 return JsonResponse({'error': 'No content provided'}, status=400)
-
         elif request.method == "DELETE":
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
-
     except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
     except Exception as e:
@@ -2081,23 +2086,21 @@ from django.core.files.base import ContentFile
 def posts_view(request):
     """Get all posts or create a new post"""
     try:
-        # Get posts based on user type
         user = request.user
-        if user.account_type.admin or user.account_type.coordinator or user.account_type.peso:
-            # Admin, coordinator, peso see all posts
+        from apps.shared.models import Follow, User as SharedUser
+        if user.account_type.admin or user.account_type.peso:
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         elif user.account_type.user or user.account_type.ojt:
-            # Alumni and OJT see posts from followed users and PESO/admin posts automatically
-            from apps.shared.models import Follow
             followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
+            admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
+            peso_users = SharedUser.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
             posts = Post.objects.filter(
                 Q(user__in=followed_users) |
-                Q(user__account_type__peso=True) |
-                Q(user__account_type__admin=True) |
+                Q(user__in=admin_users) |
+                Q(user__in=peso_users) |
                 Q(user=user)
             ).select_related('user', 'post_cat').order_by('-post_id')
         else:
-            # Fallback to all posts
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")

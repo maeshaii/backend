@@ -6,7 +6,6 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0044_post_created_at'),
         ('shared', '0044_post_created_at_postimage'),
     ]
 
