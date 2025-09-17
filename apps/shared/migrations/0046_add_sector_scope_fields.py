@@ -30,7 +30,7 @@ class Migration(migrations.Migration):
             name='q_sector_current',
             field=models.CharField(blank=True, max_length=50, null=True),
         ),
-        # migrations.DeleteModel(
-        #     name='PostImage',
-        # ),
+        migrations.DeleteModel(
+            name='PostImage',
+        ),
     ]

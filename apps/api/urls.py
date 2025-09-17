@@ -99,14 +99,5 @@ urlpatterns = [
     path('post-categories/', views.post_categories_view, name='post_categories'),
     # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
-    # Forum API endpoints (separate storage)
-    path('forum/', views.forum_list_create_view, name='forum_list_create'),
-    path('forum/<int:forum_id>/', views.forum_detail_edit_view, name='forum_detail'),
-    path('forum/<int:forum_id>/like/', views.forum_like_view, name='forum_like'),
-    path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
-    path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
-    path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
-    path('forum-reposts/<int:repost_id>/', views.forum_repost_delete_view, name='forum_repost_delete'),
-    
 ]
 

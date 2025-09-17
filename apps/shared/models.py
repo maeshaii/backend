@@ -64,14 +64,12 @@ class Feed(models.Model):
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='feeds')
 
 class Forum(models.Model):
-    """Forum posts stored separately from shared_post (identical structure)."""
+    """Forum entries linking users, posts, comments, and likes."""
     forum_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
-    post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='forums', null=True, blank=True)
-    image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
-    content = models.TextField()
-    type = models.CharField(max_length=50, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='forums')
+    comment = models.ForeignKey('Comment', on_delete=models.SET_NULL, null=True, related_name='forums')
+    like = models.ForeignKey('Like', on_delete=models.SET_NULL, null=True, related_name='forums')
 
 class HighPosition(models.Model):
     """High position statistics for AACUP and tracker forms."""
@@ -243,6 +241,7 @@ class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
     post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='posts')
+    post_title = models.CharField(max_length=255)
     post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
@@ -894,37 +893,3 @@ class TrackerFileUpload(models.Model):
     
     def __str__(self):
         return f"{self.original_filename} - {self.response.user.f_name} {self.response.user.l_name}"
-
-# ==========================
-# Forum-specific relations (separate tables)
-# ==========================
-
-class ForumComment(models.Model):
-    forum_comment_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='comments')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_comments')
-    comment_content = models.TextField(null=True, blank=True)
-    date_created = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'shared_forumcomment'
-
-
-class ForumLike(models.Model):
-    forum_like_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='likes')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_likes')
-
-    class Meta:
-        unique_together = ('forum', 'user')
-        db_table = 'shared_forumlike'
-
-
-class ForumRepost(models.Model):
-    forum_repost_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='reposts')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_reposts')
-    repost_date = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'shared_forumrepost'

@@ -6,8 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        # The original parent '0044_post_created_at' does not exist.
-        # Depend only on the valid head to fix migration graph.
+        ('shared', '0044_post_created_at'),
         ('shared', '0044_post_created_at_postimage'),
     ]
 

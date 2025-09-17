@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0044_post_created_at_postimage'),
+        ('shared', '0044_post_created_at'),
     ]
 
     operations = [
