@@ -53,6 +53,10 @@ urlpatterns = [
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
     path('ojt/status/', ojt_status_update_view, name='ojt_status_update'),
+    path('ojt/send-to-admin/', send_completed_to_admin_view, name='ojt_send_to_admin'),
+    path('ojt/coordinator-requests/', coordinator_requests_count_view, name='ojt_coordinator_requests'),
+    path('ojt/coordinator-requests/list/', coordinator_requests_list_view, name='ojt_coordinator_requests_list'),
+    path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
     
@@ -109,7 +113,7 @@ urlpatterns = [
     path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
     path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
     path('post-categories/', views.post_categories_view, name='post_categories'),
-    path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
+    # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
     # Used by Mobile: Forum API endpoints (separate storage)
     path('forum/', views.forum_list_create_view, name='forum_list_create'),

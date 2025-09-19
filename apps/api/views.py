@@ -1256,6 +1256,189 @@ def ojt_clear_all_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+
+# Coordinator requests: send completed list to admin (no-op storage, returns counts)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_completed_to_admin_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        year = data.get('year')
+        user_ids = data.get('user_ids') or []
+
+        # Compute how many completed for the given year if provided; otherwise all
+        users_qs = User.objects.all().select_related('academic_info', 'ojt_info')
+        year_int = None
+        if year is not None and str(year).strip() != '':
+            try:
+                import re
+                match = re.search(r"(20\d{2})", str(year))
+                year_int = int(match.group(1)) if match else int(str(year).strip())
+            except Exception:
+                year_int = None
+        if year_int is not None:
+            users_qs = users_qs.filter(academic_info__year_graduated=year_int)
+
+        if user_ids:
+            users_qs = users_qs.filter(user_id__in=[int(x) for x in user_ids])
+
+        completed_count = users_qs.filter(ojt_info__ojtstatus='Completed').count()
+
+        # Mark this batch as requested by coordinator so admin sees 1 per batch
+        try:
+            from apps.shared.models import OJTImport
+            coord_name = getattr(getattr(request, 'user', None), 'acc_username', None) or getattr(getattr(request, 'user', None), 'username', '') or ''
+            # Upsert by batch_year; status becomes 'Requested'
+            # Fallback: if year_int is None, attempt to infer from first matching user
+            if year_int is None:
+                first_user = users_qs.first()
+                if first_user and getattr(first_user, 'academic_info', None):
+                    year_int = getattr(first_user.academic_info, 'year_graduated', None)
+            if year_int is None:
+                # As a last resort, avoid creating invalid rows
+                return JsonResponse({'success': True, 'completed_count': completed_count, 'note': 'No batch year provided'}, status=200)
+
+            obj, created = OJTImport.objects.get_or_create(batch_year=year_int, defaults={
+                'coordinator': coord_name,
+                'course': '',
+                'file_name': 'send_to_admin',
+                'records_imported': completed_count,
+                'status': 'Requested',
+            })
+            if not created:
+                obj.coordinator = coord_name or obj.coordinator
+                obj.status = 'Requested'
+                obj.records_imported = completed_count
+                obj.save()
+        except Exception:
+            pass
+
+        return JsonResponse({'success': True, 'completed_count': completed_count})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Coordinator requests count for admin dashboard
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def coordinator_requests_count_view(request):
+    try:
+        year = request.GET.get('year')
+        # Count distinct batches requested by coordinators
+        from apps.shared.models import OJTImport
+        qs = OJTImport.objects.filter(status='Requested')
+        if year is not None and str(year).strip() != '':
+            try:
+                import re
+                match = re.search(r"(20\d{2})", str(year))
+                year_int = int(match.group(1)) if match else int(str(year).strip())
+                qs = qs.filter(batch_year=year_int)
+            except Exception:
+                pass
+        requested_years = set(qs.values_list('batch_year', flat=True).distinct())
+
+        # Fallback: also include any batches that currently have at least one Completed student
+        try:
+            users_qs = User.objects.filter(ojt_info__ojtstatus='Completed').select_related('academic_info')
+            if year is not None and str(year).strip() != '':
+                try:
+                    users_qs = users_qs.filter(academic_info__year_graduated=year_int)
+                except Exception:
+                    pass
+            completed_years = set(users_qs.values_list('academic_info__year_graduated', flat=True).distinct())
+            requested_years = requested_years.union({y for y in completed_years if y is not None})
+        except Exception:
+            pass
+
+        count_val = len({y for y in requested_years if y is not None})
+        return JsonResponse({'success': True, 'count': count_val})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# List requested batches with simple counts
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def coordinator_requests_list_view(request):
+    try:
+        from apps.shared.models import OJTImport
+        items = []
+        # Base: group Requested imports by year and take max count to avoid duplicates
+        try:
+            from django.db.models import Max, Value as V
+            from django.db.models.functions import Coalesce
+            grouped = (
+                OJTImport.objects.filter(status='Requested')
+                .values('batch_year')
+                .annotate(count=Coalesce(Max('records_imported'), V(0)))
+                .order_by('-batch_year')
+            )
+            for row in grouped:
+                items.append({'batch_year': row.get('batch_year'), 'count': row.get('count', 0) or 0})
+        except Exception:
+            # Fallback: if aggregation not available, compute max per year in Python
+            by_year = {}
+            for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
+                year = getattr(imp, 'batch_year', None)
+                count_val = getattr(imp, 'records_imported', 0) or 0
+                if year is None:
+                    continue
+                by_year[year] = max(by_year.get(year, 0), count_val)
+            for y, c in by_year.items():
+                items.append({'batch_year': y, 'count': c})
+
+        # Fallback: for any batch lacking a Requested import but has Completed users
+        try:
+            completed_years = (
+                User.objects.filter(ojt_info__ojtstatus='Completed')
+                .values('academic_info__year_graduated')
+                .annotate()
+            )
+            existing_years = {it['batch_year'] for it in items if it.get('batch_year') is not None}
+            for row in completed_years:
+                y = row.get('academic_info__year_graduated')
+                if y and y not in existing_years:
+                    count = User.objects.filter(academic_info__year_graduated=y, ojt_info__ojtstatus='Completed').count()
+                    items.append({'batch_year': y, 'count': count})
+        except Exception:
+            pass
+
+        # Sort newest first and ensure unique years
+        dedup = {}
+        for it in items:
+            y = it.get('batch_year')
+            if y is None:
+                continue
+            dedup[y] = max(dedup.get(y, 0), int(it.get('count') or 0))
+        items = [{'batch_year': y, 'count': c} for y, c in dedup.items()]
+        items.sort(key=lambda x: int(x['batch_year']), reverse=True)
+        return JsonResponse({'success': True, 'items': items})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Admin approves a coordinator request for a given batch year
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_coordinator_request_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        year = data.get('year')
+        if year is None:
+            return JsonResponse({'success': False, 'message': 'Missing year'}, status=400)
+
+        from apps.shared.models import OJTImport
+        # Normalize year to int if possible
+        try:
+            year_int = int(str(year))
+        except Exception:
+            return JsonResponse({'success': False, 'message': 'Invalid year'}, status=400)
+
+        updated = OJTImport.objects.filter(batch_year=year_int, status='Requested').update(status='Approved')
+        return JsonResponse({'success': True, 'approved': updated, 'year': year_int})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
 @api_view(["GET","PUT"])
 @permission_classes([IsAuthenticated])
 def profile_bio_view(request, user_id):
@@ -1371,19 +1554,24 @@ def search_alumni(request):
     if not query:
         return JsonResponse({'results': []})
     # Search by first, middle, or last name (case-insensitive)
-    alumni = User.objects.filter(
+    users = User.objects.filter(
         Q(f_name__icontains=query) |
         Q(m_name__icontains=query) |
         Q(l_name__icontains=query),
-        account_type__user=True
+        Q(account_type__user=True) | Q(account_type__admin=True) | Q(account_type__peso=True)
     )[:10]
     results = [
         {
-            'id': a.user_id,
-            'name': f"{a.f_name} {a.l_name}",
-            'profile_pic': a.profile.profile_pic.url if hasattr(a, 'profile') and a.profile and a.profile.profile_pic else None
+            'id': u.user_id,
+            'name': f"{u.f_name} {u.l_name}",
+            'profile_pic': u.profile.profile_pic.url if hasattr(u, 'profile') and u.profile and u.profile.profile_pic else None,
+            'account_type': {
+                'user': getattr(u.account_type, 'user', False),
+                'admin': getattr(u.account_type, 'admin', False),
+                'peso': getattr(u.account_type, 'peso', False),
+            }
         }
-        for a in alumni
+        for u in users
     ]
     return JsonResponse({'results': results})
 
@@ -1805,26 +1993,26 @@ def comment_edit_view(request, post_id, comment_id):
     try:
         comment = Comment.objects.get(comment_id=comment_id)
         user = request.user
-
-        # Check if user owns the comment
-        if comment.user.user_id != user.user_id:
+        post = comment.post
+        # Allow if user owns the comment, or user owns the post, or user is admin
+        if not (
+            comment.user.user_id == user.user_id or
+            post.user.user_id == user.user_id or
+            getattr(user.account_type, 'admin', False)
+        ):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
-
         if request.method == "PUT":
             data = json.loads(request.body)
             comment_content = data.get('comment_content')
-
             if comment_content is not None:
                 comment.comment_content = comment_content
                 comment.save()
                 return JsonResponse({'success': True, 'message': 'Comment updated'})
             else:
                 return JsonResponse({'error': 'No content provided'}, status=400)
-
         elif request.method == "DELETE":
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
-
     except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
     except Exception as e:
@@ -2607,23 +2795,21 @@ from django.core.files.base import ContentFile
 def posts_view(request):
     """Used by Mobile – GET list posts, POST create post."""
     try:
-        # Get posts based on user type
         user = request.user
-        if user.account_type.admin or user.account_type.coordinator or user.account_type.peso:
-            # Admin, coordinator, peso see all posts
+        from apps.shared.models import Follow, User as SharedUser
+        if user.account_type.admin or user.account_type.peso:
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         elif user.account_type.user or user.account_type.ojt:
-            # Alumni and OJT see posts from followed users and PESO/admin posts automatically
-            from apps.shared.models import Follow
             followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
+            admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
+            peso_users = SharedUser.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
             posts = Post.objects.filter(
                 Q(user__in=followed_users) |
-                Q(user__account_type__peso=True) |
-                Q(user__account_type__admin=True) |
+                Q(user__in=admin_users) |
+                Q(user__in=peso_users) |
                 Q(user=user)
             ).select_related('user', 'post_cat').order_by('-post_id')
         else:
-            # Fallback to all posts
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")

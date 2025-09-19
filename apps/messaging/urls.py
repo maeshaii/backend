@@ -16,4 +16,7 @@ urlpatterns = [
     
     # Statistics
     path('stats/', views.messaging_stats, name='messaging-stats'),
+    
+    # Attachments
+    path('attachments/', views.AttachmentUploadView.as_view(), name='attachment-upload'),
 ]
