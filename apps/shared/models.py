@@ -71,7 +71,7 @@ class Forum(models.Model):
     image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
     content = models.TextField(null=True, blank=True)
     type = models.CharField(max_length=50, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
 
 class HighPosition(models.Model):
     """High position statistics for AACUP and tracker forms."""
@@ -169,7 +169,9 @@ class Message(models.Model):
         related_name='messages', null=True, blank=True
     )
     sender = models.ForeignKey('User', on_delete=models.CASCADE, related_name='sent_messages')
-    content = models.TextField(default="", blank=True)  # ✅ fixed
+    # Some existing databases have a non-null receiver_id column. Reflect it here and populate on create.
+    receiver = models.ForeignKey('User', on_delete=models.CASCADE, related_name='received_messages', null=True, blank=True)
+    content = models.TextField(db_column='message_content', default="", blank=True)
     message_type = models.CharField(max_length=20, choices=MESSAGE_TYPES, default='text')
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -193,7 +195,7 @@ class Message(models.Model):
 
 class MessageAttachment(models.Model):
     attachment_id = models.AutoField(primary_key=True)
-    message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments')
+    message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments', null=True, blank=True)
     file = models.FileField(upload_to='message_attachments/%Y/%m/%d/')
     file_name = models.CharField(max_length=255)
     file_type = models.CharField(max_length=50)

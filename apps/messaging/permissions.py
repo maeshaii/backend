@@ -10,8 +10,9 @@ class IsAlumniOrOJT(BasePermission):
             return False
         account_type = user.account_type
         return bool(
-            getattr(account_type, 'alumni', False)
+            getattr(account_type, 'user', False)
             or getattr(account_type, 'ojt', False)
             or getattr(account_type, 'admin', False)
             or getattr(account_type, 'peso', False)
+            or getattr(account_type, 'coordinator', False)
         )

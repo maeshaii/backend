@@ -9,6 +9,9 @@ from django.db.models import Q
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+import logging
 from apps.shared.models import Conversation, Message, MessageAttachment, User
 from apps.shared.serializers import (
 	ConversationSerializer,
@@ -19,6 +22,8 @@ from apps.shared.serializers import (
 from .permissions import IsAlumniOrOJT
 import os
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationListView(generics.ListCreateAPIView):
@@ -58,8 +63,8 @@ class MessageListView(generics.ListCreateAPIView):
 			try:
 				cursor_msg = Message.objects.get(message_id=int(cursor), conversation=conversation)
 				qs = qs.filter(
-					models.Q(created_at__lt=cursor_msg.created_at) |
-					models.Q(created_at=cursor_msg.created_at, message_id__lt=cursor_msg.message_id)
+					Q(created_at__lt=cursor_msg.created_at) |
+					Q(created_at=cursor_msg.created_at, message_id__lt=cursor_msg.message_id)
 				)
 			except Exception:
 				pass
@@ -84,27 +89,84 @@ class MessageListView(generics.ListCreateAPIView):
 			return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
 		serializer = self.get_serializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
-		message = serializer.save(conversation=conversation, sender=request.user)
+		# Determine receiver for 1:1 conversations to satisfy legacy non-null column
+		receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
+		# Ensure legacy DB columns are populated (e.g., date_send)
+		message = serializer.save(
+			conversation=conversation,
+			sender=request.user,
+			receiver=receiver,
+			created_at=timezone.now(),
+		)
+		# Link uploaded attachment if provided
+		try:
+			attachment_id = request.data.get('attachment_id')
+			if attachment_id:
+				attachment = get_object_or_404(MessageAttachment, attachment_id=int(attachment_id))
+				attachment.message = message
+				attachment.save()
+		except Exception:
+			pass
+		# Ensure legacy column date_send is populated for existing schema
+		try:
+			from django.db import connection
+			with connection.cursor() as cursor:
+				# Backfill legacy date_send if DB still missing it (older schema)
+				cursor.execute(
+					"UPDATE shared_message SET date_send = NOW() WHERE message_id = %s AND (date_send IS NULL)",
+					[message.message_id],
+				)
+				# Backfill legacy 'content' column to mirror message_content for older schemas
+				cursor.execute(
+					"UPDATE shared_message SET content = %s WHERE message_id = %s AND (content IS NULL)",
+					[message.content, message.message_id],
+				)
+		except Exception:
+			pass
+
+		# Broadcast the new message to websocket listeners
+		try:
+			channel_layer = get_channel_layer()
+			async_to_sync(channel_layer.group_send)(
+				f"chat_{conversation.conversation_id}",
+				{
+					'type': 'chat_message',
+					'message_id': message.message_id,
+					'content': message.content,
+					'sender_id': request.user.user_id,
+					'sender_name': getattr(request.user, 'full_name', ''),
+					'message_type': message.message_type,
+					'created_at': message.created_at.isoformat(),
+					'timestamp': timezone.now().isoformat(),
+				},
+			)
+		except Exception:
+			pass
 		conversation.save()
-		response_serializer = MessageSerializer(message)
+		response_serializer = MessageSerializer(message, context={'request': request})
 		return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 	def list(self, request, *args, **kwargs):
 		queryset = self.get_queryset()
-		serializer = MessageSerializer(queryset, many=True)
+		serializer = MessageSerializer(queryset, many=True, context={'request': request})
 
 		# Compute next_cursor (older messages still exist?)
 		conversation_id = self.kwargs['conversation_id']
 		conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
 		next_cursor = None
-		if queryset:
-			last = queryset[-1]
-			remaining = Message.objects.filter(conversation=conversation).filter(
-				models.Q(created_at__lt=last.created_at) |
-				models.Q(created_at=last.created_at, message_id__lt=last.message_id)
-			).exists()
-			if remaining:
-				next_cursor = last.message_id
+		# Determine if more older messages remain using the last item on this page
+		try:
+			page_items = list(queryset)
+			if page_items:
+				last = page_items[-1]
+				remaining = Message.objects.filter(conversation=conversation).filter(
+					Q(created_at__lt=last.created_at) |
+					Q(created_at=last.created_at, message_id__lt=last.message_id)
+				).exists()
+				if remaining:
+					next_cursor = last.message_id
+		except Exception:
+			next_cursor = None
 
 		return Response({
 			'results': serializer.data[::-1],  # return ascending for UI
@@ -134,7 +196,7 @@ def search_users(request):
 		Q(f_name__icontains=query) |
 		Q(l_name__icontains=query) |
 		Q(acc_username__icontains=query),
-		Q(account_type__alumni=True) | Q(account_type__ojt=True),
+		Q(account_type__user=True) | Q(account_type__ojt=True),
 		user_status='active',
 	).exclude(user_id=request.user.user_id).distinct()[:10]
 	from apps.shared.serializers import UserSerializer
@@ -211,31 +273,23 @@ class AttachmentUploadView(APIView):
 			return Response({'error': 'File type not allowed'}, status=status.HTTP_400_BAD_REQUEST)
 
 		try:
-			# Generate unique filename
-			file_extension = os.path.splitext(file.name)[1]
-			unique_filename = f"{uuid.uuid4()}{file_extension}"
-			
-			# Save file
-			file_path = default_storage.save(f'message_attachments/{unique_filename}', file)
-			file_url = default_storage.url(file_path)
-
-			# Create attachment record
+			# Let FileField handle storage
 			attachment = MessageAttachment.objects.create(
-				file=file_path,
+				file=file,
 				file_name=file.name,
 				file_type=file.content_type,
 				file_size=file.size,
 			)
-
 			return Response({
 				'attachment_id': attachment.attachment_id,
 				'file_name': attachment.file_name,
 				'file_type': attachment.file_type,
 				'file_size': attachment.file_size,
-				'file_url': file_url,
+				'file_url': attachment.file.url if attachment.file else None,
 				'uploaded_at': attachment.uploaded_at.isoformat(),
 			}, status=status.HTTP_201_CREATED)
 
 		except Exception as e:
-			return Response({'error': f'Upload failed: {str(e)}'}, 
+			logger.exception("Attachment upload failed")
+			return Response({'error': 'Upload failed', 'detail': str(e), 'type': e.__class__.__name__}, 
 							status=status.HTTP_500_INTERNAL_SERVER_ERROR)
