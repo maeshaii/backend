@@ -69,7 +69,7 @@ class Forum(models.Model):
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
     post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='forums', null=True, blank=True)
     image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
-    content = models.TextField()
+    content = models.TextField(null=True, blank=True)
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
