@@ -121,6 +121,7 @@ def get_current_user_from_request(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def login_view(request):
+    """Used by Mobile (legacy) – mobile prefers POST /api/token/ for JWT."""
     """
     Authenticate a user using acc_username and acc_password. Returns user info and account type on success.
     """
@@ -172,6 +173,7 @@ def login_view(request):
         return JsonResponse({'success': False, 'message': 'Server error'}, status=500)
 
 class CustomTokenObtainPairSerializer(serializers.Serializer):
+    """Used by Mobile – issues JWT pair on /api/token/ for acc_username+acc_password."""
     acc_username = serializers.CharField()
     acc_password = serializers.CharField()
 
@@ -1465,17 +1467,27 @@ def post_detail_view(request, post_id):
             likes = Like.objects.filter(post=post).select_related('user')
             likes_data = []
             for like in likes:
+                # If profile_pic missing, send initials so client can render fallback
+                pic = build_profile_pic_url(like.user)
+                initials = None
+                if not pic:
+                    try:
+                        f = (like.user.f_name or '').strip()[:1].upper()
+                        l = (like.user.l_name or '').strip()[:1].upper()
+                        initials = f + l if (f or l) else None
+                    except Exception:
+                        initials = None
                 likes_data.append({
                     'like_id': like.like_id,
                     'user_id': like.user.user_id,
                     'f_name': like.user.f_name,
                     'l_name': like.user.l_name,
-                    'profile_pic': build_profile_pic_url(like.user),
+                    'profile_pic': pic,
+                    'initials': initials,
                 })
 
             post_data = {
                 'post_id': post.post_id,
-                'post_title': post.post_title,
                 'post_content': post.post_content,
                 'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                 'type': post.type,
@@ -1503,6 +1515,197 @@ def post_detail_view(request, post_id):
             return JsonResponse(post_data)
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
+
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def post_likes_view(request, post_id):
+    """Used by Mobile – list of users who liked a post.
+
+    Response shape mirrors likes data used in feeds and detail:
+      { likes: [ { user_id, f_name, l_name, profile_pic, initials? } ] }
+    """
+    try:
+        post = Post.objects.get(post_id=post_id)
+    except Post.DoesNotExist:
+        return JsonResponse({'error': 'Post not found'}, status=404)
+
+    likes = Like.objects.filter(post=post).select_related('user')
+    data = []
+    for l in likes:
+        pic = build_profile_pic_url(l.user)
+        initials = None
+        if not pic:
+            try:
+                f = (l.user.f_name or '').strip()[:1].upper()
+                s = (l.user.l_name or '').strip()[:1].upper()
+                initials = (f + s) if (f or s) else None
+            except Exception:
+                initials = None
+        data.append({
+            'user_id': l.user.user_id,
+            'f_name': l.user.f_name,
+            'l_name': l.user.l_name,
+            'profile_pic': pic,
+            'initials': initials,
+        })
+    return JsonResponse({'likes': data})
+
+
+# ==========================
+# Repost interactions (Used by Mobile)
+# ==========================
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def repost_detail_view(request, repost_id):
+    """Used by Mobile – return repost with its own likes/comments and original post summary."""
+    try:
+        repost = Repost.objects.select_related('post', 'user', 'post__user').get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+
+    likes = RepostLike.objects.filter(repost=repost).select_related('user')
+    comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+    data = {
+        'repost_id': repost.repost_id,
+        'caption': repost.caption,
+        'repost_date': repost.repost_date.isoformat() if repost.repost_date else None,
+        'user': {
+            'user_id': repost.user.user_id,
+            'f_name': repost.user.f_name,
+            'l_name': repost.user.l_name,
+            'profile_pic': build_profile_pic_url(repost.user),
+        },
+        'likes_count': likes.count(),
+        'comments_count': comments.count(),
+        'likes': [{
+            'user_id': l.user.user_id,
+            'f_name': l.user.f_name,
+            'l_name': l.user.l_name,
+            'profile_pic': build_profile_pic_url(l.user),
+        } for l in likes],
+        'comments': [{
+            'comment_id': c.repost_comment_id,
+            'comment_content': c.comment_content,
+            'date_created': c.date_created.isoformat() if c.date_created else None,
+            'user': {
+                'user_id': c.user.user_id,
+                'f_name': c.user.f_name,
+                'l_name': c.user.l_name,
+                'profile_pic': build_profile_pic_url(c.user),
+            }
+        } for c in comments],
+        'original': {
+            'post_id': repost.post.post_id,
+            'user': {
+                'user_id': repost.post.user.user_id,
+                'f_name': repost.post.user.f_name,
+                'l_name': repost.post.user.l_name,
+                'profile_pic': build_profile_pic_url(repost.post.user),
+            },
+            'post_title': getattr(repost.post, 'post_title', None),
+            'post_content': repost.post.post_content,
+            'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
+        }
+    }
+    return JsonResponse(data)
+
+
+@api_view(["POST", "DELETE"]) 
+@permission_classes([IsAuthenticated])
+def repost_like_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+
+    if request.method == 'POST':
+        like, created = RepostLike.objects.get_or_create(repost=repost, user=request.user)
+        if created:
+            return JsonResponse({'success': True})
+        return JsonResponse({'success': False, 'message': 'Already liked'})
+    else:
+        try:
+            like = RepostLike.objects.get(repost=repost, user=request.user)
+            like.delete()
+            return JsonResponse({'success': True})
+        except RepostLike.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'Not liked'})
+
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def repost_likes_list_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    likes = RepostLike.objects.filter(repost=repost).select_related('user')
+    return JsonResponse({'likes': [{
+        'user_id': l.user.user_id,
+        'f_name': l.user.f_name,
+        'l_name': l.user.l_name,
+        'profile_pic': build_profile_pic_url(l.user),
+    } for l in likes]})
+
+
+@api_view(["GET", "POST"]) 
+@permission_classes([IsAuthenticated])
+def repost_comments_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    if request.method == 'GET':
+        comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+        return JsonResponse({'comments': [{
+            'comment_id': c.repost_comment_id,
+            'comment_content': c.comment_content,
+            'date_created': c.date_created.isoformat() if c.date_created else None,
+            'user': {
+                'user_id': c.user.user_id,
+                'f_name': c.user.f_name,
+                'l_name': c.user.l_name,
+                'profile_pic': build_profile_pic_url(c.user),
+            }
+        } for c in comments]})
+    else:
+        try:
+            payload = json.loads(request.body or '{}')
+            content = (payload.get('comment_content') or '').strip()
+            if not content:
+                return JsonResponse({'error': 'content required'}, status=400)
+            c = RepostComment.objects.create(repost=repost, user=request.user, comment_content=content, date_created=timezone.now())
+            return JsonResponse({'success': True, 'comment_id': c.repost_comment_id})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+
+
+@api_view(["PUT", "DELETE"]) 
+@permission_classes([IsAuthenticated])
+def repost_comment_edit_view(request, repost_id, comment_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    try:
+        comment = RepostComment.objects.get(repost_comment_id=comment_id, repost=repost)
+    except RepostComment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    if comment.user.user_id != request.user.user_id:
+        return JsonResponse({'error': 'Unauthorized'}, status=403)
+    if request.method == 'PUT':
+        try:
+            payload = json.loads(request.body or '{}')
+            comment.comment_content = (payload.get('comment_content') or '').strip()
+            comment.save(update_fields=['comment_content'])
+            return JsonResponse({'success': True})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+    else:
+        comment.delete()
+        return JsonResponse({'success': True})
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
@@ -1557,14 +1760,10 @@ def post_edit_view(request, post_id):
 
         if request.method == "PUT":
             data = json.loads(request.body)
-            post_title = data.get('post_title')
             post_content = data.get('post_content')
 
-            if post_title is not None:
-                post.post_title = post_title
             if post_content is not None:
                 post.post_content = post_content
-
             post.save()
             return JsonResponse({'success': True, 'message': 'Post updated'})
 
@@ -1762,7 +1961,7 @@ def post_categories_view(request):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["POST"])
+@api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
 def post_repost_view(request, post_id):
     if request.method == "OPTIONS":
@@ -1794,11 +1993,18 @@ def post_repost_view(request, post_id):
         if existing_repost:
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
 
-        # Create repost
+        # Create repost with optional caption
+        payload = {}
+        try:
+            payload = json.loads(request.body or "{}")
+        except Exception:
+            payload = {}
+        caption = (payload.get('caption') or '').strip() or None
         repost = Repost.objects.create(
             user=user,
             post=post,
-            repost_date=timezone.now()
+            repost_date=timezone.now(),
+            caption=caption,
         )
 
         # Create notification for post owner (only if the reposter is not the post owner)
@@ -1821,7 +2027,7 @@ def post_repost_view(request, post_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["DELETE"])
+@api_view(["PUT", "DELETE"]) 
 @permission_classes([IsAuthenticated])
 def repost_delete_view(request, repost_id):
     if request.method == "OPTIONS":
@@ -1851,6 +2057,16 @@ def repost_delete_view(request, repost_id):
         # Check if user owns the repost
         if repost.user.user_id != user.user_id:
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == 'PUT':
+            try:
+                data = json.loads(request.body or '{}')
+                caption = (data.get('caption') or '').strip() or None
+                repost.caption = caption
+                repost.save(update_fields=['caption'])
+                return JsonResponse({'success': True})
+            except Exception as e:
+                return JsonResponse({'success': False, 'error': str(e)}, status=400)
 
         repost.delete()
         return JsonResponse({'success': True, 'message': 'Repost deleted'})
@@ -1948,7 +2164,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
 from apps.shared.models import Forum
-from apps.shared.models import Post, Like, Comment, Repost, PostCategory
+from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2238,7 +2454,6 @@ def user_posts_view(request, user_id):
                 reposts_count = Repost.objects.filter(post=post).count()
                 data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': getattr(post, 'post_image', None) and (post.post_image.url if hasattr(post.post_image, 'url') else None),
                     'type': post.type,
@@ -2390,7 +2605,7 @@ from django.core.files.base import ContentFile
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def posts_view(request):
-    """Get all posts or create a new post"""
+    """Used by Mobile – GET list posts, POST create post."""
     try:
         # Get posts based on user type
         user = request.user
@@ -2412,13 +2627,12 @@ def posts_view(request):
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")
-            post_title = data.get('post_title') or ''
             post_content = data.get('post_content') or ''
             post_cat_id = data.get('post_cat_id')
             post_type = data.get('type') or 'personal'
 
-            if not post_content.strip() and not post_title.strip():
-                return JsonResponse({'success': False, 'message': 'post_content or post_title is required'}, status=400)
+            if not post_content.strip():
+                return JsonResponse({'success': False, 'message': 'post_content is required'}, status=400)
 
             # Resolve category if provided
             post_cat = None
@@ -2430,7 +2644,6 @@ def posts_view(request):
 
             new_post = Post.objects.create(
                 user=request.user,
-                post_title=post_title,
                 post_content=post_content,
                 post_cat=post_cat,
                 type=post_type,
@@ -2466,7 +2679,6 @@ def posts_view(request):
                 'success': True,
                 'post': {
                     'post_id': new_post.post_id,
-                    'post_title': new_post.post_title,
                     'post_content': new_post.post_content,
                     'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),
                     'type': new_post.type,
@@ -2543,7 +2755,6 @@ def posts_view(request):
 
                 posts_data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                     'type': post.type,
@@ -2606,7 +2817,6 @@ def posts_by_user_type_view(request):
 
                 posts_data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                     'type': post.type,
