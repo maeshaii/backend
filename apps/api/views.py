@@ -201,15 +201,26 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
             must_change_password = False
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
+        
+        # Get follower and following counts
+        from apps.shared.models import Follow
+        followers_count = Follow.objects.filter(following=user).count()
+        following_count = Follow.objects.filter(follower=user).count()
+        
         data = {
             'refresh': str(refresh),
             'access': str(refresh.access_token),
             'user': {
                 'id': user.user_id,
                 'name': f"{user.f_name} {user.l_name}",
+                'f_name': user.f_name,
+                'l_name': user.l_name,
+                'acc_username': user.acc_username,
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'profile_bio': getattr(profile, 'profile_bio', None) if profile else None,
                 'profile_pic': build_profile_pic_url(user),
+                'followers_count': followers_count,
+                'following_count': following_count,
                 'account_type': {
                     'admin': user.account_type.admin,
                     'peso': user.account_type.peso,
@@ -527,6 +538,7 @@ def alumni_list_view(request):
             'address': getattr(a.profile, 'address', None) if hasattr(a, 'profile') and getattr(a, 'profile', None) else None,
             'civilStatus': getattr(a.profile, 'civil_status', None) if hasattr(a, 'profile') and getattr(a, 'profile', None) else None,
             'socialMedia': getattr(a.profile, 'social_media', None) if hasattr(a, 'profile') and getattr(a, 'profile', None) else None,
+            'profile_pic': build_profile_pic_url(a),
         }
         for a in alumni
     ]
@@ -2351,7 +2363,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
-from apps.shared.models import Forum
+from apps.shared.models import Forum, ForumLike, ForumComment, ForumRepost
 from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
 
 # ==========================
@@ -2368,43 +2380,56 @@ def forum_list_create_view(request):
             content = data.get('post_content') or data.get('content') or ''
             if not str(content).strip():
                 return JsonResponse({'error': 'content required'}, status=400)
-            # create Post, then link in Forum
+            
+            # Create Forum post directly (no Post model)
             post_cat = PostCategory.objects.first() if PostCategory.objects.exists() else None
-            new_post = Post.objects.create(
+            forum = Forum.objects.create(
                 user=request.user,
                 post_cat=post_cat,
-                post_title=title,
-                post_content=content,
+                content=content,
                 type='forum',
             )
-            forum = Forum.objects.create(user=request.user, post=new_post)
-            return JsonResponse({'success': True, 'forum_id': forum.forum_id, 'post_id': new_post.post_id})
+            return JsonResponse({'success': True, 'forum_id': forum.forum_id})
 
-        # GET list
-        forums = Forum.objects.select_related('user', 'post').order_by('-forum_id')
+        # GET list - filter by user's batch (year_graduated)
+        current_user_batch = None
+        if hasattr(request.user, 'academic_info') and request.user.academic_info:
+            current_user_batch = request.user.academic_info.year_graduated
+        
+        # Only show forum posts from users in the same batch
+        if current_user_batch:
+            forums = Forum.objects.select_related('user', 'post_cat', 'user__academic_info').filter(
+                user__academic_info__year_graduated=current_user_batch
+            ).order_by('-forum_id')
+        else:
+            # If user has no batch info, show no forum posts
+            forums = Forum.objects.none()
+        
         items = []
         for f in forums:
             try:
-                likes_count = Like.objects.filter(post=f.post).count()
-                comments_count = Comment.objects.filter(post=f.post).count()
-                reposts_count = Repost.objects.filter(post=f.post).count()
-                is_liked = Like.objects.filter(post=f.post, user=request.user).exists()
+                # Use ForumLike, ForumComment, ForumRepost models
+                likes_count = ForumLike.objects.filter(forum=f).count()
+                comments_count = ForumComment.objects.filter(forum=f).count()
+                reposts_count = ForumRepost.objects.filter(forum=f).count()
+                is_liked = ForumLike.objects.filter(forum=f, user=request.user).exists()
+                
                 items.append({
-                    'post_id': f.post.post_id,
-                    'post_title': f.post.post_title,
-                    'post_content': f.post.post_content,
-                    'post_image': (f.post.post_image.url if getattr(f.post, 'post_image', None) else None),
+                    'post_id': f.forum_id,  # Use forum_id as post_id for frontend compatibility
+                    'post_title': '',  # Forum doesn't have title, use empty string
+                    'post_content': f.content,
+                    'post_image': (f.image.url if f.image else None),
                     'type': 'forum',
-                    'created_at': f.post.created_at.isoformat() if getattr(f.post, 'created_at', None) else None,
+                    'created_at': f.created_at.isoformat() if f.created_at else None,
                     'likes_count': likes_count,
                     'comments_count': comments_count,
                     'reposts_count': reposts_count,
                     'is_liked': is_liked,
                     'user': {
-                        'user_id': f.post.user.user_id,
-                        'f_name': f.post.user.f_name,
-                        'l_name': f.post.user.l_name,
-                        'profile_pic': build_profile_pic_url(f.post.user),
+                        'user_id': f.user.user_id,
+                        'f_name': f.user.f_name,
+                        'l_name': f.user.l_name,
+                        'profile_pic': build_profile_pic_url(f.user),
                     }
                 })
             except Exception:
@@ -2418,7 +2443,21 @@ def forum_list_create_view(request):
 @permission_classes([IsAuthenticated])
 def forum_detail_edit_view(request, forum_id):
     try:
-        forum = Forum.objects.select_related('user', 'post').get(forum_id=forum_id)
+        forum = Forum.objects.select_related('user', 'user__academic_info').get(forum_id=forum_id)
+        
+        # Check if user can access this forum post (same batch only)
+        current_user_batch = None
+        if hasattr(request.user, 'academic_info') and request.user.academic_info:
+            current_user_batch = request.user.academic_info.year_graduated
+        
+        forum_user_batch = None
+        if hasattr(forum.user, 'academic_info') and forum.user.academic_info:
+            forum_user_batch = forum.user.academic_info.year_graduated
+        
+        # Only allow access if same batch or if user is the author
+        if current_user_batch != forum_user_batch and request.user.user_id != forum.user.user_id:
+            return JsonResponse({'error': 'Access denied - different batch'}, status=403)
+            
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -2428,17 +2467,17 @@ def forum_detail_edit_view(request, forum_id):
 
     if request.method == "GET":
         try:
-            likes = Like.objects.filter(post=forum.post).select_related('user')
-            comments = Comment.objects.filter(post=forum.post).select_related('user').order_by('-date_created')
-            reposts = Repost.objects.filter(post=forum.post).select_related('user')
+            likes = ForumLike.objects.filter(forum=forum).select_related('user')
+            comments = ForumComment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
+            reposts = ForumRepost.objects.filter(forum=forum).select_related('user')
 
             return JsonResponse({
-                'post_id': forum.post.post_id,
-                'post_title': forum.post.post_title,
-                'post_content': forum.post.post_content,
-                'post_image': (forum.post.post_image.url if getattr(forum.post, 'post_image', None) else None),
+                'post_id': forum.forum_id,
+                'post_title': '',
+                'post_content': forum.content,
+                'post_image': (forum.image.url if forum.image else None),
                 'type': 'forum',
-                'created_at': forum.post.created_at.isoformat() if getattr(forum.post, 'created_at', None) else None,
+                'created_at': forum.created_at.isoformat() if forum.created_at else None,
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
                 'reposts_count': reposts.count(),
@@ -2449,7 +2488,7 @@ def forum_detail_edit_view(request, forum_id):
                     'profile_pic': build_profile_pic_url(l.user),
                 } for l in likes],
                 'comments': [{
-                    'comment_id': c.comment_id,
+                    'comment_id': c.forum_comment_id,
                     'comment_content': c.comment_content,
                     'date_created': c.date_created.isoformat() if c.date_created else None,
                     'user': {
@@ -2460,7 +2499,7 @@ def forum_detail_edit_view(request, forum_id):
                     }
                 } for c in comments],
                 'reposts': [{
-                    'repost_id': r.repost_id,
+                    'repost_id': r.forum_repost_id,
                     'repost_date': r.repost_date.isoformat() if r.repost_date else None,
                     'user': {
                         'user_id': r.user.user_id,
@@ -2470,10 +2509,10 @@ def forum_detail_edit_view(request, forum_id):
                     }
                 } for r in reposts],
                 'user': {
-                    'user_id': forum.post.user.user_id,
-                    'f_name': forum.post.user.f_name,
-                    'l_name': forum.post.user.l_name,
-                    'profile_pic': build_profile_pic_url(forum.post.user),
+                    'user_id': forum.user.user_id,
+                    'f_name': forum.user.f_name,
+                    'l_name': forum.user.l_name,
+                    'profile_pic': build_profile_pic_url(forum.user),
                 }
             })
         except Exception as e:
@@ -2483,20 +2522,17 @@ def forum_detail_edit_view(request, forum_id):
         if not (is_owner or is_admin):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
         data = json.loads(request.body or "{}")
-        title = data.get('post_title') or data.get('title')
         content = data.get('post_content') or data.get('content')
-        if title is not None:
-            forum.post.post_title = title
         if content is not None:
-            forum.post.post_content = content
-        forum.post.save()
+            forum.content = content
+        forum.save()
         return JsonResponse({'success': True, 'message': 'Forum updated'})
 
     if request.method == "DELETE":
         if not (is_owner or is_admin):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
-        # delete underlying post (cascades remove forum link)
-        forum.post.delete()
+        # delete forum directly (cascades remove related likes, comments, reposts)
+        forum.delete()
         return JsonResponse({'success': True, 'message': 'Forum deleted'})
 
 
@@ -2504,12 +2540,25 @@ def forum_detail_edit_view(request, forum_id):
 @permission_classes([IsAuthenticated])
 def forum_like_view(request, forum_id):
     try:
-        forum = Forum.objects.select_related('post', 'user').get(forum_id=forum_id)
+        forum = Forum.objects.select_related('user', 'user__academic_info').get(forum_id=forum_id)
+        
+        # Check if user can access this forum post (same batch only)
+        current_user_batch = None
+        if hasattr(request.user, 'academic_info') and request.user.academic_info:
+            current_user_batch = request.user.academic_info.year_graduated
+        
+        forum_user_batch = None
+        if hasattr(forum.user, 'academic_info') and forum.user.academic_info:
+            forum_user_batch = forum.user.academic_info.year_graduated
+        
+        # Only allow access if same batch
+        if current_user_batch != forum_user_batch:
+            return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'POST':
-            like, created = Like.objects.get_or_create(post=forum.post, user=request.user)
-            if created and request.user.user_id != forum.post.user.user_id:
+            like, created = ForumLike.objects.get_or_create(forum=forum, user=request.user)
+            if created and request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
-                    user=forum.post.user,
+                    user=forum.user,
                     notif_type='like',
                     subject='Forum Liked',
                     notifi_content=f"{request.user.f_name} {request.user.l_name} liked your forum post",
@@ -2518,9 +2567,9 @@ def forum_like_view(request, forum_id):
             return JsonResponse({'success': True})
         else:
             try:
-                like = Like.objects.get(post=forum.post, user=request.user)
+                like = ForumLike.objects.get(forum=forum, user=request.user)
                 like.delete()
-            except Like.DoesNotExist:
+            except ForumLike.DoesNotExist:
                 pass
             return JsonResponse({'success': True})
     except Forum.DoesNotExist:
@@ -2531,11 +2580,24 @@ def forum_like_view(request, forum_id):
 @permission_classes([IsAuthenticated])
 def forum_comments_view(request, forum_id):
     try:
-        forum = Forum.objects.select_related('post', 'user').get(forum_id=forum_id)
+        forum = Forum.objects.select_related('user', 'user__academic_info').get(forum_id=forum_id)
+        
+        # Check if user can access this forum post (same batch only)
+        current_user_batch = None
+        if hasattr(request.user, 'academic_info') and request.user.academic_info:
+            current_user_batch = request.user.academic_info.year_graduated
+        
+        forum_user_batch = None
+        if hasattr(forum.user, 'academic_info') and forum.user.academic_info:
+            forum_user_batch = forum.user.academic_info.year_graduated
+        
+        # Only allow access if same batch
+        if current_user_batch != forum_user_batch:
+            return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'GET':
-            comments = Comment.objects.filter(post=forum.post).select_related('user').order_by('-date_created')
+            comments = ForumComment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
             data = [{
-                'comment_id': c.comment_id,
+                'comment_id': c.forum_comment_id,
                 'comment_content': c.comment_content,
                 'date_created': c.date_created.isoformat() if c.date_created else None,
                 'user': {
@@ -2549,21 +2611,20 @@ def forum_comments_view(request, forum_id):
         else:
             payload = json.loads(request.body or "{}")
             content = payload.get('comment_content') or ''
-            comment = Comment.objects.create(
+            comment = ForumComment.objects.create(
                 user=request.user,
-                post=forum.post,
+                forum=forum,
                 comment_content=content,
-                date_created=timezone.now()
             )
-            if request.user.user_id != forum.post.user.user_id:
+            if request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
-                    user=forum.post.user,
+                    user=forum.user,
                     notif_type='comment',
                     subject='Forum Commented',
                     notifi_content=f"{request.user.f_name} {request.user.l_name} commented on your forum post",
                     notif_date=timezone.now()
                 )
-            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
+            return JsonResponse({'success': True, 'comment_id': comment.forum_comment_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -2595,20 +2656,33 @@ def forum_comment_edit_view(request, forum_id, comment_id):
 @permission_classes([IsAuthenticated])
 def forum_repost_view(request, forum_id):
     try:
-        forum = Forum.objects.select_related('post', 'user').get(forum_id=forum_id)
-        exists = Repost.objects.filter(post=forum.post, user=request.user).first()
+        forum = Forum.objects.select_related('user', 'user__academic_info').get(forum_id=forum_id)
+        
+        # Check if user can access this forum post (same batch only)
+        current_user_batch = None
+        if hasattr(request.user, 'academic_info') and request.user.academic_info:
+            current_user_batch = request.user.academic_info.year_graduated
+        
+        forum_user_batch = None
+        if hasattr(forum.user, 'academic_info') and forum.user.academic_info:
+            forum_user_batch = forum.user.academic_info.year_graduated
+        
+        # Only allow access if same batch
+        if current_user_batch != forum_user_batch:
+            return JsonResponse({'error': 'Access denied - different batch'}, status=403)
+        exists = ForumRepost.objects.filter(forum=forum, user=request.user).first()
         if exists:
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
-        r = Repost.objects.create(post=forum.post, user=request.user, repost_date=timezone.now())
-        if request.method == "POST" and request.user.user_id != forum.post.user.user_id:
+        r = ForumRepost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
+        if request.method == "POST" and request.user.user_id != forum.user.user_id:
             Notification.objects.create(
-                user=forum.post.user,
+                user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
                 notifi_content=f"{request.user.f_name} {request.user.l_name} reposted your forum post",
                 notif_date=timezone.now()
             )
-        return JsonResponse({'success': True, 'repost_id': r.repost_id})
+        return JsonResponse({'success': True, 'repost_id': r.forum_repost_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -2798,19 +2872,22 @@ def posts_view(request):
         user = request.user
         from apps.shared.models import Follow, User as SharedUser
         if user.account_type.admin or user.account_type.peso:
-            posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
+            # Exclude forum posts from regular posts feed
+            posts = Post.objects.exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
         elif user.account_type.user or user.account_type.ojt:
             followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
             admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
             peso_users = SharedUser.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
+            # Exclude forum posts from regular posts feed
             posts = Post.objects.filter(
                 Q(user__in=followed_users) |
                 Q(user__in=admin_users) |
                 Q(user__in=peso_users) |
                 Q(user=user)
-            ).select_related('user', 'post_cat').order_by('-post_id')
+            ).exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
         else:
-            posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
+            # Exclude forum posts from regular posts feed
+            posts = Post.objects.exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")
             post_content = data.get('post_content') or ''
@@ -2986,6 +3063,10 @@ def posts_by_user_type_view(request):
             users = User.objects.filter(account_type__ojt=True)
         elif user_type == 'coordinator':
             users = User.objects.filter(account_type__coordinator=True)
+        elif user_type == 'admin':
+            users = User.objects.filter(account_type__admin=True)
+        elif user_type == 'peso':
+            users = User.objects.filter(account_type__peso=True)
         else:
             users = User.objects.all()
 
@@ -3000,28 +3081,42 @@ def posts_by_user_type_view(request):
                 comments_count = Comment.objects.filter(post=post).count()
                 # Get reposts count
                 reposts_count = Repost.objects.filter(post=post).count()
+                
+                # Check if current user liked this post
+                is_liked = Like.objects.filter(post=post, user=request.user).exists()
+                
+                # Get comments for this post
+                comments = Comment.objects.filter(post=post).select_related('user').order_by('-created_at')[:10]
+                comments_data = []
+                for comment in comments:
+                    comments_data.append({
+                        'id': comment.comment_id,
+                        'comment_content': comment.comment_content,
+                        'created_at': comment.created_at.isoformat() if hasattr(comment, 'created_at') else None,
+                        'user': {
+                            'id': comment.user.user_id,
+                            'username': comment.user.username,
+                            'first_name': comment.user.f_name,
+                            'last_name': comment.user.l_name,
+                        }
+                    })
 
                 posts_data.append({
-                    'post_id': post.post_id,
+                    'id': post.post_id,
+                    'post_title': getattr(post, 'post_title', ''),
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
-                    'type': post.type,
                     'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                    'updated_at': post.updated_at.isoformat() if hasattr(post, 'updated_at') else None,
                     'likes_count': likes_count,
                     'comments_count': comments_count,
-                    'reposts_count': reposts_count,
+                    'is_liked': is_liked,
+                    'comments': comments_data,
                     'user': {
-                        'user_id': post.user.user_id,
-                        'f_name': post.user.f_name,
-                        'l_name': post.user.l_name,
-                        'profile_pic': build_profile_pic_url(post.user),
-                    },
-                    'category': {
-                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
-                        'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
-                        'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
-                        'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
-                        'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
+                        'id': post.user.user_id,
+                        'username': post.user.username,
+                        'first_name': post.user.f_name,
+                        'last_name': post.user.l_name,
                     }
                 })
             except Exception:
