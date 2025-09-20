@@ -108,6 +108,7 @@ CSRF_TRUSTED_ORIGINS = [
 
     "http://192.168.1.5:8000",
     "https://*.ngrok-free.app",
+    "https://d2bf080d754e.ngrok-free.app",
 ]
 ROOT_URLCONF = 'backend.urls'
 
@@ -134,8 +135,7 @@ WSGI_APPLICATION = 'backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
-
-        'NAME': os.getenv('DB_NAME', 'db'),
+        'NAME': os.getenv('DB_NAME', 'wny'),
         'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
         'HOST': os.getenv('DB_HOST', 'localhost'),

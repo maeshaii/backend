@@ -13,7 +13,10 @@ import base64, hashlib
 
 
 class AccountType(models.Model):
-    """Account type flags for user roles (admin, peso, user, coordinator, ojt)."""
+    """Account type flags for user roles (admin, peso, user, coordinator, ojt).
+
+    Used by Mobile: role-gating for posts feed visibility and permissions.
+    """
     account_type_id = models.AutoField(primary_key=True)
     admin = models.BooleanField()
     peso = models.BooleanField()
@@ -35,7 +38,10 @@ class Ched(models.Model):
     job_alignment_count = models.IntegerField(default=0)
 
 class Comment(models.Model):
-    """User comments on posts."""
+    """User comments on posts.
+
+    Used by Mobile: GET/POST/PUT/DELETE via /api/posts/{post_id}/comments/...
+    """
     comment_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='comments')
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='comments')
@@ -64,12 +70,17 @@ class Feed(models.Model):
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='feeds')
 
 class Forum(models.Model):
-    """Forum entries linking users, posts, comments, and likes."""
+    """Forum posts stored separately from shared_post (identical structure).
+
+    Used by Mobile: CRUD/like/comment/repost via /api/forum/... endpoints.
+    """
     forum_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='forums')
-    comment = models.ForeignKey('Comment', on_delete=models.SET_NULL, null=True, related_name='forums')
-    like = models.ForeignKey('Like', on_delete=models.SET_NULL, null=True, related_name='forums')
+    post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='forums', null=True, blank=True)
+    image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
+    content = models.TextField(null=True, blank=True)
+    type = models.CharField(max_length=50, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
 
 class HighPosition(models.Model):
     """High position statistics for AACUP and tracker forms."""
@@ -126,6 +137,7 @@ class Like(models.Model):
     like_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='likes')
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='likes')
+    # Used by Mobile: toggled at /api/posts/{post_id}/like/
 
 class Conversation(models.Model):
     conversation_id = models.AutoField(primary_key=True)
@@ -167,7 +179,9 @@ class Message(models.Model):
         related_name='messages', null=True, blank=True
     )
     sender = models.ForeignKey('User', on_delete=models.CASCADE, related_name='sent_messages')
-    content = models.TextField(default="", blank=True)  # ✅ fixed
+    # Some existing databases have a non-null receiver_id column. Reflect it here and populate on create.
+    receiver = models.ForeignKey('User', on_delete=models.CASCADE, related_name='received_messages', null=True, blank=True)
+    content = models.TextField(db_column='message_content', default="", blank=True)
     message_type = models.CharField(max_length=20, choices=MESSAGE_TYPES, default='text')
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -191,7 +205,7 @@ class Message(models.Model):
 
 class MessageAttachment(models.Model):
     attachment_id = models.AutoField(primary_key=True)
-    message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments')
+    message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments', null=True, blank=True)
     file = models.FileField(upload_to='message_attachments/%Y/%m/%d/')
     file_name = models.CharField(max_length=255)
     file_type = models.CharField(max_length=50)
@@ -219,6 +233,7 @@ class Notification(models.Model):
     subject = models.CharField(max_length=255, blank=True, null=True)  # Added subject field
     notifi_content = models.TextField()
     notif_date = models.DateTimeField()
+    # Used by Mobile: listed/deleted at /api/notifications/...
 
 class PostCategory(models.Model):
     post_cat_id = models.AutoField(primary_key=True)
@@ -226,6 +241,7 @@ class PostCategory(models.Model):
     announcements = models.BooleanField()
     donation = models.BooleanField()
     personal = models.BooleanField()
+    # Used by Mobile: read via /api/post-categories/
 
 # NOTE: The legacy PostImage table 'shared_postimage' does not exist in this database.
 # To prevent ORM from attempting to access/delete from a missing table during Post deletes,
@@ -246,6 +262,7 @@ class Post(models.Model):
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Used by Mobile: feed list/create/edit/delete/like/comment/repost
 
 class Qpro(models.Model):
     qpro_id = models.AutoField(primary_key=True)
@@ -256,6 +273,35 @@ class Repost(models.Model):
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='reposts')
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='reposts')
     repost_date = models.DateTimeField()
+    caption = models.TextField(null=True, blank=True)
+    # Used by Mobile: /api/posts/{post_id}/repost/ and /api/reposts/{repost_id}/
+
+class RepostLike(models.Model):
+    """Used by Mobile: likes attached to a specific Repost (not the original Post).
+
+    Endpoints to be exposed under /api/reposts/{repost_id}/like/ and /likes/.
+    """
+    repost_like_id = models.AutoField(primary_key=True)
+    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='repost_likes')
+
+    class Meta:
+        unique_together = ('repost', 'user')
+        db_table = 'shared_repostlike'
+
+class RepostComment(models.Model):
+    """Used by Mobile: comments attached to a specific Repost.
+
+    Endpoints to be exposed under /api/reposts/{repost_id}/comments/ ...
+    """
+    repost_comment_id = models.AutoField(primary_key=True)
+    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='comments')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='repost_comments')
+    comment_content = models.TextField(null=True, blank=True)
+    date_created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_repostcomment'
 
 class Standard(models.Model):
     standard_id = models.AutoField(primary_key=True)
@@ -291,7 +337,10 @@ class TrackerForm(models.Model):
         ]
 
 class User(models.Model):
-    """Core User model - Authentication and basic identity only"""
+    """Core User model - Authentication and basic identity only.
+
+    Used by Mobile: auth via /api/token/, profile display, follow relationships.
+    """
     user_id = models.AutoField(primary_key=True)
     import_id = models.ForeignKey('Import', on_delete=models.CASCADE, related_name='users', null=True, blank=True)
     account_type = models.ForeignKey('AccountType', on_delete=models.CASCADE, related_name='users')
@@ -404,7 +453,10 @@ class UserInitialPassword(models.Model):
 
 # Refactored User Model Components
 class UserProfile(models.Model):
-    """Personal and contact information"""
+    """Personal and contact information.
+
+    Used by Mobile: profile view/update and avatar/bio display.
+    """
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     phone_num = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(null=True, blank=True)

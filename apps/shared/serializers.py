@@ -211,6 +211,13 @@ class AlumniStatsSerializer(serializers.Serializer):
 
 
 # Messaging Serializers
+class SmallUserSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='full_name', read_only=True)
+
+    class Meta:
+        model = User
+        fields = ['user_id', 'name']
+
 class MessageAttachmentSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     
@@ -227,7 +234,7 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
         return None
 
 class MessageSerializer(serializers.ModelSerializer):
-    sender = UserSerializer(read_only=True)
+    sender = SmallUserSerializer(read_only=True)
     attachments = MessageAttachmentSerializer(many=True, read_only=True)
     sender_name = serializers.CharField(source='sender.full_name', read_only=True)
     
@@ -280,7 +287,7 @@ class ConversationSerializer(serializers.ModelSerializer):
             if other_user:
                 return {
                     'user_id': other_user.user_id,
-                    'full_name': other_user.full_name,
+                    'name': other_user.full_name,
                     'f_name': other_user.f_name,
                     'l_name': other_user.l_name,
                     'acc_username': other_user.acc_username,
@@ -291,12 +298,14 @@ class CreateConversationSerializer(serializers.ModelSerializer):
     participant_ids = serializers.ListField(
         child=serializers.IntegerField(),
         write_only=True,
+        required=False,
         help_text="List of user IDs to include in the conversation"
     )
+    participant_id = serializers.IntegerField(write_only=True, required=False, help_text="Single participant id convenience")
     
     class Meta:
         model = Conversation
-        fields = ['participant_ids']
+        fields = ['participant_ids', 'participant_id']
     
     def validate_participant_ids(self, value):
         """Validate that participant IDs exist and are valid users"""
@@ -309,11 +318,11 @@ class CreateConversationSerializer(serializers.ModelSerializer):
         if len(users) != len(value):
             raise serializers.ValidationError("Some users do not exist.")
         
-        # Check if users have messaging access (alumni or ojt)
+        # Check if users have messaging access (regular user or ojt)
         invalid_users = []
         for user in users:
             account_type = user.account_type
-            if not (account_type.alumni or account_type.ojt):
+            if not (getattr(account_type, 'user', False) or getattr(account_type, 'ojt', False)):
                 invalid_users.append(user.full_name)
         
         if invalid_users:
@@ -322,26 +331,47 @@ class CreateConversationSerializer(serializers.ModelSerializer):
             )
         
         return value
+
+    def validate(self, attrs):
+        # Ensure at least one participant id is provided via either field
+        if not attrs.get('participant_ids') and not attrs.get('participant_id'):
+            raise serializers.ValidationError({'participant_ids': 'Provide participant_id or participant_ids.'})
+        return attrs
     
     def create(self, validated_data):
-        participant_ids = validated_data.pop('participant_ids')
-        conversation = Conversation.objects.create()
-        
-        # Add current user and other participants
+        # Accept either participant_id or participant_ids
+        if 'participant_id' in validated_data and not validated_data.get('participant_ids'):
+            participant_ids = [validated_data.pop('participant_id')]
+        else:
+            participant_ids = validated_data.pop('participant_ids')
+
         current_user = self.context['request'].user
-        participants = [current_user]
-        
-        # Add other participants
-        other_users = User.objects.filter(user_id__in=participant_ids)
-        participants.extend(other_users)
-        
-        conversation.participants.set(participants)
+        other_users = list(User.objects.filter(user_id__in=participant_ids))
+
+        # Ensure uniqueness and remove potential self from list
+        other_users = [u for u in other_users if u.user_id != current_user.user_id]
+
+        # If a 1:1 already exists, return it
+        if len(other_users) == 1:
+            other = other_users[0]
+            existing = (
+                Conversation.objects
+                .filter(participants=current_user)
+                .filter(participants=other)
+                .first()
+            )
+            if existing:
+                return existing
+
+        conversation = Conversation.objects.create()
+        conversation.participants.set([current_user, *other_users])
         return conversation
 
 class MessageCreateSerializer(serializers.ModelSerializer):
+    attachment_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     class Meta:
         model = Message
-        fields = ['content', 'message_type']
+        fields = ['content', 'message_type', 'attachment_id']
     
     def validate_message_type(self, value):
         """Validate message type"""
@@ -359,3 +389,17 @@ class MessageCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Message content cannot exceed 1000 characters.")
         
         return value.strip()
+
+    def create(self, validated_data):
+        attachment_id = validated_data.pop('attachment_id', None)
+        message: Message = super().create(validated_data)
+        # Attach uploaded file, if provided
+        if attachment_id:
+            from .models import MessageAttachment
+            try:
+                attachment = MessageAttachment.objects.get(attachment_id=attachment_id)
+                attachment.message = message
+                attachment.save()
+            except MessageAttachment.DoesNotExist:
+                pass
+        return message

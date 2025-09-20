@@ -27,10 +27,15 @@ from .views import *
 
 urlpatterns = [
     path('csrf/', views.get_csrf_token, name='get_csrf_token'),
+    # Used by Mobile: legacy login (mobile primarily uses /api/token/)
     path('login/', views.login_view, name='login_view'),
+    # Used by Mobile: forgot password flow
     path('forgot-password/', views.forgot_password_view, name='forgot_password'),
+    # Used by Mobile: JWT obtain (POST acc_username, acc_password)
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    # Used by Mobile: JWT refresh (POST refresh)
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    # Used by Mobile: change password
     path('change-password/', views.change_password_view, name='change_password'),
     # Alumni import/export (keep single implementation)
     path('alumni/statistics/', views.alumni_statistics_view, name='alumni_statistics'),
@@ -48,6 +53,10 @@ urlpatterns = [
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
     path('ojt/status/', ojt_status_update_view, name='ojt_status_update'),
+    path('ojt/send-to-admin/', send_completed_to_admin_view, name='ojt_send_to_admin'),
+    path('ojt/coordinator-requests/', coordinator_requests_count_view, name='ojt_coordinator_requests'),
+    path('ojt/coordinator-requests/list/', coordinator_requests_list_view, name='ojt_coordinator_requests_list'),
+    path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
     
@@ -86,12 +95,19 @@ urlpatterns = [
     path('alumni/search/', views.search_alumni, name='search_alumni'),
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
     
-    # Posts API endpoints
+    # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),
     path('posts/by-user-type/', views.posts_by_user_type_view, name='posts_by_user_type'),
     path('posts/<int:post_id>/like/', views.post_like_view, name='post_like'),
     path('posts/<int:post_id>/comments/', views.post_comments_view, name='post_comments'),
     path('posts/<int:post_id>/comments/<int:comment_id>/', views.comment_edit_view, name='comment_edit'),
+    path('posts/<int:post_id>/likes/', views.post_likes_view, name='post_likes'),
+    # Used by Mobile: Repost interactions
+    path('reposts/<int:repost_id>/', views.repost_detail_view, name='repost_detail'),
+    path('reposts/<int:repost_id>/like/', views.repost_like_view, name='repost_like'),
+    path('reposts/<int:repost_id>/likes/', views.repost_likes_list_view, name='repost_likes_list'),
+    path('reposts/<int:repost_id>/comments/', views.repost_comments_view, name='repost_comments'),
+    path('reposts/<int:repost_id>/comments/<int:comment_id>/', views.repost_comment_edit_view, name='repost_comment_edit'),
     path('posts/<int:post_id>/', views.post_edit_view, name='post_edit'),
     path('posts/delete/<int:post_id>/', views.post_delete_view, name='post_delete'),
     path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
@@ -99,5 +115,13 @@ urlpatterns = [
     path('post-categories/', views.post_categories_view, name='post_categories'),
     # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
+    # Used by Mobile: Forum API endpoints (separate storage)
+    path('forum/', views.forum_list_create_view, name='forum_list_create'),
+    path('forum/<int:forum_id>/', views.forum_detail_edit_view, name='forum_detail'),
+    path('forum/<int:forum_id>/like/', views.forum_like_view, name='forum_like'),
+    path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
+    path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
+    path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
+    path('forum-reposts/<int:repost_id>/', views.forum_repost_delete_view, name='forum_repost_delete'),
 ]
 
