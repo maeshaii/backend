@@ -1639,6 +1639,7 @@ def post_detail_view(request, post_id):
                 repost_data.append({
                     'repost_id': repost.repost_id,
                     'repost_date': repost.repost_date.isoformat(),
+                    'caption': repost.caption,
                     'user': {
                         'user_id': repost.user.user_id,
                         'f_name': repost.user.f_name,
@@ -1689,7 +1690,7 @@ def post_detail_view(request, post_id):
             post_data = {
                 'post_id': post.post_id,
                 'post_content': post.post_content,
-                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                'post_image': (post.post_image.url if getattr(post, 'post_image', None) and hasattr(post.post_image, 'url') else None),
                 'type': post.type,
                 'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                 'likes_count': len(likes_data),
@@ -1756,7 +1757,7 @@ def post_likes_view(request, post_id):
 # Repost interactions (Used by Mobile)
 # ==========================
 
-@api_view(["GET"]) 
+@api_view(["GET", "PATCH"]) 
 @permission_classes([IsAuthenticated])
 def repost_detail_view(request, repost_id):
     """Used by Mobile – return repost with its own likes/comments and original post summary."""
@@ -1765,6 +1766,24 @@ def repost_detail_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
+    if request.method == "PATCH":
+        # Update repost caption
+        try:
+            data = json.loads(request.body)
+            caption = data.get('caption', '').strip()
+            
+            # Check if user owns this repost
+            if repost.user.user_id != request.user.user_id:
+                return JsonResponse({'error': 'Unauthorized'}, status=403)
+            
+            repost.caption = caption if caption else None
+            repost.save()
+            
+            return JsonResponse({'success': True, 'message': 'Repost updated'})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+
+    # GET request - return repost details
     likes = RepostLike.objects.filter(repost=repost).select_related('user')
     comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
     data = {
@@ -2364,6 +2383,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
 from apps.shared.models import Forum, ForumLike, ForumComment, ForumRepost
+from apps.shared.models import Donation, DonationLike, DonationComment, DonationRepost
 from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
 
 # ==========================
@@ -2378,6 +2398,8 @@ def forum_list_create_view(request):
             data = json.loads(request.body or "{}")
             title = data.get('post_title') or data.get('title') or ''
             content = data.get('post_content') or data.get('content') or ''
+            image = data.get('post_image') or data.get('image') or None
+            
             if not str(content).strip():
                 return JsonResponse({'error': 'content required'}, status=400)
             
@@ -2389,6 +2411,32 @@ def forum_list_create_view(request):
                 content=content,
                 type='forum',
             )
+            
+            # --- IMAGE PROCESSING FOR FORUM POSTS ---
+            import sys
+            try:
+                if image and str(image).strip():
+                    print('Received forum image in data', file=sys.stderr)
+                    if str(image).startswith('data:image'):
+                        try:
+                            format, imgstr = str(image).split(';base64,')
+                            ext = format.split('/')[-1]
+                            import base64, uuid
+                            from django.core.files.base import ContentFile
+                            img_data = base64.b64decode(imgstr)
+                            file_name = f"{uuid.uuid4()}.{ext}"
+                            forum.image.save(file_name, ContentFile(img_data), save=True)
+                            print(f'Saved forum image: {forum.image.url}', file=sys.stderr)
+                        except Exception as img_exc:
+                            print(f'Error saving forum image: {img_exc}', file=sys.stderr)
+                    else:
+                        print('Forum image does not start with data:image', file=sys.stderr)
+                else:
+                    print('No forum image in data', file=sys.stderr)
+            except Exception as e:
+                print(f'Exception in forum image handling: {e}', file=sys.stderr)
+            # --- END IMAGE PROCESSING ---
+            
             return JsonResponse({'success': True, 'forum_id': forum.forum_id})
 
         # GET list - filter by user's batch (year_graduated)
@@ -2418,7 +2466,7 @@ def forum_list_create_view(request):
                     'post_id': f.forum_id,  # Use forum_id as post_id for frontend compatibility
                     'post_title': '',  # Forum doesn't have title, use empty string
                     'post_content': f.content,
-                    'post_image': (f.image.url if f.image else None),
+                    'post_image': (f.image.url if getattr(f, 'image', None) and hasattr(f.image, 'url') else None),
                     'type': 'forum',
                     'created_at': f.created_at.isoformat() if f.created_at else None,
                     'likes_count': likes_count,
@@ -2475,7 +2523,7 @@ def forum_detail_edit_view(request, forum_id):
                 'post_id': forum.forum_id,
                 'post_title': '',
                 'post_content': forum.content,
-                'post_image': (forum.image.url if forum.image else None),
+                'post_image': (forum.image.url if getattr(forum, 'image', None) and hasattr(forum.image, 'url') else None),
                 'type': 'forum',
                 'created_at': forum.created_at.isoformat() if forum.created_at else None,
                 'likes_count': likes.count(),
@@ -2697,6 +2745,317 @@ def forum_repost_delete_view(request, repost_id):
         r.delete()
         return JsonResponse({'success': True})
     except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+
+
+# ==========================
+# Donation API (separate storage)
+# ==========================
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def donation_list_create_view(request):
+    try:
+        if request.method == "POST":
+            data = json.loads(request.body or "{}")
+            title = data.get('post_title') or data.get('title') or ''
+            content = data.get('post_content') or data.get('content') or ''
+            image = data.get('post_image') or data.get('image') or None
+            
+            if not str(content).strip():
+                return JsonResponse({'error': 'content required'}, status=400)
+            
+            # Create Donation post directly (no Post model)
+            post_cat = PostCategory.objects.first() if PostCategory.objects.exists() else None
+            donation = Donation.objects.create(
+                user=request.user,
+                post_cat=post_cat,
+                content=content,
+                type='donation',
+            )
+            
+            # --- IMAGE PROCESSING FOR DONATION POSTS ---
+            import sys
+            try:
+                if image and str(image).strip():
+                    # Handle base64 image data
+                    if 'data:image' in str(image):
+                        import base64
+                        import uuid
+                        from django.core.files.base import ContentFile
+                        
+                        # Extract base64 data
+                        format, imgstr = str(image).split(';base64,')
+                        ext = format.split('/')[-1]
+                        
+                        # Create file
+                        img_data = base64.b64decode(imgstr)
+                        img_name = f"donation_{donation.donation_id}_{uuid.uuid4().hex[:8]}.{ext}"
+                        
+                        donation.image.save(img_name, ContentFile(img_data), save=True)
+                    else:
+                        # Handle direct image URL/path
+                        donation.image = image
+                        donation.save()
+            except Exception as e:
+                print(f"Image processing error: {e}")
+                # Continue without image if processing fails
+            
+            return JsonResponse({'success': True, 'donation_id': donation.donation_id})
+
+        # GET request - list donations
+        donations = Donation.objects.select_related('user', 'user__academic_info').order_by('-donation_id')
+        donations_data = []
+        
+        for donation in donations:
+            try:
+                # Get like count
+                like_count = DonationLike.objects.filter(donation=donation).count()
+                
+                # Check if current user liked this donation
+                is_liked = False
+                if request.user.is_authenticated:
+                    is_liked = DonationLike.objects.filter(donation=donation, user=request.user).exists()
+                
+                # Get comment count
+                comment_count = DonationComment.objects.filter(donation=donation).count()
+                
+                # Get repost count
+                repost_count = DonationRepost.objects.filter(donation=donation).count()
+                
+                donations_data.append({
+                    'post_id': donation.donation_id,
+                    'post_title': '',
+                    'post_content': donation.content,
+                    'post_image': (donation.image.url if getattr(donation, 'image', None) and hasattr(donation.image, 'url') else None),
+                    'type': 'donation',
+                    'created_at': donation.created_at.isoformat() if donation.created_at else None,
+                    'likes_count': like_count,
+                    'comments_count': comment_count,
+                    'reposts_count': repost_count,
+                    'is_liked': is_liked,
+                    'user': {
+                        'user_id': donation.user.user_id,
+                        'f_name': donation.user.f_name,
+                        'l_name': donation.user.l_name,
+                        'profile_pic': build_profile_pic_url(donation.user),
+                    }
+                })
+            except Exception:
+                continue
+
+        return JsonResponse({'donations': donations_data})
+    except Exception as e:
+        return JsonResponse({'donations': [], 'error': str(e)}, status=200)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def donation_detail_edit_view(request, donation_id):
+    try:
+        donation = Donation.objects.select_related('user', 'user__academic_info').get(donation_id=donation_id)
+    except Donation.DoesNotExist:
+        return JsonResponse({'error': 'Donation not found'}, status=404)
+
+    # Authorization for mutating
+    is_owner = request.user.user_id == donation.user.user_id
+    is_admin = getattr(getattr(request.user, 'account_type', None), 'admin', False)
+
+    if request.method == "GET":
+        try:
+            likes = DonationLike.objects.filter(donation=donation).select_related('user')
+            comments = DonationComment.objects.filter(donation=donation).select_related('user').order_by('-date_created')
+            reposts = DonationRepost.objects.filter(donation=donation).select_related('user')
+
+            return JsonResponse({
+                'post_id': donation.donation_id,
+                'post_title': '',
+                'post_content': donation.content,
+                'post_image': (donation.image.url if getattr(donation, 'image', None) and hasattr(donation.image, 'url') else None),
+                'type': 'donation',
+                'created_at': donation.created_at.isoformat() if donation.created_at else None,
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'likes': [{
+                    'user_id': l.user.user_id,
+                    'f_name': l.user.f_name,
+                    'l_name': l.user.l_name,
+                    'profile_pic': build_profile_pic_url(l.user),
+                } for l in likes],
+                'comments': [{
+                    'comment_id': c.donation_comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat() if c.date_created else None,
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                } for c in comments],
+                'reposts': [{
+                    'repost_id': r.donation_repost_id,
+                    'repost_date': r.repost_date.isoformat() if r.repost_date else None,
+                    'user': {
+                        'user_id': r.user.user_id,
+                        'f_name': r.user.f_name,
+                        'l_name': r.user.l_name,
+                        'profile_pic': build_profile_pic_url(r.user),
+                    }
+                } for r in reposts],
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': build_profile_pic_url(donation.user),
+                }
+            })
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=500)
+
+    if request.method == "PUT":
+        if not (is_owner or is_admin):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+        data = json.loads(request.body or "{}")
+        content = data.get('post_content') or data.get('content')
+        if content is not None:
+            donation.content = content
+        donation.save()
+        return JsonResponse({'success': True, 'message': 'Donation updated'})
+
+    if request.method == "DELETE":
+        if not (is_owner or is_admin):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+        # delete donation directly (cascades remove related likes, comments, reposts)
+        donation.delete()
+        return JsonResponse({'success': True, 'message': 'Donation deleted'})
+
+
+@api_view(["POST", "DELETE"]) 
+@permission_classes([IsAuthenticated])
+def donation_like_view(request, donation_id):
+    try:
+        donation = Donation.objects.get(donation_id=donation_id)
+    except Donation.DoesNotExist:
+        return JsonResponse({'error': 'Donation not found'}, status=404)
+
+    if request.method == "POST":
+        like, created = DonationLike.objects.get_or_create(donation=donation, user=request.user)
+        if created:
+            return JsonResponse({'success': True, 'liked': True})
+        else:
+            return JsonResponse({'success': True, 'liked': False})
+
+    elif request.method == "DELETE":
+        try:
+            like = DonationLike.objects.get(donation=donation, user=request.user)
+            like.delete()
+            return JsonResponse({'success': True, 'liked': False})
+        except DonationLike.DoesNotExist:
+            return JsonResponse({'success': True, 'liked': False})
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def donation_comments_view(request, donation_id):
+    try:
+        donation = Donation.objects.get(donation_id=donation_id)
+    except Donation.DoesNotExist:
+        return JsonResponse({'error': 'Donation not found'}, status=404)
+
+    if request.method == "GET":
+        comments = DonationComment.objects.filter(donation=donation).select_related('user').order_by('-date_created')
+        data = []
+        for comment in comments:
+            data.append({
+                'comment_id': comment.donation_comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': build_profile_pic_url(comment.user),
+                }
+            })
+        return JsonResponse({'comments': data})
+
+    elif request.method == "POST":
+        data = json.loads(request.body or "{}")
+        content = data.get('comment_content') or data.get('content') or ''
+        if not content.strip():
+            return JsonResponse({'error': 'Comment content required'}, status=400)
+        
+        comment = DonationComment.objects.create(
+            donation=donation,
+            user=request.user,
+            comment_content=content.strip()
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'comment_id': comment.donation_comment_id,
+            'message': 'Comment added successfully'
+        })
+
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def donation_comment_edit_view(request, donation_id, comment_id):
+    try:
+        comment = DonationComment.objects.get(donation_comment_id=comment_id, donation__donation_id=donation_id)
+    except DonationComment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+
+    if request.user.user_id != comment.user.user_id:
+        return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+    if request.method == "PUT":
+        data = json.loads(request.body or "{}")
+        content = data.get('comment_content') or data.get('content')
+        if content is not None:
+            comment.comment_content = content.strip()
+            comment.save()
+        return JsonResponse({'success': True, 'message': 'Comment updated'})
+
+    elif request.method == "DELETE":
+        comment.delete()
+        return JsonResponse({'success': True, 'message': 'Comment deleted'})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def donation_repost_view(request, donation_id):
+    try:
+        donation = Donation.objects.get(donation_id=donation_id)
+        r, created = DonationRepost.objects.get_or_create(donation=donation, user=request.user)
+        if not created:
+            return JsonResponse({'error': 'Already reposted'}, status=400)
+        
+        # Create notification
+        from apps.shared.models import Notification
+        from django.utils import timezone
+        Notification.objects.create(
+            user=donation.user,
+            notifi_content=f"{request.user.f_name} {request.user.l_name} reposted your donation post",
+            notif_date=timezone.now()
+        )
+        return JsonResponse({'success': True, 'repost_id': r.donation_repost_id})
+    except Donation.DoesNotExist:
+        return JsonResponse({'error': 'Donation not found'}, status=404)
+
+
+@api_view(["DELETE"]) 
+@permission_classes([IsAuthenticated])
+def donation_repost_delete_view(request, repost_id):
+    try:
+        r = DonationRepost.objects.get(donation_repost_id=repost_id)
+        if r.user.user_id != request.user.user_id:
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+        r.delete()
+        return JsonResponse({'success': True})
+    except DonationRepost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
 
@@ -2943,7 +3302,7 @@ def posts_view(request):
                 'post': {
                     'post_id': new_post.post_id,
                     'post_content': new_post.post_content,
-                    'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),
+                    'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) and hasattr(new_post.post_image, 'url') else None),
                     'type': new_post.type,
                     'created_at': new_post.created_at.isoformat() if hasattr(new_post, 'created_at') else None,
                     'user': {
@@ -2981,6 +3340,7 @@ def posts_view(request):
                     reposts_data.append({
                         'repost_id': repost.repost_id,
                         'repost_date': repost.repost_date.isoformat(),
+                        'caption': repost.caption,
                         'user': {
                             'user_id': repost.user.user_id,
                             'f_name': repost.user.f_name,
@@ -3019,7 +3379,7 @@ def posts_view(request):
                 posts_data.append({
                     'post_id': post.post_id,
                     'post_content': post.post_content,
-                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) and hasattr(post.post_image, 'url') else None),
                     'type': post.type,
                     'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                     'likes_count': likes_count,

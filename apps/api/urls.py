@@ -102,16 +102,17 @@ urlpatterns = [
     path('posts/<int:post_id>/comments/', views.post_comments_view, name='post_comments'),
     path('posts/<int:post_id>/comments/<int:comment_id>/', views.comment_edit_view, name='comment_edit'),
     path('posts/<int:post_id>/likes/', views.post_likes_view, name='post_likes'),
+    path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
+    path('posts/<int:post_id>/', views.post_detail_view, name='post_detail'),
     # Used by Mobile: Repost interactions
     path('reposts/<int:repost_id>/', views.repost_detail_view, name='repost_detail'),
     path('reposts/<int:repost_id>/like/', views.repost_like_view, name='repost_like'),
     path('reposts/<int:repost_id>/likes/', views.repost_likes_list_view, name='repost_likes_list'),
     path('reposts/<int:repost_id>/comments/', views.repost_comments_view, name='repost_comments'),
     path('reposts/<int:repost_id>/comments/<int:comment_id>/', views.repost_comment_edit_view, name='repost_comment_edit'),
-    path('posts/<int:post_id>/', views.post_edit_view, name='post_edit'),
+    path('posts/<int:post_id>/edit/', views.post_edit_view, name='post_edit'),
     path('posts/delete/<int:post_id>/', views.post_delete_view, name='post_delete'),
-    path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
-    path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
+    path('reposts/delete/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
     path('post-categories/', views.post_categories_view, name='post_categories'),
     # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
@@ -123,6 +124,15 @@ urlpatterns = [
     path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
     path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
     path('forum-reposts/<int:repost_id>/', views.forum_repost_delete_view, name='forum_repost_delete'),
+    
+    # Used by Mobile: Donation API endpoints (separate storage)
+    path('donation/', views.donation_list_create_view, name='donation_list_create'),
+    path('donation/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail'),
+    path('donation/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
+    path('donation/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
+    path('donation/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
+    path('donation/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
+    path('donation-reposts/<int:repost_id>/', views.donation_repost_delete_view, name='donation_repost_delete'),
     
 ]
 
