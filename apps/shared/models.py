@@ -945,3 +945,81 @@ class TrackerFileUpload(models.Model):
     
     def __str__(self):
         return f"{self.original_filename} - {self.response.user.f_name} {self.response.user.l_name}"
+
+# ==========================
+# Forum-specific relations (separate tables)
+# ==========================
+
+class ForumComment(models.Model):
+    forum_comment_id = models.AutoField(primary_key=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='comments')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_comments')
+    comment_content = models.TextField(null=True, blank=True)
+    date_created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_forumcomment'
+
+
+class ForumLike(models.Model):
+    forum_like_id = models.AutoField(primary_key=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_likes')
+
+    class Meta:
+        unique_together = ('forum', 'user')
+        db_table = 'shared_forumlike'
+
+
+class ForumRepost(models.Model):
+    forum_repost_id = models.AutoField(primary_key=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='reposts')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_reposts')
+    repost_date = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_forumrepost'
+
+
+class Donation(models.Model):
+    donation_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='donations')
+    post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, null=True, blank=True, related_name='donation_posts')
+    content = models.TextField()
+    image = models.ImageField(upload_to='donation_images/', null=True, blank=True)
+    type = models.CharField(max_length=50, default='donation')
+    created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
+
+    class Meta:
+        db_table = 'shared_donation'
+
+
+class DonationComment(models.Model):
+    donation_comment_id = models.AutoField(primary_key=True)
+    donation = models.ForeignKey('Donation', on_delete=models.CASCADE, related_name='comments')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='donation_comments')
+    comment_content = models.TextField()
+    date_created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_donationcomment'
+
+
+class DonationLike(models.Model):
+    donation_like_id = models.AutoField(primary_key=True)
+    donation = models.ForeignKey('Donation', on_delete=models.CASCADE, related_name='likes')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='donation_likes')
+    date_created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_donationlike'
+
+
+class DonationRepost(models.Model):
+    donation_repost_id = models.AutoField(primary_key=True)
+    donation = models.ForeignKey('Donation', on_delete=models.CASCADE, related_name='reposts')
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='donation_reposts')
+    repost_date = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'shared_donationrepost'

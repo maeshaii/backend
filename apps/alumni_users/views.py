@@ -129,6 +129,11 @@ def alumni_detail_view(request, user_id):
         academic_info = getattr(user, 'academic_info', None)
         batch_year = getattr(academic_info, 'year_graduated', None)
 
+        # Get follower and following counts
+        from apps.shared.models import Follow
+        followers_count = Follow.objects.filter(following=user).count()
+        following_count = Follow.objects.filter(follower=user).count()
+
         data = {
             'id': user.user_id,
             'ctu_id': user.acc_username,
@@ -152,6 +157,8 @@ def alumni_detail_view(request, user_id):
             'social_media': get_field('social_media', 'social media'),
             'school_name': getattr(academic_info, 'school_name', None) if academic_info else get_field('school_name', 'school name'),
             'profile_pic': _build_profile_pic_url(user),
+            'followers_count': followers_count,
+            'following_count': following_count,
         }
         return JsonResponse({'success': True, 'alumni': data})
     except User.DoesNotExist as e:

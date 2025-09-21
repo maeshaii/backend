@@ -121,6 +121,7 @@ def get_current_user_from_request(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def login_view(request):
+    """Used by Mobile (legacy) – mobile prefers POST /api/token/ for JWT."""
     """
     Authenticate a user using acc_username and acc_password. Returns user info and account type on success.
     """
@@ -172,6 +173,7 @@ def login_view(request):
         return JsonResponse({'success': False, 'message': 'Server error'}, status=500)
 
 class CustomTokenObtainPairSerializer(serializers.Serializer):
+    """Used by Mobile – issues JWT pair on /api/token/ for acc_username+acc_password."""
     acc_username = serializers.CharField()
     acc_password = serializers.CharField()
 
@@ -998,6 +1000,7 @@ def import_ojt_view(request):
                 try:
                     OJTInfo.objects.create(
                         user=ojt_user,
+                        ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         ojt_end_date=ojt_end_date,
                         ojtstatus=str(row.get('Status') or row.get('status') or '').strip() or None,
                     )
@@ -1163,7 +1166,7 @@ def ojt_by_year_view(request):
                 'social_media': getattr(ojt.profile, 'social_media', None),
                 'course': getattr(ojt.academic_info, 'course', None),
                 'company': getattr(ojt.employment, 'company_name_current', None),
-                'ojt_start_date': None,
+                'ojt_start_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_start_date', None),
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
@@ -1251,6 +1254,202 @@ def ojt_clear_all_view(request):
             # Remove import history to hide cards
             OJTImport.objects.all().delete()
         return JsonResponse({'success': True, 'message': 'All OJT data cleared successfully'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Coordinator requests: send completed list to admin (no-op storage, returns counts)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_completed_to_admin_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        year = data.get('year')
+        user_ids = data.get('user_ids') or []
+
+        # Compute how many completed for the given year if provided; otherwise all
+        users_qs = User.objects.all().select_related('academic_info', 'ojt_info')
+        year_int = None
+        if year is not None and str(year).strip() != '':
+            try:
+                import re
+                match = re.search(r"(20\d{2})", str(year))
+                year_int = int(match.group(1)) if match else int(str(year).strip())
+            except Exception:
+                year_int = None
+        if year_int is not None:
+            users_qs = users_qs.filter(academic_info__year_graduated=year_int)
+
+        if user_ids:
+            users_qs = users_qs.filter(user_id__in=[int(x) for x in user_ids])
+
+        completed_count = users_qs.filter(ojt_info__ojtstatus='Completed').count()
+
+        # Mark this batch as requested by coordinator so admin sees 1 per batch
+        try:
+            from apps.shared.models import OJTImport
+            coord_name = getattr(getattr(request, 'user', None), 'acc_username', None) or getattr(getattr(request, 'user', None), 'username', '') or ''
+            # Upsert by batch_year; status becomes 'Requested'
+            # Fallback: if year_int is None, attempt to infer from first matching user
+            if year_int is None:
+                first_user = users_qs.first()
+                if first_user and getattr(first_user, 'academic_info', None):
+                    year_int = getattr(first_user.academic_info, 'year_graduated', None)
+            if year_int is None:
+                # As a last resort, avoid creating invalid rows
+                return JsonResponse({'success': True, 'completed_count': completed_count, 'note': 'No batch year provided'}, status=200)
+
+            obj, created = OJTImport.objects.get_or_create(batch_year=year_int, defaults={
+                'coordinator': coord_name,
+                'course': '',
+                'file_name': 'send_to_admin',
+                'records_imported': completed_count,
+                'status': 'Requested',
+            })
+            if not created:
+                obj.coordinator = coord_name or obj.coordinator
+                obj.status = 'Requested'
+                obj.records_imported = completed_count
+                obj.save()
+        except Exception:
+            pass
+
+        return JsonResponse({'success': True, 'completed_count': completed_count})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Coordinator requests count for admin dashboard
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def coordinator_requests_count_view(request):
+    try:
+        year = request.GET.get('year')
+        # Count distinct batches requested by coordinators
+        from apps.shared.models import OJTImport
+        qs = OJTImport.objects.filter(status='Requested')
+        if year is not None and str(year).strip() != '':
+            try:
+                import re
+                match = re.search(r"(20\d{2})", str(year))
+                year_int = int(match.group(1)) if match else int(str(year).strip())
+                qs = qs.filter(batch_year=year_int)
+            except Exception:
+                pass
+        requested_years = set(qs.values_list('batch_year', flat=True).distinct())
+
+        # Fallback: also include any batches that currently have at least one Completed student
+        try:
+            users_qs = User.objects.filter(ojt_info__ojtstatus='Completed').select_related('academic_info')
+            if year is not None and str(year).strip() != '':
+                try:
+                    users_qs = users_qs.filter(academic_info__year_graduated=year_int)
+                except Exception:
+                    pass
+            completed_years = set(users_qs.values_list('academic_info__year_graduated', flat=True).distinct())
+            requested_years = requested_years.union({y for y in completed_years if y is not None})
+        except Exception:
+            pass
+
+        count_val = len({y for y in requested_years if y is not None})
+        return JsonResponse({'success': True, 'count': count_val})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# List requested batches with simple counts
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def coordinator_requests_list_view(request):
+    try:
+        from apps.shared.models import OJTImport
+        items = []
+        # Base: group Requested imports by year and course, take max count to avoid duplicates
+        try:
+            from django.db.models import Max, Value as V
+            from django.db.models.functions import Coalesce
+            grouped = (
+                OJTImport.objects.filter(status='Requested')
+                .values('batch_year', 'course')
+                .annotate(count=Coalesce(Max('records_imported'), V(0)))
+                .order_by('-batch_year')
+            )
+            for row in grouped:
+                items.append({
+                    'batch_year': row.get('batch_year'), 
+                    'course': row.get('course', ''),
+                    'count': row.get('count', 0) or 0
+                })
+        except Exception:
+            # Fallback: if aggregation not available, compute max per year and course in Python
+            by_year_course = {}
+            for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
+                year = getattr(imp, 'batch_year', None)
+                course = getattr(imp, 'course', '')
+                count_val = getattr(imp, 'records_imported', 0) or 0
+                if year is None:
+                    continue
+                key = (year, course)
+                by_year_course[key] = max(by_year_course.get(key, 0), count_val)
+            for (y, course), c in by_year_course.items():
+                items.append({'batch_year': y, 'course': course, 'count': c})
+
+        # Fallback: for any batch lacking a Requested import but has Completed users
+        try:
+            completed_years_courses = (
+                User.objects.filter(ojt_info__ojtstatus='Completed')
+                .values('academic_info__year_graduated', 'academic_info__course')
+                .annotate()
+            )
+            existing_keys = {(it['batch_year'], it.get('course', '')) for it in items if it.get('batch_year') is not None}
+            for row in completed_years_courses:
+                y = row.get('academic_info__year_graduated')
+                course = row.get('academic_info__course', '')
+                if y and (y, course) not in existing_keys:
+                    count = User.objects.filter(
+                        academic_info__year_graduated=y, 
+                        academic_info__course=course,
+                        ojt_info__ojtstatus='Completed'
+                    ).count()
+                    items.append({'batch_year': y, 'course': course, 'count': count})
+        except Exception:
+            pass
+
+        # Sort newest first and ensure unique year-course combinations
+        dedup = {}
+        for it in items:
+            y = it.get('batch_year')
+            course = it.get('course', '')
+            if y is None:
+                continue
+            key = (y, course)
+            dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
+        items = [{'batch_year': y, 'course': course, 'count': c} for (y, course), c in dedup.items()]
+        items.sort(key=lambda x: int(x['batch_year']), reverse=True)
+        return JsonResponse({'success': True, 'items': items})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# Admin approves a coordinator request for a given batch year
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_coordinator_request_view(request):
+    try:
+        data = json.loads(request.body or '{}')
+        year = data.get('year')
+        if year is None:
+            return JsonResponse({'success': False, 'message': 'Missing year'}, status=400)
+
+        from apps.shared.models import OJTImport
+        # Normalize year to int if possible
+        try:
+            year_int = int(str(year))
+        except Exception:
+            return JsonResponse({'success': False, 'message': 'Invalid year'}, status=400)
+
+        updated = OJTImport.objects.filter(batch_year=year_int, status='Requested').update(status='Approved')
+        return JsonResponse({'success': True, 'approved': updated, 'year': year_int})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
@@ -1470,17 +1669,27 @@ def post_detail_view(request, post_id):
             likes = Like.objects.filter(post=post).select_related('user')
             likes_data = []
             for like in likes:
+                # If profile_pic missing, send initials so client can render fallback
+                pic = build_profile_pic_url(like.user)
+                initials = None
+                if not pic:
+                    try:
+                        f = (like.user.f_name or '').strip()[:1].upper()
+                        l = (like.user.l_name or '').strip()[:1].upper()
+                        initials = f + l if (f or l) else None
+                    except Exception:
+                        initials = None
                 likes_data.append({
                     'like_id': like.like_id,
                     'user_id': like.user.user_id,
                     'f_name': like.user.f_name,
                     'l_name': like.user.l_name,
-                    'profile_pic': build_profile_pic_url(like.user),
+                    'profile_pic': pic,
+                    'initials': initials,
                 })
 
             post_data = {
                 'post_id': post.post_id,
-                'post_title': post.post_title,
                 'post_content': post.post_content,
                 'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                 'type': post.type,
@@ -1508,6 +1717,197 @@ def post_detail_view(request, post_id):
             return JsonResponse(post_data)
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
+
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def post_likes_view(request, post_id):
+    """Used by Mobile – list of users who liked a post.
+
+    Response shape mirrors likes data used in feeds and detail:
+      { likes: [ { user_id, f_name, l_name, profile_pic, initials? } ] }
+    """
+    try:
+        post = Post.objects.get(post_id=post_id)
+    except Post.DoesNotExist:
+        return JsonResponse({'error': 'Post not found'}, status=404)
+
+    likes = Like.objects.filter(post=post).select_related('user')
+    data = []
+    for l in likes:
+        pic = build_profile_pic_url(l.user)
+        initials = None
+        if not pic:
+            try:
+                f = (l.user.f_name or '').strip()[:1].upper()
+                s = (l.user.l_name or '').strip()[:1].upper()
+                initials = (f + s) if (f or s) else None
+            except Exception:
+                initials = None
+        data.append({
+            'user_id': l.user.user_id,
+            'f_name': l.user.f_name,
+            'l_name': l.user.l_name,
+            'profile_pic': pic,
+            'initials': initials,
+        })
+    return JsonResponse({'likes': data})
+
+
+# ==========================
+# Repost interactions (Used by Mobile)
+# ==========================
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def repost_detail_view(request, repost_id):
+    """Used by Mobile – return repost with its own likes/comments and original post summary."""
+    try:
+        repost = Repost.objects.select_related('post', 'user', 'post__user').get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+
+    likes = RepostLike.objects.filter(repost=repost).select_related('user')
+    comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+    data = {
+        'repost_id': repost.repost_id,
+        'caption': repost.caption,
+        'repost_date': repost.repost_date.isoformat() if repost.repost_date else None,
+        'user': {
+            'user_id': repost.user.user_id,
+            'f_name': repost.user.f_name,
+            'l_name': repost.user.l_name,
+            'profile_pic': build_profile_pic_url(repost.user),
+        },
+        'likes_count': likes.count(),
+        'comments_count': comments.count(),
+        'likes': [{
+            'user_id': l.user.user_id,
+            'f_name': l.user.f_name,
+            'l_name': l.user.l_name,
+            'profile_pic': build_profile_pic_url(l.user),
+        } for l in likes],
+        'comments': [{
+            'comment_id': c.repost_comment_id,
+            'comment_content': c.comment_content,
+            'date_created': c.date_created.isoformat() if c.date_created else None,
+            'user': {
+                'user_id': c.user.user_id,
+                'f_name': c.user.f_name,
+                'l_name': c.user.l_name,
+                'profile_pic': build_profile_pic_url(c.user),
+            }
+        } for c in comments],
+        'original': {
+            'post_id': repost.post.post_id,
+            'user': {
+                'user_id': repost.post.user.user_id,
+                'f_name': repost.post.user.f_name,
+                'l_name': repost.post.user.l_name,
+                'profile_pic': build_profile_pic_url(repost.post.user),
+            },
+            'post_title': getattr(repost.post, 'post_title', None),
+            'post_content': repost.post.post_content,
+            'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
+        }
+    }
+    return JsonResponse(data)
+
+
+@api_view(["POST", "DELETE"]) 
+@permission_classes([IsAuthenticated])
+def repost_like_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+
+    if request.method == 'POST':
+        like, created = RepostLike.objects.get_or_create(repost=repost, user=request.user)
+        if created:
+            return JsonResponse({'success': True})
+        return JsonResponse({'success': False, 'message': 'Already liked'})
+    else:
+        try:
+            like = RepostLike.objects.get(repost=repost, user=request.user)
+            like.delete()
+            return JsonResponse({'success': True})
+        except RepostLike.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'Not liked'})
+
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def repost_likes_list_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    likes = RepostLike.objects.filter(repost=repost).select_related('user')
+    return JsonResponse({'likes': [{
+        'user_id': l.user.user_id,
+        'f_name': l.user.f_name,
+        'l_name': l.user.l_name,
+        'profile_pic': build_profile_pic_url(l.user),
+    } for l in likes]})
+
+
+@api_view(["GET", "POST"]) 
+@permission_classes([IsAuthenticated])
+def repost_comments_view(request, repost_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    if request.method == 'GET':
+        comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+        return JsonResponse({'comments': [{
+            'comment_id': c.repost_comment_id,
+            'comment_content': c.comment_content,
+            'date_created': c.date_created.isoformat() if c.date_created else None,
+            'user': {
+                'user_id': c.user.user_id,
+                'f_name': c.user.f_name,
+                'l_name': c.user.l_name,
+                'profile_pic': build_profile_pic_url(c.user),
+            }
+        } for c in comments]})
+    else:
+        try:
+            payload = json.loads(request.body or '{}')
+            content = (payload.get('comment_content') or '').strip()
+            if not content:
+                return JsonResponse({'error': 'content required'}, status=400)
+            c = RepostComment.objects.create(repost=repost, user=request.user, comment_content=content, date_created=timezone.now())
+            return JsonResponse({'success': True, 'comment_id': c.repost_comment_id})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+
+
+@api_view(["PUT", "DELETE"]) 
+@permission_classes([IsAuthenticated])
+def repost_comment_edit_view(request, repost_id, comment_id):
+    try:
+        repost = Repost.objects.get(repost_id=repost_id)
+    except Repost.DoesNotExist:
+        return JsonResponse({'error': 'Repost not found'}, status=404)
+    try:
+        comment = RepostComment.objects.get(repost_comment_id=comment_id, repost=repost)
+    except RepostComment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    if comment.user.user_id != request.user.user_id:
+        return JsonResponse({'error': 'Unauthorized'}, status=403)
+    if request.method == 'PUT':
+        try:
+            payload = json.loads(request.body or '{}')
+            comment.comment_content = (payload.get('comment_content') or '').strip()
+            comment.save(update_fields=['comment_content'])
+            return JsonResponse({'success': True})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+    else:
+        comment.delete()
+        return JsonResponse({'success': True})
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
@@ -1562,14 +1962,10 @@ def post_edit_view(request, post_id):
 
         if request.method == "PUT":
             data = json.loads(request.body)
-            post_title = data.get('post_title')
             post_content = data.get('post_content')
 
-            if post_title is not None:
-                post.post_title = post_title
             if post_content is not None:
                 post.post_content = post_content
-
             post.save()
             return JsonResponse({'success': True, 'message': 'Post updated'})
 
@@ -1799,11 +2195,18 @@ def post_repost_view(request, post_id):
         if existing_repost:
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
 
-        # Create repost
+        # Create repost with optional caption
+        payload = {}
+        try:
+            payload = json.loads(request.body or "{}")
+        except Exception:
+            payload = {}
+        caption = (payload.get('caption') or '').strip() or None
         repost = Repost.objects.create(
             user=user,
             post=post,
-            repost_date=timezone.now()
+            repost_date=timezone.now(),
+            caption=caption,
         )
 
         # Create notification for post owner (only if the reposter is not the post owner)
@@ -1826,7 +2229,7 @@ def post_repost_view(request, post_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["DELETE"])
+@api_view(["PUT", "DELETE"]) 
 @permission_classes([IsAuthenticated])
 def repost_delete_view(request, repost_id):
     if request.method == "OPTIONS":
@@ -1856,6 +2259,16 @@ def repost_delete_view(request, repost_id):
         # Check if user owns the repost
         if repost.user.user_id != user.user_id:
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == 'PUT':
+            try:
+                data = json.loads(request.body or '{}')
+                caption = (data.get('caption') or '').strip() or None
+                repost.caption = caption
+                repost.save(update_fields=['caption'])
+                return JsonResponse({'success': True})
+            except Exception as e:
+                return JsonResponse({'success': False, 'error': str(e)}, status=400)
 
         repost.delete()
         return JsonResponse({'success': True, 'message': 'Repost deleted'})
@@ -1953,7 +2366,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
 from apps.shared.models import Forum
-from apps.shared.models import Post, Like, Comment, Repost, PostCategory
+from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2243,7 +2656,6 @@ def user_posts_view(request, user_id):
                 reposts_count = Repost.objects.filter(post=post).count()
                 data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': getattr(post, 'post_image', None) and (post.post_image.url if hasattr(post.post_image, 'url') else None),
                     'type': post.type,
@@ -2395,7 +2807,7 @@ from django.core.files.base import ContentFile
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def posts_view(request):
-    """Get all posts or create a new post"""
+    """Used by Mobile – GET list posts, POST create post."""
     try:
         user = request.user
         from apps.shared.models import Follow, User as SharedUser
@@ -2415,13 +2827,12 @@ def posts_view(request):
             posts = Post.objects.all().select_related('user', 'post_cat').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")
-            post_title = data.get('post_title') or ''
             post_content = data.get('post_content') or ''
             post_cat_id = data.get('post_cat_id')
             post_type = data.get('type') or 'personal'
 
-            if not post_content.strip() and not post_title.strip():
-                return JsonResponse({'success': False, 'message': 'post_content or post_title is required'}, status=400)
+            if not post_content.strip():
+                return JsonResponse({'success': False, 'message': 'post_content is required'}, status=400)
 
             # Resolve category if provided
             post_cat = None
@@ -2433,7 +2844,6 @@ def posts_view(request):
 
             new_post = Post.objects.create(
                 user=request.user,
-                post_title=post_title,
                 post_content=post_content,
                 post_cat=post_cat,
                 type=post_type,
@@ -2469,7 +2879,6 @@ def posts_view(request):
                 'success': True,
                 'post': {
                     'post_id': new_post.post_id,
-                    'post_title': new_post.post_title,
                     'post_content': new_post.post_content,
                     'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),
                     'type': new_post.type,
@@ -2546,7 +2955,6 @@ def posts_view(request):
 
                 posts_data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                     'type': post.type,
@@ -2609,7 +3017,6 @@ def posts_by_user_type_view(request):
 
                 posts_data.append({
                     'post_id': post.post_id,
-                    'post_title': post.post_title,
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                     'type': post.type,
