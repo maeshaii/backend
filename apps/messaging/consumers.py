@@ -177,6 +177,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			'message_type': event['message_type'],
 			'created_at': event['created_at'],
 			'timestamp': event['timestamp'],
+			'attachment_url': event.get('attachment_url'),
 		}))
 
 	async def user_typing(self, event):
@@ -226,13 +227,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
 	@database_sync_to_async
 	def can_access_conversation(self):
-		"""Check if user has access to the conversation and is alumni/OJT"""
+		"""Allow access if the user is a participant of the conversation."""
 		try:
-			if not getattr(self.user, 'account_type', None):
-				return False
-			role_ok = bool(getattr(self.user.account_type, 'alumni', False) or getattr(self.user.account_type, 'ojt', False))
-			if not role_ok:
-				return False
 			conversation = Conversation.objects.get(conversation_id=self.conversation_id)
 			return conversation.participants.filter(user_id=getattr(self.user, 'user_id', None)).exists()
 		except Conversation.DoesNotExist:

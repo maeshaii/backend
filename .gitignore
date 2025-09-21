@@ -10,6 +10,10 @@ ENV/
 env/
 .venv
 
+# Django Migrations
+*/migrations/*
+!*/migrations/__init__.py
+
 # Django
 *.log
 local_settings.py

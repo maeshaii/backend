@@ -211,6 +211,10 @@ def generate_statistics_view(request):
                 elif status and status.lower() == 'no':
                     unemployed += 1
             
+            # Calculate untracked alumni (those who haven't answered the tracker)
+            tracked_alumni = tracker_data.count()
+            untracked = total_alumni - tracked_alumni
+            
             employment_rate = (employed / total_alumni * 100) if total_alumni > 0 else 0
             
             return JsonResponse({
@@ -220,6 +224,7 @@ def generate_statistics_view(request):
                 'employment_rate': round(employment_rate, 2),
                 'employed_count': employed,
                 'unemployed_count': unemployed,
+                'untracked_count': untracked,
                 'tracker_employed_count': employed,
                 'tracker_unemployed_count': unemployed,
                 # Real data fields using related models
@@ -280,6 +285,30 @@ def generate_statistics_view(request):
             high_position = alumni_qs.filter(employment__high_position=True).count()
             job_aligned = alumni_qs.filter(employment__job_alignment_status='aligned').count()
             
+            # Get sector and scope counts from tracker data
+            from apps.shared.models import TrackerData
+            tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
+            
+            public_count = 0
+            private_count = 0
+            local_count = 0
+            international_count = 0
+            
+            for tracker in tracker_data:
+                # Check sector (Public/Private) - this would be question 27
+                sector = tracker.q_sector_current
+                if sector and sector.lower() == 'public':
+                    public_count += 1
+                elif sector and sector.lower() == 'private':
+                    private_count += 1
+                
+                # Check scope (Local/International) - this would be question 28
+                scope = tracker.q_scope_current
+                if scope and scope.lower() == 'local':
+                    local_count += 1
+                elif scope and scope.lower() == 'international':
+                    international_count += 1
+            
             high_position_rate = (high_position / total_alumni * 100) if total_alumni > 0 else 0
             job_alignment_rate = (job_aligned / total_alumni * 100) if total_alumni > 0 else 0
             
@@ -291,6 +320,10 @@ def generate_statistics_view(request):
                 'high_position_rate': round(high_position_rate, 2),
                 'job_aligned_count': job_aligned,
                 'job_alignment_rate': round(job_alignment_rate, 2),
+                'public_count': public_count,
+                'private_count': private_count,
+                'local_count': local_count,
+                'international_count': international_count,
                 'most_common_company': safe_mode_related(alumni_qs, 'employment__company_name_current'),
                 'most_common_position': safe_mode_related(alumni_qs, 'employment__position_current'),
                 'most_common_sector': safe_mode_related(alumni_qs, 'employment__sector_current'),
@@ -343,6 +376,50 @@ def generate_statistics_view(request):
                 'most_common_civil_status': safe_mode_related(alumni_qs, 'profile__civil_status'),
                 'average_age': safe_mean_related(alumni_qs, 'profile__age'),
                 'sample_email': safe_sample_related(alumni_qs, 'profile__email'),
+                'year': year,
+                'course': course
+            })
+        
+        elif stats_type == 'HIGH_POSITION':
+            # HIGH_POSITION: Detailed statistics for alumni with high positions
+            high_position_alumni = alumni_qs.filter(employment__high_position=True)
+            high_position_count = high_position_alumni.count()
+            
+            # Get detailed information about high position alumni
+            high_position_data = []
+            for alum in high_position_alumni:
+                profile = getattr(alum, 'profile', None)
+                academic = getattr(alum, 'academic_info', None)
+                employment = getattr(alum, 'employment', None)
+                
+                high_position_data.append({
+                    'ctu_id': alum.acc_username,
+                    'name': f"{alum.f_name} {alum.m_name or ''} {alum.l_name}".strip(),
+                    'position': employment.position_current if employment else None,
+                    'company': employment.company_name_current if employment else None,
+                    'sector': employment.sector_current if employment else None,
+                    'course': academic.course if academic else None,
+                    'year_graduated': academic.year_graduated if academic else None,
+                    'email': profile.email if profile else None,
+                    'phone': profile.phone_num if profile else None,
+                    'address': profile.address if profile else None,
+                })
+            
+            # Calculate statistics
+            high_position_rate = (high_position_count / total_alumni * 100) if total_alumni > 0 else 0
+            
+            return JsonResponse({
+                'success': True,
+                'type': 'HIGH_POSITION',
+                'total_alumni': total_alumni,
+                'high_position_count': high_position_count,
+                'high_position_rate': round(high_position_rate, 2),
+                'high_position_data': high_position_data,
+                'most_common_position': safe_mode_related(high_position_alumni, 'employment__position_current'),
+                'most_common_company': safe_mode_related(high_position_alumni, 'employment__company_name_current'),
+                'most_common_sector': safe_mode_related(high_position_alumni, 'employment__sector_current'),
+                'most_common_course': safe_mode_related(high_position_alumni, 'academic_info__course'),
+                'average_salary': safe_mean_related(high_position_alumni, 'employment__salary_current'),
                 'year': year,
                 'course': course
             })

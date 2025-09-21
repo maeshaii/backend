@@ -334,6 +334,21 @@ def submit_tracker_response_view(request):
             notifi_content=f'Thank you {user.f_name} {user.l_name} for completing the alumni tracker form. Your response has been recorded successfully.',
             notif_date=timezone.now()
         )
+
+        # Notify all admin users that a tracker response was submitted
+        try:
+            from apps.shared.models import User as SharedUser, AccountType as SharedAccountType
+            admin_accounts = SharedUser.objects.filter(account_type__admin=True)
+            for admin_user in admin_accounts:
+                Notification.objects.create(
+                    user=admin_user,
+                    notif_type='tracker_submission',
+                    subject='New Tracker Response Submitted',
+                    notifi_content=f'{user.f_name} {user.l_name} has submitted a tracker response.',
+                    notif_date=timezone.now()
+                )
+        except Exception:
+            pass
         
         return JsonResponse({
             'success': True, 
