@@ -896,6 +896,7 @@ def import_ojt_view(request):
                 try:
                     OJTInfo.objects.create(
                         user=ojt_user,
+                        ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         ojt_end_date=ojt_end_date,
                         ojtstatus=str(row.get('Status') or row.get('status') or '').strip() or None,
                     )
@@ -1061,7 +1062,7 @@ def ojt_by_year_view(request):
                 'social_media': getattr(ojt.profile, 'social_media', None),
                 'course': getattr(ojt.academic_info, 'course', None),
                 'company': getattr(ojt.employment, 'company_name_current', None),
-                'ojt_start_date': None,
+                'ojt_start_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_start_date', None),
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
@@ -1259,54 +1260,67 @@ def coordinator_requests_list_view(request):
     try:
         from apps.shared.models import OJTImport
         items = []
-        # Base: group Requested imports by year and take max count to avoid duplicates
+        # Base: group Requested imports by year and course, take max count to avoid duplicates
         try:
             from django.db.models import Max, Value as V
             from django.db.models.functions import Coalesce
             grouped = (
                 OJTImport.objects.filter(status='Requested')
-                .values('batch_year')
+                .values('batch_year', 'course')
                 .annotate(count=Coalesce(Max('records_imported'), V(0)))
                 .order_by('-batch_year')
             )
             for row in grouped:
-                items.append({'batch_year': row.get('batch_year'), 'count': row.get('count', 0) or 0})
+                items.append({
+                    'batch_year': row.get('batch_year'), 
+                    'course': row.get('course', ''),
+                    'count': row.get('count', 0) or 0
+                })
         except Exception:
-            # Fallback: if aggregation not available, compute max per year in Python
-            by_year = {}
+            # Fallback: if aggregation not available, compute max per year and course in Python
+            by_year_course = {}
             for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
                 year = getattr(imp, 'batch_year', None)
+                course = getattr(imp, 'course', '')
                 count_val = getattr(imp, 'records_imported', 0) or 0
                 if year is None:
                     continue
-                by_year[year] = max(by_year.get(year, 0), count_val)
-            for y, c in by_year.items():
-                items.append({'batch_year': y, 'count': c})
+                key = (year, course)
+                by_year_course[key] = max(by_year_course.get(key, 0), count_val)
+            for (y, course), c in by_year_course.items():
+                items.append({'batch_year': y, 'course': course, 'count': c})
 
         # Fallback: for any batch lacking a Requested import but has Completed users
         try:
-            completed_years = (
+            completed_years_courses = (
                 User.objects.filter(ojt_info__ojtstatus='Completed')
-                .values('academic_info__year_graduated')
+                .values('academic_info__year_graduated', 'academic_info__course')
                 .annotate()
             )
-            existing_years = {it['batch_year'] for it in items if it.get('batch_year') is not None}
-            for row in completed_years:
+            existing_keys = {(it['batch_year'], it.get('course', '')) for it in items if it.get('batch_year') is not None}
+            for row in completed_years_courses:
                 y = row.get('academic_info__year_graduated')
-                if y and y not in existing_years:
-                    count = User.objects.filter(academic_info__year_graduated=y, ojt_info__ojtstatus='Completed').count()
-                    items.append({'batch_year': y, 'count': count})
+                course = row.get('academic_info__course', '')
+                if y and (y, course) not in existing_keys:
+                    count = User.objects.filter(
+                        academic_info__year_graduated=y, 
+                        academic_info__course=course,
+                        ojt_info__ojtstatus='Completed'
+                    ).count()
+                    items.append({'batch_year': y, 'course': course, 'count': count})
         except Exception:
             pass
 
-        # Sort newest first and ensure unique years
+        # Sort newest first and ensure unique year-course combinations
         dedup = {}
         for it in items:
             y = it.get('batch_year')
+            course = it.get('course', '')
             if y is None:
                 continue
-            dedup[y] = max(dedup.get(y, 0), int(it.get('count') or 0))
-        items = [{'batch_year': y, 'count': c} for y, c in dedup.items()]
+            key = (y, course)
+            dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
+        items = [{'batch_year': y, 'course': course, 'count': c} for (y, course), c in dedup.items()]
         items.sort(key=lambda x: int(x['batch_year']), reverse=True)
         return JsonResponse({'success': True, 'items': items})
     except Exception as e:

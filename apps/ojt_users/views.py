@@ -74,7 +74,7 @@ def list_ojt_users(request):
                 'section': getattr(academic, 'section', None) if academic else None,
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'ojt_status': getattr(ojtinfo, 'ojtstatus', None) if ojtinfo else None,
-                'ojt_start_date': None,  # Not modeled currently
+                'ojt_start_date': getattr(ojtinfo, 'ojt_start_date', None) if ojtinfo else None,
                 'ojt_end_date': getattr(ojtinfo, 'ojt_end_date', None) if ojtinfo else None,
                 'phone_number': getattr(profile, 'phone_num', None) if profile else None,
                 'address': getattr(profile, 'address', None) if profile else None,
@@ -132,7 +132,7 @@ def get_ojt_user_details(request, user_id):
             'Email': getattr(profile, 'email', None) if profile else None,
             'Address': getattr(profile, 'address', None) if profile else None,
             'Course': getattr(academic, 'course', None) if academic else None,
-            'Ojt_Start_Date': None,  # Not modeled currently
+            'Ojt_Start_Date': getattr(ojtinfo, 'ojt_start_date', None) if ojtinfo else None,
             'Ojt_End_Date': getattr(ojtinfo, 'ojt_end_date', None) if ojtinfo else None,
             'Status': getattr(ojtinfo, 'ojtstatus', None) if ojtinfo else None,
             'Civil_Status': getattr(profile, 'civil_status', None) if profile else None,
