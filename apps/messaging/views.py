@@ -126,6 +126,13 @@ class MessageListView(generics.ListCreateAPIView):
 
 		# Broadcast the new message to websocket listeners
 		try:
+			# Get attachment URL if exists
+			attachment_url = None
+			if hasattr(message, 'attachments') and message.attachments.exists():
+				attachment = message.attachments.first()
+				if attachment and attachment.file:
+					attachment_url = attachment.file.url
+			
 			channel_layer = get_channel_layer()
 			async_to_sync(channel_layer.group_send)(
 				f"chat_{conversation.conversation_id}",
@@ -138,6 +145,7 @@ class MessageListView(generics.ListCreateAPIView):
 					'message_type': message.message_type,
 					'created_at': message.created_at.isoformat(),
 					'timestamp': timezone.now().isoformat(),
+					'attachment_url': attachment_url,
 				},
 			)
 		except Exception:

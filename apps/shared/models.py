@@ -257,6 +257,7 @@ class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
     post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='posts')
+    post_title = models.CharField(max_length=255)
     post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
