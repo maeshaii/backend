@@ -59,6 +59,7 @@ urlpatterns = [
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
+    path('admin-peso-users/', views.admin_peso_users_view, name='admin_peso_users_view'),
     
     path('tracker/questions/', tracker_questions_view, name='tracker_questions'),
     path('tracker/responses/', submit_tracker_response_view, name='submit_tracker_response'),  # POST for submission
@@ -79,6 +80,7 @@ urlpatterns = [
     path('notifications/count/', views.notifications_count_view, name='notifications_count'),
     path('notifications/delete/', delete_notifications_view, name='delete_notifications'),
     path('alumni/<int:user_id>/', alumni_detail_view, name='alumni_detail'),
+    path('alumni/profile/<int:user_id>/', views.alumni_profile_view, name='alumni_profile'),
     path('alumni/<int:user_id>/followers/', views.alumni_followers_view, name='alumni_followers'),
     path('alumni/<int:user_id>/following/', views.alumni_following_view, name='alumni_following'),
     path('follow/<int:user_id>/', views.follow_user_view, name='follow_user'),

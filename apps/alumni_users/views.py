@@ -159,6 +159,13 @@ def alumni_detail_view(request, user_id):
             'profile_pic': _build_profile_pic_url(user),
             'followers_count': followers_count,
             'following_count': following_count,
+            'account_type': {
+                'user': getattr(user.account_type, 'user', False),
+                'admin': getattr(user.account_type, 'admin', False),
+                'peso': getattr(user.account_type, 'peso', False),
+                'coordinator': getattr(user.account_type, 'coordinator', False),
+                'ojt': getattr(user.account_type, 'ojt', False),
+            },
         }
         return JsonResponse({'success': True, 'alumni': data})
     except User.DoesNotExist as e:

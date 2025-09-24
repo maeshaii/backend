@@ -659,6 +659,24 @@ def notifications_count_view(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def admin_peso_users_view(request):
+    """Get admin and PESO users for dynamic ID resolution."""
+    try:
+        # Get admin users
+        admin_users = User.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
+        # Get PESO users  
+        peso_users = User.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
+        
+        return JsonResponse({
+            'success': True,
+            'admin_user_ids': list(admin_users),
+            'peso_user_ids': list(peso_users)
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def users_list_view(request):
     user = request.user
     # Allow any authenticated user to fetch suggested users
@@ -1560,6 +1578,85 @@ def update_alumni_profile(request):
         return Response({'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def alumni_profile_view(request, user_id):
+    """Get and update alumni profile data for Settings page."""
+    try:
+        logger.info(f"alumni_profile_view called for user_id: {user_id}, request.user: {request.user.user_id}")
+        
+        user = User.objects.select_related('profile').get(user_id=user_id)
+        logger.info(f"User found: {user.f_name} {user.l_name}")
+        
+        # Ensure user has a profile, create one if it doesn't exist
+        if not hasattr(user, 'profile') or not user.profile:
+            from apps.shared.models import UserProfile
+            UserProfile.objects.create(user=user)
+            user.refresh_from_db()
+            logger.info(f"Created profile for user {user_id}")
+        
+        # Check if user is accessing their own profile or is admin
+        if request.user.user_id != user_id and not request.user.account_type.admin:
+            logger.warning(f"Permission denied: request.user {request.user.user_id} trying to access user {user_id}")
+            return JsonResponse({'error': 'Permission denied'}, status=403)
+        
+        if request.method == 'GET':
+            # Return profile data in the format expected by Settings.tsx
+            profile_data = {
+                'user_id': user.user_id,
+                'f_name': user.f_name or '',
+                'l_name': user.l_name or '',
+                'm_name': user.m_name or '',
+                'civil_status': user.profile.civil_status if hasattr(user, 'profile') and user.profile else '',
+                'contact_number': user.profile.phone_num if hasattr(user, 'profile') and user.profile else '',
+                'email': user.profile.email if hasattr(user, 'profile') and user.profile else '',
+                'address': user.profile.address if hasattr(user, 'profile') and user.profile else '',
+                'home_address': user.profile.home_address if hasattr(user, 'profile') and user.profile else '',
+                'social_media': user.profile.social_media if hasattr(user, 'profile') and user.profile else '',
+                'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None
+            }
+            logger.info(f"Returning profile data: {profile_data}")
+            return JsonResponse(profile_data)
+            
+        elif request.method == 'PUT':
+            data = json.loads(request.body)
+            
+            # Update User table fields
+            if 'f_name' in data:
+                user.f_name = data['f_name']
+            if 'm_name' in data:
+                user.m_name = data['m_name']
+            if 'l_name' in data:
+                user.l_name = data['l_name']
+            user.save()
+            
+            # Update UserProfile table fields
+            from apps.shared.models import UserProfile
+            profile, created = UserProfile.objects.get_or_create(user=user)
+            
+            if 'contact_number' in data:
+                profile.phone_num = data['contact_number']
+            if 'email' in data:
+                profile.email = data['email']
+            if 'address' in data:
+                profile.address = data['address']
+            if 'home_address' in data:
+                profile.home_address = data['home_address']
+            if 'civil_status' in data:
+                profile.civil_status = data['civil_status']
+            if 'social_media' in data:
+                profile.social_media = data['social_media']
+            
+            profile.save()
+            
+            return JsonResponse({'message': 'Profile updated successfully'})
+            
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'User not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
 @api_view(['GET'])
 def search_alumni(request):
     query = request.GET.get('q', '').strip()
@@ -1784,6 +1881,10 @@ def repost_detail_view(request, repost_id):
             'f_name': l.user.f_name,
             'l_name': l.user.l_name,
             'profile_pic': build_profile_pic_url(l.user),
+            'initials': None if build_profile_pic_url(l.user) else (
+                ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+            ),
         } for l in likes],
         'comments': [{
             'comment_id': c.repost_comment_id,
@@ -2408,10 +2509,14 @@ def forum_list_create_view(request):
         items = []
         for f in forums:
             try:
-                # Use ForumLike, ForumComment, ForumRepost models
-                likes_count = ForumLike.objects.filter(forum=f).count()
-                comments_count = ForumComment.objects.filter(forum=f).count()
-                reposts_count = ForumRepost.objects.filter(forum=f).count()
+                # Get likes, comments, and reposts data
+                likes = ForumLike.objects.filter(forum=f).select_related('user')
+                comments = ForumComment.objects.filter(forum=f).select_related('user').order_by('-date_created')
+                reposts = ForumRepost.objects.filter(forum=f).select_related('user')
+                
+                likes_count = likes.count()
+                comments_count = comments.count()
+                reposts_count = reposts.count()
                 is_liked = ForumLike.objects.filter(forum=f, user=request.user).exists()
                 
                 items.append({
@@ -2425,6 +2530,37 @@ def forum_list_create_view(request):
                     'comments_count': comments_count,
                     'reposts_count': reposts_count,
                     'is_liked': is_liked,
+                    'likes': [{
+                        'user_id': l.user.user_id,
+                        'f_name': l.user.f_name,
+                        'l_name': l.user.l_name,
+                        'profile_pic': build_profile_pic_url(l.user),
+                        'initials': None if build_profile_pic_url(l.user) else (
+                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                        ),
+                    } for l in likes],
+                    'comments': [{
+                        'comment_id': c.forum_comment_id,
+                        'comment_content': c.comment_content,
+                        'date_created': c.date_created.isoformat() if c.date_created else None,
+                        'user': {
+                            'user_id': c.user.user_id,
+                            'f_name': c.user.f_name,
+                            'l_name': c.user.l_name,
+                            'profile_pic': build_profile_pic_url(c.user),
+                        }
+                    } for c in comments],
+                    'reposts': [{
+                        'repost_id': r.forum_repost_id,
+                        'repost_date': r.repost_date.isoformat(),
+                        'user': {
+                            'user_id': r.user.user_id,
+                            'f_name': r.user.f_name,
+                            'l_name': r.user.l_name,
+                            'profile_pic': build_profile_pic_url(r.user),
+                        }
+                    } for r in reposts],
                     'user': {
                         'user_id': f.user.user_id,
                         'f_name': f.user.f_name,
@@ -2486,6 +2622,10 @@ def forum_detail_edit_view(request, forum_id):
                     'f_name': l.user.f_name,
                     'l_name': l.user.l_name,
                     'profile_pic': build_profile_pic_url(l.user),
+                    'initials': None if build_profile_pic_url(l.user) else (
+                        ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                        if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                    ),
                 } for l in likes],
                 'comments': [{
                     'comment_id': c.forum_comment_id,
@@ -2633,11 +2773,20 @@ def forum_comments_view(request, forum_id):
 @permission_classes([IsAuthenticated])
 def forum_comment_edit_view(request, forum_id, comment_id):
     try:
-        forum = Forum.objects.select_related('post').get(forum_id=forum_id)
-        comment = Comment.objects.get(comment_id=comment_id, post=forum.post)
-        if comment.user.user_id != request.user.user_id:
+        forum = Forum.objects.get(forum_id=forum_id)
+        comment = ForumComment.objects.get(forum_comment_id=comment_id, forum=forum)
+        
+        # Check if current user owns this comment OR owns the post
+        comment_owner = comment.user.user_id == request.user.user_id
+        post_owner = forum.user.user_id == request.user.user_id
+        
+        if not (comment_owner or post_owner):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+            
         if request.method == 'PUT':
+            # Only comment owner can edit
+            if not comment_owner:
+                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
             data = json.loads(request.body or "{}")
             content = data.get('comment_content')
             if content is None:
@@ -2646,9 +2795,10 @@ def forum_comment_edit_view(request, forum_id, comment_id):
             comment.save()
             return JsonResponse({'success': True})
         else:
+            # Both comment owner and post owner can delete
             comment.delete()
             return JsonResponse({'success': True})
-    except Comment.DoesNotExist:
+    except ForumComment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
 
 
@@ -2993,11 +3143,21 @@ def posts_view(request):
                 likes = Like.objects.filter(post=post).select_related('user')
                 likes_data = []
                 for like in likes:
+                    pic = build_profile_pic_url(like.user)
+                    initials = None
+                    if not pic:
+                        try:
+                            f = (like.user.f_name or '').strip()[:1].upper()
+                            l = (like.user.l_name or '').strip()[:1].upper()
+                            initials = f + l if (f or l) else None
+                        except Exception:
+                            initials = None
                     likes_data.append({
                         'user_id': like.user.user_id,
                         'f_name': like.user.f_name,
                         'l_name': like.user.l_name,
-                        'profile_pic': build_profile_pic_url(like.user),
+                        'profile_pic': pic,
+                        'initials': initials,
                     })
 
                 # Get comments for the post
