@@ -126,5 +126,9 @@ urlpatterns = [
     path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
     path('forum-reposts/<int:repost_id>/', views.forum_repost_delete_view, name='forum_repost_delete'),
     
+    # User profile social media and email endpoints
+    path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
+    path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
+    
 ]
 

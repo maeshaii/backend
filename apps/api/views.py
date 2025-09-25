@@ -7,6 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from django.conf import settings
+from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
 from django.core.files.storage import default_storage
 from django.views.decorators.http import require_http_methods
@@ -1586,18 +1587,16 @@ def alumni_profile_view(request, user_id):
         logger.info(f"alumni_profile_view called for user_id: {user_id}, request.user: {request.user.user_id}")
         
         user = User.objects.select_related('profile').get(user_id=user_id)
-        logger.info(f"User found: {user.f_name} {user.l_name}")
-        
         # Ensure user has a profile, create one if it doesn't exist
         if not hasattr(user, 'profile') or not user.profile:
             from apps.shared.models import UserProfile
             UserProfile.objects.create(user=user)
             user.refresh_from_db()
-            logger.info(f"Created profile for user {user_id}")
         
-        # Check if user is accessing their own profile or is admin
-        if request.user.user_id != user_id and not request.user.account_type.admin:
-            logger.warning(f"Permission denied: request.user {request.user.user_id} trying to access user {user_id}")
+        # For GET requests, allow any authenticated user to view profiles
+        # For PUT requests, only allow users to edit their own profile or admins to edit any profile
+        if request.method == 'PUT' and request.user.user_id != user_id and not request.user.account_type.admin:
+            logger.warning(f"Permission denied: request.user {request.user.user_id} trying to edit user {user_id}")
             return JsonResponse({'error': 'Permission denied'}, status=403)
         
         if request.method == 'GET':
@@ -1613,9 +1612,9 @@ def alumni_profile_view(request, user_id):
                 'address': user.profile.address if hasattr(user, 'profile') and user.profile else '',
                 'home_address': user.profile.home_address if hasattr(user, 'profile') and user.profile else '',
                 'social_media': user.profile.social_media if hasattr(user, 'profile') and user.profile else '',
+                'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else '',
                 'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None
             }
-            logger.info(f"Returning profile data: {profile_data}")
             return JsonResponse(profile_data)
             
         elif request.method == 'PUT':
@@ -3350,6 +3349,81 @@ def get_all_alumni(request):
     except Exception as e:
         logger.error(f"get_all_alumni failed: {e}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def userprofile_social_media_view(request, user_id):
+    """Get or update user's social media"""
+    try:
+        # Get user's profile
+        user = get_object_or_404(User, user_id=user_id)
+        profile, created = UserProfile.objects.get_or_create(user=user)
+        
+        if request.method == 'GET':
+            return Response({
+                'success': True,
+                'social_media': profile.social_media or ''
+            })
+        
+        elif request.method == 'PUT':
+            data = request.data
+            social_media = data.get('social_media', '').strip()
+            
+            profile.social_media = social_media if social_media else None
+            profile.save()
+            
+            return Response({
+                'success': True,
+                'social_media': profile.social_media or '',
+                'message': 'Social media updated successfully'
+            })
+            
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=400)
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def userprofile_email_view(request, user_id):
+    """Get or update user's email"""
+    try:
+        # Get user's profile
+        user = get_object_or_404(User, user_id=user_id)
+        profile, created = UserProfile.objects.get_or_create(user=user)
+        
+        if request.method == 'GET':
+            return Response({
+                'success': True,
+                'email': profile.email or ''
+            })
+        
+        elif request.method == 'PUT':
+            data = request.data
+            email = data.get('email', '').strip()
+            
+            # Validate email format if provided
+            if email and '@' not in email:
+                return Response({
+                    'success': False,
+                    'error': 'Invalid email format'
+                }, status=400)
+            
+            profile.email = email if email else None
+            profile.save()
+            
+            return Response({
+                'success': True,
+                'email': profile.email or '',
+                'message': 'Email updated successfully'
+            })
+            
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=400)
 
 @api_view(["POST"])
 def forgot_password_view(request):
