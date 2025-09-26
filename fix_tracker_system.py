@@ -51,6 +51,7 @@ def fix_tracker_system():
         notification_content = f"""
 Hi {user.f_name} {user.l_name},<br><br>
 We hope you're doing well! This is a gentle reminder to complete the required Tracker Form to help us keep everything on track and up to date.<br><br>
+⚠️ <strong>IMPORTANT:</strong> Before proceeding to answer the form, kindly prepare the necessary supporting documents to ensure a smooth process and avoid delays in completing it.<br><br>
 Please take a few moments to fill it out by clicking the link below:<br>
 <a href='{tracker_link}' style='color:#1e4c7a;font-weight:600;text-decoration:underline;cursor:pointer;'>👉 Fill Out the Tracker Form</a><br><br>
 Your timely response is greatly appreciated and helps us stay aligned and organized.<br><br>

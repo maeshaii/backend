@@ -111,6 +111,7 @@ urlpatterns = [
     path('reposts/<int:repost_id>/comments/', views.repost_comments_view, name='repost_comments'),
     path('reposts/<int:repost_id>/comments/<int:comment_id>/', views.repost_comment_edit_view, name='repost_comment_edit'),
     path('posts/<int:post_id>/', views.post_edit_view, name='post_edit'),
+    path('posts/<int:post_id>/detail/', views.post_detail_view, name='post_detail'),
     path('posts/delete/<int:post_id>/', views.post_delete_view, name='post_delete'),
     path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
     path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),

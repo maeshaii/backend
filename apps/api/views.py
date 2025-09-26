@@ -2024,7 +2024,7 @@ def post_like_view(request, post_id):
                         user=post.user,
                         notif_type='like',
                         subject='Post Liked',
-                        notifi_content=f"{user.f_name} {user.l_name} liked your post",
+                        notifi_content=f"{user.f_name} {user.l_name} liked your post (Post ID: {post.post_id})",
                         notif_date=timezone.now()
                     )
                 return JsonResponse({'success': True, 'message': 'Post liked'})
@@ -2173,7 +2173,7 @@ def post_comments_view(request, post_id):
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
-                    notifi_content=f"{user.f_name} {user.l_name} commented on your post",
+                    notifi_content=f"{user.f_name} {user.l_name} commented on your post (Post ID: {post.post_id})",
                     notif_date=timezone.now()
                 )
 
