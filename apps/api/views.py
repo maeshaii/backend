@@ -1717,6 +1717,17 @@ def post_detail_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
 
+    elif request.method == "DELETE":
+        # Handle DELETE requests by delegating to the dedicated delete view
+        try:
+            logger.info(f"post_detail_view: Delegating DELETE request for post_id={post_id}")
+            result = post_delete_view(request, post_id)
+            logger.info(f"post_detail_view: DELETE delegation result: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"post_detail_view: DELETE delegation failed for post_id={post_id}: {e}", exc_info=True)
+            return JsonResponse({'error': str(e)}, status=500)
+
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
@@ -1992,13 +2003,8 @@ def post_edit_view(request, post_id):
                 if getattr(post, 'post_image', None):
                     post.post_image.delete(save=False)
 
-                # Delete related images if they exist
-                images_rel = getattr(post, 'images', None)
-                if images_rel is not None:
-                    for img in list(images_rel.all()):
-                        if getattr(img, 'image', None):
-                            img.image.delete(save=False)
-                    images_rel.all().delete()
+                # Note: Post model doesn't have an 'images' relationship
+                # The post_image field is handled above
 
                 # Finally delete the post itself
                 post.delete()
@@ -2109,47 +2115,32 @@ def post_comments_view(request, post_id):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def post_delete_view(request, post_id):
+    logger.info(f"post_delete_view: Starting delete process for post_id={post_id}")
     try:
         post = Post.objects.get(post_id=post_id)
         user = request.user
+        
+        logger.info(f"post_delete_view: Found post, user_id={user.user_id}, post_owner={post.user.user_id}")
 
         # Allow deletion if user owns the post OR user is admin
         if post.user.user_id != user.user_id and not getattr(user.account_type, 'admin', False):
+            logger.warning(f"post_delete_view: Unauthorized deletion attempt for post_id={post_id} by user_id={user.user_id}")
             return JsonResponse({'error': 'Unauthorized'}, status=403)
 
-        try:
-            # Best-effort cleanup of associated uploaded files before deletion
-            if getattr(post, 'post_image', None):
-                try:
-                    post.post_image.delete(save=False)
-                except Exception:
-                    pass
-
-            images_rel = getattr(post, 'images', None)
-            if images_rel is not None:
-                for img in list(images_rel.all()):
-                    try:
-                        if getattr(img, 'image', None):
-                            img.image.delete(save=False)
-                    except Exception:
-                        pass
-                images_rel.all().delete()
-
-            # Finally delete the post itself
-            post.delete()
-            return JsonResponse({'success': True, 'message': 'Post deleted'})
-
-        except Exception as e:
-            logger.error(f"post_delete_view failed for post_id={post_id}: {e}")
-            return JsonResponse(
-                {'success': False, 'message': 'Delete failed', 'error': str(e)},
-                status=500
-            )
+        # Simple deletion without file cleanup for now
+        logger.info(f"post_delete_view: Deleting post record for post_id={post_id}")
+        post.delete()
+        logger.info(f"post_delete_view: Successfully deleted post_id={post_id}")
+        response = JsonResponse({'success': True, 'message': 'Post deleted'})
+        logger.info(f"post_delete_view: Returning response: {response}")
+        return response
 
     except Post.DoesNotExist:
+        logger.warning(f"post_delete_view: Post not found for post_id={post_id}")
         return JsonResponse({'error': 'Post not found'}, status=404)
 
     except Exception as e:
+        logger.error(f"post_delete_view failed for post_id={post_id}: {e}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
 
 
@@ -2307,7 +2298,7 @@ def alumni_followers_view(request, user_id):
     try:
         user = User.objects.get(user_id=user_id)
         from apps.shared.models import Follow
-        followers = Follow.objects.filter(following=user).select_related('follower')
+        followers = Follow.objects.filter(following=user).select_related('follower', 'follower__profile')
         if not followers.exists():
             return JsonResponse({
                 'success': True,
@@ -2322,6 +2313,8 @@ def alumni_followers_view(request, user_id):
                 'user_id': follower.user_id,
                 'ctu_id': follower.acc_username,
                 'name': f"{follower.f_name} {follower.l_name}",
+                'f_name': follower.f_name,
+                'l_name': follower.l_name,
                 'profile_pic': build_profile_pic_url(follower),
                 'followed_at': follow_obj.followed_at.isoformat()
             })
@@ -2348,7 +2341,7 @@ def alumni_following_view(request, user_id):
     try:
         user = User.objects.get(user_id=user_id)
         from apps.shared.models import Follow
-        following = Follow.objects.filter(follower=user).select_related('following')
+        following = Follow.objects.filter(follower=user).select_related('following', 'following__profile')
         if not following.exists():
             return JsonResponse({
                 'success': True,
@@ -2363,6 +2356,8 @@ def alumni_following_view(request, user_id):
                 'user_id': followed_user.user_id,
                 'ctu_id': followed_user.acc_username,
                 'name': f"{followed_user.f_name} {followed_user.l_name}",
+                'f_name': followed_user.f_name,
+                'l_name': followed_user.l_name,
                 'profile_pic': build_profile_pic_url(followed_user),
                 'followed_at': follow_obj.followed_at.isoformat()
             })
@@ -3337,10 +3332,29 @@ def posts_view(request):
                 reposts = Repost.objects.filter(post=post).select_related('user')
                 reposts_data = []
                 for repost in reposts:
+                    # Get repost likes count and data
+                    repost_likes = RepostLike.objects.filter(repost=repost).select_related('user')
+                    repost_likes_count = repost_likes.count()
+                    repost_likes_data = []
+                    for like in repost_likes:
+                        repost_likes_data.append({
+                            'user_id': like.user.user_id,
+                            'f_name': like.user.f_name,
+                            'l_name': like.user.l_name,
+                            'profile_pic': build_profile_pic_url(like.user),
+                        })
+                    
+                    # Get repost comments count
+                    repost_comments_count = RepostComment.objects.filter(repost=repost).count()
+                    
                     reposts_data.append({
                         'repost_id': repost.repost_id,
                         'repost_date': repost.repost_date.isoformat(),
                         'caption': repost.caption,
+                        'likes_count': repost_likes_count,
+                        'comments_count': repost_comments_count,
+                        'reposts_count': 0,  # Reposts don't have reposts
+                        'likes': repost_likes_data,
                         'user': {
                             'user_id': repost.user.user_id,
                             'f_name': repost.user.f_name,
