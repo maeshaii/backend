@@ -4,7 +4,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0057_relax_legacy_content_constraint'),
+        ('shared', '0046_add_sector_scope_fields'),
     ]
 
     operations = [

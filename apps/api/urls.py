@@ -1,7 +1,7 @@
 from django.urls import path, include
 from . import views
 from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view
+from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view, approve_ojt_to_alumni_view, approve_individual_ojt_to_alumni_view
 from apps.tracker.views import (
     tracker_questions_view,
     tracker_responses_view,
@@ -57,6 +57,9 @@ urlpatterns = [
     path('ojt/coordinator-requests/', coordinator_requests_count_view, name='ojt_coordinator_requests'),
     path('ojt/coordinator-requests/list/', coordinator_requests_list_view, name='ojt_coordinator_requests_list'),
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
+    path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
+    path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
+    path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
     

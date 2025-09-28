@@ -44,8 +44,7 @@ def create_coordinator_user():
             user_status='active',
             f_name='Coordinator',
             l_name='User',
-            gender='N/A',
-            civil_status='N/A'
+            gender='N/A'
         )
         
         print(f"Successfully created coordinator user with ID: {coordinator_user.user_id}")

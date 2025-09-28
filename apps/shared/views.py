@@ -456,18 +456,23 @@ def export_initial_passwords(request):
     This function exports usernames and their corresponding initial passwords.
     """
     try:
-        # Get all alumni users
-        alumni = User.objects.filter(account_type__user=True)
+        # Get all alumni users with their stored initial passwords
+        alumni = User.objects.filter(account_type__user=True).select_related('initial_password')
         
         # Prepare data for export
         password_data = []
         for alum in alumni:
+            # Get the actual stored password or use default
+            initial_password = 'wherenayou2025'  # Default fallback
+            if hasattr(alum, 'initial_password') and alum.initial_password:
+                initial_password = alum.initial_password.password_encrypted
+            
             password_data.append({
                 'CTU_ID': alum.acc_username,
                 'First_Name': alum.f_name,
                 'Last_Name': alum.l_name,
-                'Email': alum.email,
-                'Initial_Password': 'wherenayou2025'  # Default initial password
+                'Email': getattr(alum, 'email', ''),
+                'Initial_Password': initial_password
             })
         
         if not password_data:

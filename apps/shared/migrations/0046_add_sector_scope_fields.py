@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0045_merge_20250909_2358'),
+        ('shared', '0002_donation_donationcomment_donationlike_donationrepost'),
     ]
 
     operations = [
@@ -29,8 +29,5 @@ class Migration(migrations.Migration):
             model_name='trackerdata',
             name='q_sector_current',
             field=models.CharField(blank=True, max_length=50, null=True),
-        ),
-        migrations.DeleteModel(
-            name='PostImage',
         ),
     ]
