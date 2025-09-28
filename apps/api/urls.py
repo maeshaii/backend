@@ -131,5 +131,9 @@ urlpatterns = [
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
     path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
     
+    # User Management API endpoints (Admin only)
+    path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
+    path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
+    
 ]
 
