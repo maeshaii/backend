@@ -1030,6 +1030,7 @@ def import_ojt_view(request):
                 # Create OJT info
                 try:
                     OJTInfo.objects.create(
+                        ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         user=ojt_user,
                         ojt_end_date=ojt_end_date,
                         ojtstatus=str(row.get('Status') or row.get('status') or '').strip() or None,
@@ -1196,7 +1197,7 @@ def ojt_by_year_view(request):
                 'social_media': getattr(ojt.profile, 'social_media', None),
                 'course': getattr(ojt.academic_info, 'course', None),
                 'company': getattr(ojt.employment, 'company_name_current', None),
-                'ojt_start_date': None,
+                'ojt_start_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_start_date', None),
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
@@ -1250,18 +1251,26 @@ def ojt_status_update_view(request):
         data = json.loads(request.body or '{}')
         user_id = data.get('user_id')
         status_val = (data.get('status') or '').strip()
+        print(f"OJT Status Update - User ID: {user_id}, Status: {status_val}")
+
         if not user_id or not status_val:
+            print("Missing user_id or status")
             return JsonResponse({'success': False, 'message': 'user_id and status are required'}, status=400)
         try:
             user = User.objects.get(user_id=int(user_id))
+            print(f"Found user: {user.acc_username}")
         except User.DoesNotExist:
+            print(f"User not found with ID: {user_id}")
             return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
         from apps.shared.models import OJTInfo
-        ojt_info, _ = OJTInfo.objects.get_or_create(user=user)
+        ojt_info, created = OJTInfo.objects.get_or_create(user=user)
+        print(f"OJTInfo created: {created}, existing ojtstatus: {ojt_info.ojtstatus}")
         ojt_info.ojtstatus = status_val
         ojt_info.save()
+        print(f"Updated ojtstatus to: {ojt_info.ojtstatus}")
         return JsonResponse({'success': True})
     except Exception as e:
+        print(f"Error in ojt_status_update_view: {str(e)}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
@@ -1394,58 +1403,95 @@ def coordinator_requests_list_view(request):
     try:
         from apps.shared.models import OJTImport
         items = []
-        # Base: group Requested imports by year and take max count to avoid duplicates
+        
+        # Debug: Check all OJTImport records
+        all_imports = OJTImport.objects.all()
+        print(f"DEBUG: Total OJTImport records: {all_imports.count()}")
+        for imp in all_imports:
+            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
+        
+        # Base: group Requested imports by year and course, take max count to avoid duplicates
         try:
             from django.db.models import Max, Value as V
             from django.db.models.functions import Coalesce
+            requested_imports = OJTImport.objects.filter(status='Requested')
+            print(f"DEBUG: Found {requested_imports.count()} Requested imports")
+            
             grouped = (
-                OJTImport.objects.filter(status='Requested')
-                .values('batch_year')
+                requested_imports
+                .values('batch_year', 'course')
                 .annotate(count=Coalesce(Max('records_imported'), V(0)))
                 .order_by('-batch_year')
             )
             for row in grouped:
-                items.append({'batch_year': row.get('batch_year'), 'count': row.get('count', 0) or 0})
-        except Exception:
-            # Fallback: if aggregation not available, compute max per year in Python
-            by_year = {}
+                items.append({
+                    'batch_year': row.get('batch_year'), 
+                    'course': row.get('course', ''),
+                    'count': row.get('count', 0) or 0
+                })
+        except Exception as e:
+            print(f"DEBUG: Exception in grouped query: {e}")
+            # Fallback: if aggregation not available, compute max per year and course in Python
+            by_year_course = {}
             for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
                 year = getattr(imp, 'batch_year', None)
+                course = getattr(imp, 'course', '')
                 count_val = getattr(imp, 'records_imported', 0) or 0
                 if year is None:
                     continue
-                by_year[year] = max(by_year.get(year, 0), count_val)
-            for y, c in by_year.items():
-                items.append({'batch_year': y, 'count': c})
+                key = (year, course)
+                by_year_course[key] = max(by_year_course.get(key, 0), count_val)
+            for (y, course), c in by_year_course.items():
+                items.append({'batch_year': y, 'course': course, 'count': c})
 
         # Fallback: for any batch lacking a Requested import but has Completed users
+        # BUT only if there's no Approved OJTImport for that batch
         try:
-            completed_years = (
+            completed_years_courses = (
                 User.objects.filter(ojt_info__ojtstatus='Completed')
-                .values('academic_info__year_graduated')
+                .values('academic_info__year_graduated', 'academic_info__course')
                 .annotate()
             )
-            existing_years = {it['batch_year'] for it in items if it.get('batch_year') is not None}
-            for row in completed_years:
+            existing_keys = {(it['batch_year'], it.get('course', '')) for it in items if it.get('batch_year') is not None}
+            
+            # Get all approved batches to exclude them from fallback
+            approved_batches = set(OJTImport.objects.filter(status='Approved').values_list('batch_year', flat=True))
+            print(f"DEBUG: Approved batches: {approved_batches}")
+            print(f"DEBUG: Existing keys from main query: {existing_keys}")
+            
+            for row in completed_years_courses:
                 y = row.get('academic_info__year_graduated')
-                if y and y not in existing_years:
-                    count = User.objects.filter(academic_info__year_graduated=y, ojt_info__ojtstatus='Completed').count()
-                    items.append({'batch_year': y, 'count': count})
-        except Exception:
+                course = row.get('academic_info__course', '')
+                print(f"DEBUG: Checking completed year {y}, course {course}")
+                if y and (y, course) not in existing_keys and y not in approved_batches:
+                    count = User.objects.filter(
+                        academic_info__year_graduated=y, 
+                        academic_info__course=course,
+                        ojt_info__ojtstatus='Completed'
+                    ).count()
+                    print(f"DEBUG: Adding fallback item for year {y}, course {course}, count {count}")
+                    items.append({'batch_year': y, 'course': course, 'count': count})
+                else:
+                    print(f"DEBUG: Skipping year {y}, course {course} - existing_keys: {(y, course) in existing_keys}, approved: {y in approved_batches}")
+        except Exception as e:
+            print(f"DEBUG: Exception in fallback: {e}")
             pass
 
-        # Sort newest first and ensure unique years
+        # Sort newest first and ensure unique year-course combinations
         dedup = {}
         for it in items:
             y = it.get('batch_year')
+            course = it.get('course', '')
             if y is None:
                 continue
-            dedup[y] = max(dedup.get(y, 0), int(it.get('count') or 0))
-        items = [{'batch_year': y, 'count': c} for y, c in dedup.items()]
+            key = (y, course)
+            dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
+        items = [{'batch_year': y, 'course': course, 'count': c} for (y, course), c in dedup.items()]
         items.sort(key=lambda x: int(x['batch_year']), reverse=True)
         return JsonResponse({'success': True, 'items': items})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
 
 
 # Admin approves a coordinator request for a given batch year
@@ -1467,6 +1513,229 @@ def approve_coordinator_request_view(request):
 
         updated = OJTImport.objects.filter(batch_year=year_int, status='Requested').update(status='Approved')
         return JsonResponse({'success': True, 'approved': updated, 'year': year_int})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_ojt_to_alumni_view(request):
+    """Approve completed OJT students to become alumni with password generation"""
+    try:
+        print("approve_ojt_to_alumni_view: start")
+        data = json.loads(request.body or '{}')
+        year = data.get('year')
+        if year is None:
+            return JsonResponse({'success': False, 'message': 'Missing year'}, status=400)
+
+        from apps.shared.models import User, AccountType, OJTInfo, UserInitialPassword, AcademicInfo
+        from django.db import transaction
+        import secrets
+        import string
+        from django.contrib.auth.hashers import make_password
+
+        # Normalize year to int if possible
+        try:
+            year_int = int(str(year))
+        except Exception as e:
+            print(f"approve_ojt_to_alumni_view: invalid year {year} err={e}")
+            return JsonResponse({'success': False, 'message': 'Invalid year'}, status=400)
+
+        # Get an alumni account type (user=True). If duplicates exist, take the first; create if none.
+        try:
+            alumni_type = AccountType.objects.filter(user=True).first()
+            if not alumni_type:
+                alumni_type = AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
+        except Exception:
+            alumni_type = AccountType.objects.filter(user=True).first() or AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
+
+        # Find completed OJT students for this year (use AcademicInfo.year_graduated)
+        completed_ojt_users = User.objects.filter(
+            account_type__ojt=True,
+            ojt_info__ojtstatus='Completed',
+            academic_info__year_graduated=year_int
+        ).select_related('ojt_info', 'academic_info')
+
+        print(f"Found {completed_ojt_users.count()} completed OJT students for year {year_int}")
+        if not completed_ojt_users.exists():
+            return JsonResponse({
+                'success': False, 
+                'message': f'No completed OJT students found for year {year_int}'
+            }, status=400)
+
+        passwords = []
+        approved_count = 0
+        batch_created = False
+        errors = []
+
+        print(f"approve_ojt_to_alumni_view: candidates={completed_ojt_users.count()}")
+        with transaction.atomic():
+            # Check if alumni batch already exists
+            existing_alumni = User.objects.filter(
+                account_type__user=True,
+                academic_info__year_graduated=year_int
+            ).exists()
+
+            if not existing_alumni:
+                batch_created = True
+
+            # Remove the coordinator request card after approval
+            from apps.shared.models import OJTImport
+            updated_imports = OJTImport.objects.filter(batch_year=year_int, status='Requested').update(status='Approved')
+            print(f"Updated {updated_imports} OJTImport records from Requested to Approved for year {year_int}")
+
+            for user in completed_ojt_users:
+                try:
+                    print(f"processing user_id={user.user_id} username={user.acc_username}")
+                    # Generate password
+                    password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+                    
+                    # Update user to alumni account type
+                    user.account_type = alumni_type
+                    user.user_status = 'active'
+                    user.acc_password = make_password(password)
+                    user.save()
+
+                    # Store initial password for export
+                    UserInitialPassword.objects.update_or_create(
+                        user=user,
+                        defaults={
+                                'password_encrypted': password,
+                            'is_active': True
+                        }
+                    )
+
+                    # Ensure academic info year_graduated is set
+                    if hasattr(user, 'academic_info') and user.academic_info:
+                            if not getattr(user.academic_info, 'year_graduated', None):
+                                user.academic_info.year_graduated = year_int
+                            user.academic_info.save()
+
+                    passwords.append({
+                        'user_id': user.user_id,
+                        'username': user.acc_username,
+                        'password': password,
+                        'name': f"{user.f_name} {user.l_name}"
+                    })
+
+                    approved_count += 1
+                except Exception as conv_e:
+                    import traceback
+                    traceback.print_exc()
+                    errors.append({'user_id': user.user_id, 'username': user.acc_username, 'error': str(conv_e)})
+
+        return JsonResponse({
+            'success': True if approved_count > 0 else False,
+            'approved': approved_count,
+            'year': year_int,
+            'batch_created': batch_created,
+            'batch_year': str(year_int),
+            'passwords': passwords,
+            'errors': errors
+        }, status=200 if approved_count > 0 else 400)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"approve_ojt_to_alumni_view: ERROR {e}")
+        # Return a 200 with success False so the UI can show the message
+        return JsonResponse({'success': False, 'message': str(e)}, status=200)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_individual_ojt_to_alumni_view(request):
+    """Approve a single OJT student to become alumni with password generation"""
+    try:
+        data = json.loads(request.body or '{}')
+        user_id = data.get('user_id')
+        if user_id is None:
+            return JsonResponse({'success': False, 'message': 'Missing user_id'}, status=400)
+
+        from apps.shared.models import User, AccountType, OJTInfo, UserInitialPassword, AcademicInfo
+        from django.db import transaction
+        import secrets
+        import string
+        from django.contrib.auth.hashers import make_password
+
+        try:
+            user = User.objects.get(user_id=int(user_id))
+        except User.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
+
+        # Check if user has OJT info and is completed/approved
+        try:
+            ojt_info = user.ojt_info
+            if ojt_info.ojtstatus not in ['Completed', 'Approved']:
+                return JsonResponse({
+                    'success': False, 
+                    'message': f'User OJT status is {ojt_info.ojtstatus}, must be Completed or Approved'
+                }, status=400)
+        except OJTInfo.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'User has no OJT information'}, status=400)
+
+        # Get an alumni account type (user=True). If duplicates exist, take the first; create if none.
+        try:
+            alumni_type = AccountType.objects.filter(user=True).first()
+            if not alumni_type:
+                alumni_type = AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
+        except Exception:
+            alumni_type = AccountType.objects.filter(user=True).first() or AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
+
+        # Get batch year from academic info (use year_graduated)
+        try:
+            batch_year = getattr(user.academic_info, 'year_graduated', None)
+            if not batch_year:
+                return JsonResponse({'success': False, 'message': 'User has no batch year'}, status=400)
+        except AcademicInfo.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'User has no academic information'}, status=400)
+
+        with transaction.atomic():
+            # Check if alumni batch already exists (query by year_graduated)
+            existing_alumni = User.objects.filter(
+                account_type__user=True,
+                academic_info__year_graduated=batch_year
+            ).exists()
+
+            batch_created = not existing_alumni
+
+            # Generate password
+            password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+            
+            # Update user to alumni account type
+            user.account_type = alumni_type
+            user.user_status = 'active'
+            user.acc_password = make_password(password)
+            user.save()
+
+            # Store initial password for export
+            UserInitialPassword.objects.update_or_create(
+                user=user,
+                defaults={
+                    'password_encrypted': password,  # Store plaintext for now, will be encrypted
+                    'is_active': True
+                }
+            )
+
+            # Ensure academic info year_graduated is set
+            if hasattr(user, 'academic_info') and user.academic_info:
+                if not getattr(user.academic_info, 'year_graduated', None):
+                    user.academic_info.year_graduated = batch_year
+                    user.academic_info.save()
+
+        return JsonResponse({
+            'success': True,
+            'approved': 1,
+            'year': batch_year,
+            'batch_created': batch_created,
+            'batch_year': str(batch_year),
+            'passwords': [{
+                'user_id': user.user_id,
+                'username': user.acc_username,
+                'password': password,
+                'name': f"{user.f_name} {user.l_name}"
+            }]
+        })
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
@@ -3040,6 +3309,7 @@ def posts_view(request):
         if request.method == "POST":
             data = json.loads(request.body or "{}")
             post_content = data.get('post_content') or ''
+            post_title = data.get('post_title') or ''
             post_cat_id = data.get('post_cat_id')
             post_type = data.get('type') or 'personal'
 

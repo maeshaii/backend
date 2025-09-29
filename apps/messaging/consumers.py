@@ -177,6 +177,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			'message_type': event['message_type'],
 			'created_at': event['created_at'],
 			'timestamp': event['timestamp'],
+			'attachment_url': event['attachment_url'],
 		}))
 
 	async def user_typing(self, event):
