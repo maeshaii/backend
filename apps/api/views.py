@@ -624,6 +624,7 @@ def notifications_view(request):
             'subject': getattr(n, 'subject', None) or 'Tracker Form Reminder',
             'content': n.notifi_content,
             'date': n.notif_date.strftime('%Y-%m-%d %H:%M:%S'),
+            'is_read': getattr(n, 'is_read', False),
         }
         # Extract follower profile link if present (e.g., /alumni/profile/<id>)
         try:
@@ -648,15 +649,46 @@ def notifications_count_view(request):
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
 
-    # Count notifications based on user type
+    # Count UNREAD notifications only, based on user type
     if hasattr(user.account_type, 'user') and user.account_type.user:
-        count = Notification.objects.filter(user_id=user_id).count()
+        count = Notification.objects.filter(user_id=user_id, is_read=False).count()
     elif hasattr(user.account_type, 'ojt') and user.account_type.ojt:
-        count = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').count()
+        count = Notification.objects.filter(user_id=user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
     else:
-        count = Notification.objects.filter(user_id=user_id).exclude(notif_type__iexact='tracker').count()
+        count = Notification.objects.filter(user_id=user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
 
     return JsonResponse({'success': True, 'count': count})
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def mark_notification_as_read(request):
+    """Mark a notification as read"""
+    notification_id = request.data.get('notification_id')
+    if not notification_id:
+        return JsonResponse({'success': False, 'message': 'notification_id is required'}, status=400)
+    
+    try:
+        notification = Notification.objects.get(notification_id=notification_id)
+        notification.is_read = True
+        notification.save()
+        return JsonResponse({'success': True, 'message': 'Notification marked as read'})
+    except Notification.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Notification not found'}, status=404)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def mark_all_notifications_as_read(request):
+    """Mark all notifications as read for a user"""
+    user_id = request.data.get('user_id')
+    if not user_id:
+        return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
+    
+    try:
+        user = User.objects.get(user_id=user_id)
+        count = Notification.objects.filter(user_id=user_id, is_read=False).update(is_read=True)
+        return JsonResponse({'success': True, 'message': f'{count} notifications marked as read', 'count': count})
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -2293,7 +2325,7 @@ def post_like_view(request, post_id):
                         user=post.user,
                         notif_type='like',
                         subject='Post Liked',
-                        notifi_content=f"{user.f_name} {user.l_name} liked your post (Post ID: {post.post_id})",
+                        notifi_content=f"{user.f_name} {user.l_name} liked your post<!--POST_ID:{post.post_id}-->",
                         notif_date=timezone.now()
                     )
                 return JsonResponse({'success': True, 'message': 'Post liked'})
@@ -2442,7 +2474,7 @@ def post_comments_view(request, post_id):
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
-                    notifi_content=f"{user.f_name} {user.l_name} commented on your post (Post ID: {post.post_id})",
+                    notifi_content=f"{user.f_name} {user.l_name} commented on your post<!--POST_ID:{post.post_id}-->",
                     notif_date=timezone.now()
                 )
 
@@ -2732,7 +2764,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
-from apps.shared.models import Forum, ForumLike, ForumComment, ForumRepost
+from apps.shared.models import Forum, Like, Comment, Repost
 from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
 
 # ==========================
@@ -2777,15 +2809,15 @@ def forum_list_create_view(request):
         items = []
         for f in forums:
             try:
-                # Get likes, comments, and reposts data
-                likes = ForumLike.objects.filter(forum=f).select_related('user')
-                comments = ForumComment.objects.filter(forum=f).select_related('user').order_by('-date_created')
-                reposts = ForumRepost.objects.filter(forum=f).select_related('user')
+                # Get likes, comments, and reposts data (using shared tables)
+                likes = Like.objects.filter(forum=f).select_related('user')
+                comments = Comment.objects.filter(forum=f).select_related('user').order_by('-date_created')
+                reposts = Repost.objects.filter(forum=f).select_related('user')
                 
                 likes_count = likes.count()
                 comments_count = comments.count()
                 reposts_count = reposts.count()
-                is_liked = ForumLike.objects.filter(forum=f, user=request.user).exists()
+                is_liked = Like.objects.filter(forum=f, user=request.user).exists()
                 
                 items.append({
                     'post_id': f.forum_id,  # Use forum_id as post_id for frontend compatibility
@@ -2809,7 +2841,7 @@ def forum_list_create_view(request):
                         ),
                     } for l in likes],
                     'comments': [{
-                        'comment_id': c.forum_comment_id,
+                        'comment_id': c.comment_id,
                         'comment_content': c.comment_content,
                         'date_created': c.date_created.isoformat() if c.date_created else None,
                         'user': {
@@ -2820,13 +2852,26 @@ def forum_list_create_view(request):
                         }
                     } for c in comments],
                     'reposts': [{
-                        'repost_id': r.forum_repost_id,
+                        'repost_id': r.repost_id,
                         'repost_date': r.repost_date.isoformat(),
+                        'repost_caption': r.caption,
                         'user': {
                             'user_id': r.user.user_id,
                             'f_name': r.user.f_name,
                             'l_name': r.user.l_name,
                             'profile_pic': build_profile_pic_url(r.user),
+                        },
+                        'original_post': {
+                            'post_id': f.forum_id,
+                            'post_content': f.content,
+                            'post_image': (f.image.url if f.image else None),
+                            'created_at': f.created_at.isoformat() if f.created_at else None,
+                            'user': {
+                                'user_id': f.user.user_id,
+                                'f_name': f.user.f_name,
+                                'l_name': f.user.l_name,
+                                'profile_pic': build_profile_pic_url(f.user),
+                            }
                         }
                     } for r in reposts],
                     'user': {
@@ -2836,10 +2881,16 @@ def forum_list_create_view(request):
                         'profile_pic': build_profile_pic_url(f.user),
                     }
                 })
-            except Exception:
+            except Exception as e:
+                print(f"Error processing forum {f.forum_id}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 continue
         return JsonResponse({'forums': items})
     except Exception as e:
+        print(f"Error in forum_list_create_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({'forums': [], 'error': str(e)}, status=200)
 
 
@@ -2871,9 +2922,9 @@ def forum_detail_edit_view(request, forum_id):
 
     if request.method == "GET":
         try:
-            likes = ForumLike.objects.filter(forum=forum).select_related('user')
-            comments = ForumComment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
-            reposts = ForumRepost.objects.filter(forum=forum).select_related('user')
+            likes = Like.objects.filter(forum=forum).select_related('user')
+            comments = Comment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
+            reposts = Repost.objects.filter(forum=forum).select_related('user')
 
             return JsonResponse({
                 'post_id': forum.forum_id,
@@ -2896,7 +2947,7 @@ def forum_detail_edit_view(request, forum_id):
                     ),
                 } for l in likes],
                 'comments': [{
-                    'comment_id': c.forum_comment_id,
+                    'comment_id': c.comment_id,
                     'comment_content': c.comment_content,
                     'date_created': c.date_created.isoformat() if c.date_created else None,
                     'user': {
@@ -2907,13 +2958,26 @@ def forum_detail_edit_view(request, forum_id):
                     }
                 } for c in comments],
                 'reposts': [{
-                    'repost_id': r.forum_repost_id,
+                    'repost_id': r.repost_id,
                     'repost_date': r.repost_date.isoformat() if r.repost_date else None,
+                    'repost_caption': r.caption,
                     'user': {
                         'user_id': r.user.user_id,
                         'f_name': r.user.f_name,
                         'l_name': r.user.l_name,
                         'profile_pic': build_profile_pic_url(r.user),
+                    },
+                    'original_post': {
+                        'post_id': forum.forum_id,
+                        'post_content': forum.content,
+                        'post_image': (forum.image.url if forum.image else None),
+                        'created_at': forum.created_at.isoformat() if forum.created_at else None,
+                        'user': {
+                            'user_id': forum.user.user_id,
+                            'f_name': forum.user.f_name,
+                            'l_name': forum.user.l_name,
+                            'profile_pic': build_profile_pic_url(forum.user),
+                        }
                     }
                 } for r in reposts],
                 'user': {
@@ -2963,7 +3027,7 @@ def forum_like_view(request, forum_id):
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'POST':
-            like, created = ForumLike.objects.get_or_create(forum=forum, user=request.user)
+            like, created = Like.objects.get_or_create(forum=forum, user=request.user)
             if created and request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
                     user=forum.user,
@@ -2975,9 +3039,9 @@ def forum_like_view(request, forum_id):
             return JsonResponse({'success': True})
         else:
             try:
-                like = ForumLike.objects.get(forum=forum, user=request.user)
+                like = Like.objects.get(forum=forum, user=request.user)
                 like.delete()
-            except ForumLike.DoesNotExist:
+            except Like.DoesNotExist:
                 pass
             return JsonResponse({'success': True})
     except Forum.DoesNotExist:
@@ -3003,9 +3067,9 @@ def forum_comments_view(request, forum_id):
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'GET':
-            comments = ForumComment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
+            comments = Comment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
             data = [{
-                'comment_id': c.forum_comment_id,
+                'comment_id': c.comment_id,
                 'comment_content': c.comment_content,
                 'date_created': c.date_created.isoformat() if c.date_created else None,
                 'user': {
@@ -3019,10 +3083,11 @@ def forum_comments_view(request, forum_id):
         else:
             payload = json.loads(request.body or "{}")
             content = payload.get('comment_content') or ''
-            comment = ForumComment.objects.create(
+            comment = Comment.objects.create(
                 user=request.user,
                 forum=forum,
                 comment_content=content,
+                date_created=timezone.now()
             )
             if request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
@@ -3032,7 +3097,7 @@ def forum_comments_view(request, forum_id):
                     notifi_content=f"{request.user.f_name} {request.user.l_name} commented on your forum post",
                     notif_date=timezone.now()
                 )
-            return JsonResponse({'success': True, 'comment_id': comment.forum_comment_id})
+            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -3042,7 +3107,7 @@ def forum_comments_view(request, forum_id):
 def forum_comment_edit_view(request, forum_id, comment_id):
     try:
         forum = Forum.objects.get(forum_id=forum_id)
-        comment = ForumComment.objects.get(forum_comment_id=comment_id, forum=forum)
+        comment = Comment.objects.get(comment_id=comment_id, forum=forum)
         
         # Check if current user owns this comment OR owns the post
         comment_owner = comment.user.user_id == request.user.user_id
@@ -3066,7 +3131,7 @@ def forum_comment_edit_view(request, forum_id, comment_id):
             # Both comment owner and post owner can delete
             comment.delete()
             return JsonResponse({'success': True})
-    except ForumComment.DoesNotExist:
+    except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
 
 
@@ -3088,10 +3153,10 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        exists = ForumRepost.objects.filter(forum=forum, user=request.user).first()
+        exists = Repost.objects.filter(forum=forum, user=request.user).first()
         if exists:
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
-        r = ForumRepost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
+        r = Repost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
         if request.method == "POST" and request.user.user_id != forum.user.user_id:
             Notification.objects.create(
                 user=forum.user,
@@ -3100,7 +3165,7 @@ def forum_repost_view(request, forum_id):
                 notifi_content=f"{request.user.f_name} {request.user.l_name} reposted your forum post",
                 notif_date=timezone.now()
             )
-        return JsonResponse({'success': True, 'repost_id': r.forum_repost_id})
+        return JsonResponse({'success': True, 'repost_id': r.repost_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -3187,7 +3252,7 @@ def follow_user_view(request, user_id):
                         user=user_to_follow,
                         notif_type='follow',
                         subject='New Follower',
-                        notifi_content=f"{current_user.f_name} {current_user.l_name} started following you. View profile: /alumni/profile/{current_user.user_id}",
+                        notifi_content=f"{current_user.f_name} {current_user.l_name}|{current_user.user_id} started following you.",
                         notif_date=timezone.now()
                     )
                 except Exception:
@@ -3382,7 +3447,8 @@ def posts_view(request):
             }, status=201)
 
         # Use the filtered posts from above (don't override with all posts)
-        posts_data = []
+        # Build a combined feed with both posts and reposts as separate items
+        feed_items = []
 
         for post in posts:
             try:
@@ -3392,21 +3458,6 @@ def posts_view(request):
                 comments_count = Comment.objects.filter(post=post).count()
                 # Get reposts count
                 reposts_count = Repost.objects.filter(post=post).count()
-
-                # Get reposts data for the feed
-                reposts = Repost.objects.filter(post=post).select_related('user')
-                reposts_data = []
-                for repost in reposts:
-                    reposts_data.append({
-                        'repost_id': repost.repost_id,
-                        'repost_date': repost.repost_date.isoformat(),
-                        'user': {
-                            'user_id': repost.user.user_id,
-                            'f_name': repost.user.f_name,
-                            'l_name': repost.user.l_name,
-                            'profile_pic': build_profile_pic_url(repost.user),
-                        }
-                    })
 
                 # Get likes data
                 likes = Like.objects.filter(post=post).select_related('user')
@@ -3445,7 +3496,8 @@ def posts_view(request):
                         }
                     })
 
-                posts_data.append({
+                # Add the original post as a feed item
+                feed_items.append({
                     'post_id': post.post_id,
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
@@ -3455,7 +3507,6 @@ def posts_view(request):
                     'comments_count': comments_count,
                     'reposts_count': reposts_count,
                     'likes': likes_data,
-                    'reposts': reposts_data,
                     'comments': comments_data,
                     'user': {
                         'user_id': post.user.user_id,
@@ -3464,17 +3515,51 @@ def posts_view(request):
                         'profile_pic': build_profile_pic_url(post.user),
                     },
                     'category': {
-                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
+                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else False,
                         'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
                         'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
                         'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
                         'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
-                    }
+                    },
+                    'item_type': 'post',  # Mark as original post
+                    'sort_date': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                 })
+                
+                # Add each repost as a separate feed item
+                reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
+                for repost in reposts:
+                    feed_items.append({
+                        'repost_id': repost.repost_id,
+                        'repost_date': repost.repost_date.isoformat(),
+                        'repost_caption': repost.caption,
+                        'user': {
+                            'user_id': repost.user.user_id,
+                            'f_name': repost.user.f_name,
+                            'l_name': repost.user.l_name,
+                            'profile_pic': build_profile_pic_url(repost.user),
+                        },
+                        'original_post': {
+                            'post_id': post.post_id,
+                            'post_content': post.post_content,
+                            'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                            'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                            'user': {
+                                'user_id': post.user.user_id,
+                                'f_name': post.user.f_name,
+                                'l_name': post.user.l_name,
+                                'profile_pic': build_profile_pic_url(post.user),
+                            }
+                        },
+                        'item_type': 'repost',  # Mark as repost
+                        'sort_date': repost.repost_date.isoformat(),
+                    })
             except Exception:
                 continue
 
-        return JsonResponse({'posts': posts_data})
+        # Sort all feed items by date (most recent first)
+        feed_items.sort(key=lambda x: x.get('sort_date') or '', reverse=True)
+        
+        return JsonResponse({'posts': feed_items})
     except Exception as e:
         logger.error(f"posts_view failed: {e}")
         return JsonResponse({'posts': []}, status=200)

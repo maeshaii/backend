@@ -38,15 +38,25 @@ class Ched(models.Model):
     job_alignment_count = models.IntegerField(default=0)
 
 class Comment(models.Model):
-    """User comments on posts.
+    """User comments on posts and forums.
 
-    Used by Mobile: GET/POST/PUT/DELETE via /api/posts/{post_id}/comments/...
+    Used by Mobile: GET/POST/PUT/DELETE via /api/posts/{post_id}/comments/ and /api/forum/{forum_id}/comments/
     """
     comment_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='comments')
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='comments')
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_comments', null=True, blank=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_comments', null=True, blank=True)
     comment_content = models.TextField(null=True, blank=True)
     date_created = models.DateTimeField()
+    
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(models.Q(post__isnull=False, forum__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False)),
+                name='comment_post_or_forum_not_both'
+            )
+        ]
 
 class CompTechJob(models.Model):
     """Computer Technology job titles and relationships."""
@@ -136,8 +146,18 @@ class SimpleInfoSystemJob(models.Model):
 class Like(models.Model):
     like_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='likes')
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='likes')
-    # Used by Mobile: toggled at /api/posts/{post_id}/like/
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_likes', null=True, blank=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_likes', null=True, blank=True)
+    # Used by Mobile: toggled at /api/posts/{post_id}/like/ and /api/forum/{forum_id}/like/
+    
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(models.Q(post__isnull=False, forum__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False)),
+                name='like_post_or_forum_not_both'
+            )
+        ]
 
 class Conversation(models.Model):
     conversation_id = models.AutoField(primary_key=True)
@@ -233,6 +253,7 @@ class Notification(models.Model):
     subject = models.CharField(max_length=255, blank=True, null=True)  # Added subject field
     notifi_content = models.TextField()
     notif_date = models.DateTimeField()
+    is_read = models.BooleanField(default=False)
     # Used by Mobile: listed/deleted at /api/notifications/...
 
 class PostCategory(models.Model):
@@ -269,11 +290,21 @@ class Qpro(models.Model):
 
 class Repost(models.Model):
     repost_id = models.AutoField(primary_key=True)
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='reposts')
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_reposts', null=True, blank=True)
+    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_reposts', null=True, blank=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='reposts')
     repost_date = models.DateTimeField()
     caption = models.TextField(null=True, blank=True)
-    # Used by Mobile: /api/posts/{post_id}/repost/ and /api/reposts/{repost_id}/
+    # Used by Mobile: /api/posts/{post_id}/repost/, /api/forum/{forum_id}/repost/ and /api/reposts/{repost_id}/
+    
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(models.Q(post__isnull=False, forum__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False)),
+                name='repost_post_or_forum_not_both'
+            )
+        ]
 
 class RepostLike(models.Model):
     """Used by Mobile: likes attached to a specific Repost (not the original Post).
@@ -946,35 +977,7 @@ class TrackerFileUpload(models.Model):
         return f"{self.original_filename} - {self.response.user.f_name} {self.response.user.l_name}"
 
 # ==========================
-# Forum-specific relations (separate tables)
+# Forum-specific relations (now use shared tables)
 # ==========================
-
-class ForumComment(models.Model):
-    forum_comment_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='comments')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_comments')
-    comment_content = models.TextField(null=True, blank=True)
-    date_created = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'shared_forumcomment'
-
-
-class ForumLike(models.Model):
-    forum_like_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='likes')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_likes')
-
-    class Meta:
-        unique_together = ('forum', 'user')
-        db_table = 'shared_forumlike'
-
-
-class ForumRepost(models.Model):
-    forum_repost_id = models.AutoField(primary_key=True)
-    forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='reposts')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forum_reposts')
-    repost_date = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'shared_forumrepost'
+# ForumRepost has been merged into Repost table
+# Forum reposts now use the shared Repost model with a forum foreign key
