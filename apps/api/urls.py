@@ -94,8 +94,6 @@ urlpatterns = [
     path('tracker/update-accepting/<int:tracker_form_id>/', update_tracker_accepting_responses_view, name='update_tracker_accepting_responses'),
     path('tracker/active-form/', get_active_tracker_form, name='get_active_tracker_form'),
     path('admin/<int:user_id>/profile_bio/', profile_bio_view, name='profile_bio_view'),
-    path('resume/update/', update_resume, name='update_resume'),
-    path('resume/delete/', delete_resume, name='delete_resume'),
     path('alumni/profile/update/', update_alumni_profile, name='update_alumni_profile'),
     path('alumni/profile/delete/', delete_alumni_profile_pic, name='delete_alumni_profile_pic'),
     path('search/', search_alumni, name='search_alumni'),
@@ -110,7 +108,8 @@ urlpatterns = [
     path('posts/<int:post_id>/comments/<int:comment_id>/', views.comment_edit_view, name='comment_edit'),
     path('posts/<int:post_id>/likes/', views.post_likes_view, name='post_likes'),
     # Used by Mobile: Repost interactions
-    path('reposts/<int:repost_id>/', views.repost_detail_view, name='repost_detail'),
+    path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
+    path('reposts/<int:repost_id>/detail/', views.repost_detail_view, name='repost_detail'),
     path('reposts/<int:repost_id>/like/', views.repost_like_view, name='repost_like'),
     path('reposts/<int:repost_id>/likes/', views.repost_likes_list_view, name='repost_likes_list'),
     path('reposts/<int:repost_id>/comments/', views.repost_comments_view, name='repost_comments'),
@@ -119,8 +118,6 @@ urlpatterns = [
     path('posts/<int:post_id>/detail/', views.post_detail_view, name='post_detail'),
     path('posts/delete/<int:post_id>/', views.post_delete_view, name='post_delete'),
     path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
-    path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
-    path('post-categories/', views.post_categories_view, name='post_categories'),
     # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
     
     # Used by Mobile: Forum API endpoints (separate storage)
@@ -130,7 +127,7 @@ urlpatterns = [
     path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
     path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
     path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
-    path('forum-reposts/<int:repost_id>/', views.forum_repost_delete_view, name='forum_repost_delete'),
+    path('reposts/<int:repost_id>/', views.forum_repost_delete_view, name='repost_delete'),
     
     # User profile social media and email endpoints
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),

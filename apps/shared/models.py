@@ -86,7 +86,6 @@ class Forum(models.Model):
     """
     forum_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
-    post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='forums', null=True, blank=True)
     image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
     content = models.TextField(null=True, blank=True)
     type = models.CharField(max_length=50, null=True, blank=True)
@@ -256,12 +255,6 @@ class Notification(models.Model):
     is_read = models.BooleanField(default=False)
     # Used by Mobile: listed/deleted at /api/notifications/...
 
-class PostCategory(models.Model):
-    post_cat_id = models.AutoField(primary_key=True)
-    events = models.BooleanField()
-    announcements = models.BooleanField()
-    donation = models.BooleanField()
-    personal = models.BooleanField()
     # Used by Mobile: read via /api/post-categories/
 
 # NOTE: The legacy PostImage table 'shared_postimage' does not exist in this database.
@@ -277,12 +270,26 @@ class PostImageDisabled(models.Model):
 class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
-    post_cat = models.ForeignKey('PostCategory', on_delete=models.CASCADE, related_name='posts')
     post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # Used by Mobile: feed list/create/edit/delete/like/comment/repost
+
+class PostImage(models.Model):
+    """Multiple images for posts"""
+    image_id = models.AutoField(primary_key=True)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='post_images/')
+    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['order', 'created_at']
+        db_table = 'shared_postimage'
+    
+    def __str__(self):
+        return f"Image {self.image_id} for Post {self.post.post_id}"
 
 class Qpro(models.Model):
     qpro_id = models.AutoField(primary_key=True)

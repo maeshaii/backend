@@ -14,7 +14,7 @@ from django.views.decorators.http import require_http_methods
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, PostCategory, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -49,21 +49,6 @@ from django.http import FileResponse
 from django.db import transaction
 
 # --- Helpers for Posts ---
-def ensure_default_post_categories():
-    """Ensure minimal post categories exist to avoid 400s when DB is empty.
-    Returns a mapping of category names to instances and a default instance.
-    """
-    try:
-        if PostCategory.objects.count() == 0:
-            PostCategory.objects.create(events=False, announcements=False, donation=False, personal=True)
-            PostCategory.objects.create(events=True, announcements=False, donation=False, personal=False)
-            PostCategory.objects.create(events=False, announcements=True, donation=False, personal=False)
-            PostCategory.objects.create(events=False, announcements=False, donation=True, personal=False)
-        # Choose a sensible default (personal if present, else first)
-        default = PostCategory.objects.filter(personal=True).first() or PostCategory.objects.first()
-        return default
-    except Exception:
-        return None
 
 @ensure_csrf_cookie
 def get_csrf_token(request):
@@ -153,7 +138,7 @@ def login_view(request):
             'message': 'Login successful',
             'user': {
                 'id': user.user_id,
-                'name': f"{user.f_name} {user.l_name}",
+                'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'profile_bio': getattr(profile, 'profile_bio', None) if profile else None,
                 'profile_pic': build_profile_pic_url(user),
@@ -213,7 +198,7 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
             'access': str(refresh.access_token),
             'user': {
                 'id': user.user_id,
-                'name': f"{user.f_name} {user.l_name}",
+                'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
                 'f_name': user.f_name,
                 'l_name': user.l_name,
                 'acc_username': user.acc_username,
@@ -735,7 +720,7 @@ def users_list_view(request):
             try:
                 users_data.append({
                     'id': u.user_id,
-                    'name': f"{u.f_name} {u.l_name}",
+                    'name': f"{u.f_name} {u.m_name or ''} {u.l_name}".strip(),
                     'profile_pic': build_profile_pic_url(u),
                     'batch': getattr(u.academic_info, 'year_graduated', None),
                     'account_type': {
@@ -1790,61 +1775,6 @@ def profile_bio_view(request, user_id):
     except User.DoesNotExist:
         return JsonResponse({'error': 'User not found'}, status=404)
 
-
-
-@api_view(["POST","PUT","DELETE"])
-@permission_classes([IsAuthenticated])
-def update_resume(request):
-    user_id = request.GET.get('user_id')
-
-    if not user_id:
-        return JsonResponse({"error": "Missing user_id"}, status=400)
-
-    try:
-        user = User.objects.get(user_id=user_id)
-    except User.DoesNotExist:
-        return JsonResponse({"error": "User not found"}, status=404)
-
-    if request.method in ['POST', 'PUT']:
-        resume_file = request.FILES.get('resume')
-        if not resume_file:
-            return JsonResponse({"error": "No resume file uploaded"}, status=400)
-
-        # Optional: File size limit check
-        if resume_file.size > 10 * 1024 * 1024:
-            return JsonResponse({"error": "Resume file exceeds 10MB limit"}, status=400)
-
-        filename = default_storage.save(f"resumes/{user_id}_{resume_file.name}", resume_file)
-        from apps.shared.models import UserProfile
-        profile, _ = UserProfile.objects.get_or_create(user=user)
-        profile.profile_resume = filename
-        profile.save()
-        return JsonResponse({
-            "message": "Resume uploaded",
-            "resume": profile.profile_resume.url if profile.profile_resume else ""
-        })
-
-
-    elif request.method == 'DELETE':
-        from apps.shared.models import UserProfile
-        profile, _ = UserProfile.objects.get_or_create(user=user)
-        if profile.profile_resume:
-            file_path = os.path.join(settings.MEDIA_ROOT, profile.profile_resume.name)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            profile.profile_resume = None
-            profile.save()
-            return JsonResponse({"message": "Resume deleted"})
-        return JsonResponse({"error": "No resume found"}, status=400)
-
-    return JsonResponse({"error": "Invalid request method"}, status=405)
-
-@api_view(['DELETE'])
-@permission_classes([IsAuthenticated])
-def delete_resume(request):
-    # Delegate to update_resume with DELETE semantics
-    return update_resume(request)
-
 @api_view(['PUT'])
 @parser_classes([MultiPartParser])
 @permission_classes([IsAuthenticated])
@@ -1870,7 +1800,7 @@ def update_alumni_profile(request):
         return Response({
             'user': {
                 'id': user.user_id,
-                'name': f"{user.f_name} {user.l_name}",
+                'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
                 'profile_pic': profile.profile_pic.url if profile.profile_pic else None,
                 'bio': profile.profile_bio,
             }
@@ -2039,6 +1969,7 @@ def post_detail_view(request, post_id):
                     'user': {
                         'user_id': repost.user.user_id,
                         'f_name': repost.user.f_name,
+                        'm_name': repost.user.m_name,
                         'l_name': repost.user.l_name,
                         'profile_pic': build_profile_pic_url(repost.user),
                     }
@@ -2055,6 +1986,7 @@ def post_detail_view(request, post_id):
                     'user': {
                         'user_id': comment.user.user_id,
                         'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
                         'l_name': comment.user.l_name,
                         'profile_pic': build_profile_pic_url(comment.user),
                     }
@@ -2078,15 +2010,27 @@ def post_detail_view(request, post_id):
                     'like_id': like.like_id,
                     'user_id': like.user.user_id,
                     'f_name': like.user.f_name,
+                    'm_name': like.user.m_name,
                     'l_name': like.user.l_name,
                     'profile_pic': pic,
                     'initials': initials,
                 })
 
+            # Get multiple images for the post
+            post_images = []
+            if hasattr(post, 'images'):
+                for img in post.images.all():
+                    post_images.append({
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    })
+
             post_data = {
                 'post_id': post.post_id,
                 'post_content': post.post_content,
-                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
+                'post_images': post_images,  # Multiple images
                 'type': post.type,
                 'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                 'likes_count': len(likes_data),
@@ -2098,15 +2042,11 @@ def post_detail_view(request, post_id):
                 'user': {
                     'user_id': post.user.user_id,
                     'f_name': post.user.f_name,
+                    'm_name': post.user.m_name,
                     'l_name': post.user.l_name,
                     'profile_pic': build_profile_pic_url(post.user),
                 },
                 'category': {
-                    'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else None,
-                    'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
-                    'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
-                    'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
-                    'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
                 }
             }
             return JsonResponse(post_data)
@@ -2205,7 +2145,6 @@ def repost_detail_view(request, repost_id):
                 'l_name': repost.post.user.l_name,
                 'profile_pic': build_profile_pic_url(repost.post.user),
             },
-            'post_title': getattr(repost.post, 'post_title', None),
             'post_content': repost.post.post_content,
             'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
         }
@@ -2325,7 +2264,7 @@ def post_like_view(request, post_id):
                         user=post.user,
                         notif_type='like',
                         subject='Post Liked',
-                        notifi_content=f"{user.f_name} {user.l_name} liked your post<!--POST_ID:{post.post_id}-->",
+                        notifi_content=f"{user.full_name} liked your post<!--POST_ID:{post.post_id}-->",
                         notif_date=timezone.now()
                     )
                 return JsonResponse({'success': True, 'message': 'Post liked'})
@@ -2474,7 +2413,7 @@ def post_comments_view(request, post_id):
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
-                    notifi_content=f"{user.f_name} {user.l_name} commented on your post<!--POST_ID:{post.post_id}-->",
+                    notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}-->",
                     notif_date=timezone.now()
                 )
 
@@ -2535,32 +2474,6 @@ def post_delete_view(request, post_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def post_categories_view(request):
-    if request.method == "OPTIONS":
-        response = JsonResponse({'detail': 'OK'})
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
-        return response
-
-    try:
-        categories = PostCategory.objects.all()
-        categories_data = []
-
-        for category in categories:
-            categories_data.append({
-                'post_cat_id': category.post_cat_id,
-                'events': category.events,
-                'announcements': category.announcements,
-                'donation': category.donation,
-                'personal': category.personal,
-            })
-
-        return JsonResponse({'categories': categories_data})
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
 
 @api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
@@ -2614,7 +2527,7 @@ def post_repost_view(request, post_id):
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
-                notifi_content=f"{user.f_name} {user.l_name} reposted your post",
+                notifi_content=f"{user.full_name} reposted your post",
                 notif_date=timezone.now()
             )
 
@@ -2634,7 +2547,7 @@ def repost_delete_view(request, repost_id):
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
         response["Access-Control-Allow-Origin"] = "*"
-        response["Access-Control-Allow-Methods"] = "DELETE, OPTIONS"
+        response["Access-Control-Allow-Methods"] = "PUT, DELETE, OPTIONS"
         response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken, Authorization"
         return response
 
@@ -2703,7 +2616,10 @@ def alumni_followers_view(request, user_id):
             followers_data.append({
                 'user_id': follower.user_id,
                 'ctu_id': follower.acc_username,
-                'name': f"{follower.f_name} {follower.l_name}",
+                'name': f"{follower.f_name} {follower.m_name or ''} {follower.l_name}".strip(),
+                'f_name': follower.f_name,
+                'm_name': follower.m_name,
+                'l_name': follower.l_name,
                 'profile_pic': build_profile_pic_url(follower),
                 'followed_at': follow_obj.followed_at.isoformat()
             })
@@ -2744,7 +2660,10 @@ def alumni_following_view(request, user_id):
             following_data.append({
                 'user_id': followed_user.user_id,
                 'ctu_id': followed_user.acc_username,
-                'name': f"{followed_user.f_name} {followed_user.l_name}",
+                'name': f"{followed_user.f_name} {followed_user.m_name or ''} {followed_user.l_name}".strip(),
+                'f_name': followed_user.f_name,
+                'm_name': followed_user.m_name,
+                'l_name': followed_user.l_name,
                 'profile_pic': build_profile_pic_url(followed_user),
                 'followed_at': follow_obj.followed_at.isoformat()
             })
@@ -2765,7 +2684,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
 from apps.shared.models import Forum, Like, Comment, Repost
-from apps.shared.models import Post, Like, Comment, Repost, PostCategory, RepostLike, RepostComment
+from apps.shared.models import Post, Like, Comment, Repost, RepostLike, RepostComment
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2777,16 +2696,13 @@ def forum_list_create_view(request):
     try:
         if request.method == "POST":
             data = json.loads(request.body or "{}")
-            title = data.get('post_title') or data.get('title') or ''
             content = data.get('post_content') or data.get('content') or ''
             if not str(content).strip():
                 return JsonResponse({'error': 'content required'}, status=400)
             
             # Create Forum post directly (no Post model)
-            post_cat = PostCategory.objects.first() if PostCategory.objects.exists() else None
             forum = Forum.objects.create(
                 user=request.user,
-                post_cat=post_cat,
                 content=content,
                 type='forum',
             )
@@ -2799,7 +2715,7 @@ def forum_list_create_view(request):
         
         # Only show forum posts from users in the same batch
         if current_user_batch:
-            forums = Forum.objects.select_related('user', 'post_cat', 'user__academic_info').filter(
+            forums = Forum.objects.select_related('user', 'user__academic_info').filter(
                 user__academic_info__year_graduated=current_user_batch
             ).order_by('-forum_id')
         else:
@@ -2821,7 +2737,6 @@ def forum_list_create_view(request):
                 
                 items.append({
                     'post_id': f.forum_id,  # Use forum_id as post_id for frontend compatibility
-                    'post_title': '',  # Forum doesn't have title, use empty string
                     'post_content': f.content,
                     'post_image': (f.image.url if f.image else None),
                     'type': 'forum',
@@ -2847,6 +2762,7 @@ def forum_list_create_view(request):
                         'user': {
                             'user_id': c.user.user_id,
                             'f_name': c.user.f_name,
+                            'm_name': c.user.m_name,
                             'l_name': c.user.l_name,
                             'profile_pic': build_profile_pic_url(c.user),
                         }
@@ -2858,6 +2774,7 @@ def forum_list_create_view(request):
                         'user': {
                             'user_id': r.user.user_id,
                             'f_name': r.user.f_name,
+                            'm_name': r.user.m_name,
                             'l_name': r.user.l_name,
                             'profile_pic': build_profile_pic_url(r.user),
                         },
@@ -2928,7 +2845,6 @@ def forum_detail_edit_view(request, forum_id):
 
             return JsonResponse({
                 'post_id': forum.forum_id,
-                'post_title': '',
                 'post_content': forum.content,
                 'post_image': (forum.image.url if forum.image else None),
                 'type': 'forum',
@@ -3033,7 +2949,7 @@ def forum_like_view(request, forum_id):
                     user=forum.user,
                     notif_type='like',
                     subject='Forum Liked',
-                    notifi_content=f"{request.user.f_name} {request.user.l_name} liked your forum post",
+                    notifi_content=f"{request.user.full_name} liked your forum post",
                     notif_date=timezone.now()
                 )
             return JsonResponse({'success': True})
@@ -3094,7 +3010,7 @@ def forum_comments_view(request, forum_id):
                     user=forum.user,
                     notif_type='comment',
                     subject='Forum Commented',
-                    notifi_content=f"{request.user.f_name} {request.user.l_name} commented on your forum post",
+                    notifi_content=f"{request.user.full_name} commented on your forum post",
                     notif_date=timezone.now()
                 )
             return JsonResponse({'success': True, 'comment_id': comment.comment_id})
@@ -3162,7 +3078,7 @@ def forum_repost_view(request, forum_id):
                 user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
-                notifi_content=f"{request.user.f_name} {request.user.l_name} reposted your forum post",
+                notifi_content=f"{request.user.full_name} reposted your forum post",
                 notif_date=timezone.now()
             )
         return JsonResponse({'success': True, 'repost_id': r.repost_id})
@@ -3190,7 +3106,7 @@ def forum_repost_delete_view(request, repost_id):
 @permission_classes([IsAuthenticated])
 def user_posts_view(request, user_id):
     try:
-        posts = Post.objects.filter(user__user_id=user_id).select_related('user', 'post_cat').order_by('-post_id')
+        posts = Post.objects.filter(user__user_id=user_id).select_related('user').order_by('-post_id')
         data = []
         for post in posts:
             try:
@@ -3252,14 +3168,14 @@ def follow_user_view(request, user_id):
                         user=user_to_follow,
                         notif_type='follow',
                         subject='New Follower',
-                        notifi_content=f"{current_user.f_name} {current_user.l_name}|{current_user.user_id} started following you.",
+                        notifi_content=f"{current_user.full_name}|{current_user.user_id} started following you.",
                         notif_date=timezone.now()
                     )
                 except Exception:
                     pass
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.l_name}'
+                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
                 })
             else:
                 return JsonResponse({
@@ -3276,7 +3192,7 @@ def follow_user_view(request, user_id):
                 follow_obj.delete()
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.l_name}'
+                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
                 })
             except Follow.DoesNotExist:
                 return JsonResponse({
@@ -3356,7 +3272,7 @@ def posts_view(request):
         from apps.shared.models import Follow, User as SharedUser
         if user.account_type.admin or user.account_type.peso:
             # Exclude forum posts from regular posts feed
-            posts = Post.objects.exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
+            posts = Post.objects.exclude(type='forum').select_related('user').order_by('-post_id')
         elif user.account_type.user or user.account_type.ojt:
             followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
             admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
@@ -3367,38 +3283,39 @@ def posts_view(request):
                 Q(user__in=admin_users) |
                 Q(user__in=peso_users) |
                 Q(user=user)
-            ).exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
+            ).exclude(type='forum').select_related('user').order_by('-post_id')
         else:
             # Exclude forum posts from regular posts feed
-            posts = Post.objects.exclude(type='forum').select_related('user', 'post_cat').order_by('-post_id')
+            posts = Post.objects.exclude(type='forum').select_related('user').order_by('-post_id')
         if request.method == "POST":
             data = json.loads(request.body or "{}")
             post_content = data.get('post_content') or ''
-            post_title = data.get('post_title') or ''
-            post_cat_id = data.get('post_cat_id')
             post_type = data.get('type') or 'personal'
+
+            print(f"POST request received - User: {request.user.user_id}, Content: {post_content[:50]}..., Type: {post_type}")
+            print(f"Data keys: {list(data.keys())}")
+            if 'post_images' in data:
+                print(f"post_images received: {len(data.get('post_images', []))} images")
+            if 'post_image' in data:
+                print(f"post_image received: {bool(data.get('post_image'))}")
 
             if not post_content.strip():
                 return JsonResponse({'success': False, 'message': 'post_content is required'}, status=400)
 
-            # Resolve category if provided
-            post_cat = None
-            if post_cat_id is not None:
-                try:
-                    post_cat = PostCategory.objects.get(post_cat_id=int(post_cat_id))
-                except Exception:
-                    post_cat = None
-
             new_post = Post.objects.create(
                 user=request.user,
                 post_content=post_content,
-                post_cat=post_cat,
                 type=post_type,
             )
+            
+            print(f"Post created successfully - ID: {new_post.post_id}, User: {new_post.user.user_id}")
 
-            # --- DEBUG LOGGING FOR IMAGE UPLOAD ---
+            # --- HANDLE MULTIPLE IMAGES ---
             import sys
+            from apps.shared.models import PostImage
+            
             try:
+                # Handle single image (backward compatibility)
                 if 'post_image' in data and data['post_image']:
                     print('Received post_image in data', file=sys.stderr)
                     post_image_data = data['post_image']
@@ -3406,28 +3323,58 @@ def posts_view(request):
                         try:
                             format, imgstr = post_image_data.split(';base64,')
                             ext = format.split('/')[-1]
-                            import base64, uuid
-                            from django.core.files.base import ContentFile
                             img_data = base64.b64decode(imgstr)
                             file_name = f"{uuid.uuid4()}.{ext}"
                             new_post.post_image.save(file_name, ContentFile(img_data), save=True)
-                            print(f'Saved image: {new_post.post_image.url}', file=sys.stderr)
+                            print(f'Saved single image: {new_post.post_image.url}', file=sys.stderr)
                         except Exception as img_exc:
-                            print(f'Error saving image: {img_exc}', file=sys.stderr)
-                    else:
-                        print('post_image does not start with data:image', file=sys.stderr)
-                else:
-                    print('No post_image in data', file=sys.stderr)
+                            print(f'Error saving single image: {img_exc}', file=sys.stderr)
+                
+                # Handle multiple images
+                if 'post_images' in data and data['post_images']:
+                    print(f'Received {len(data["post_images"])} images in data', file=sys.stderr)
+                    
+                    for index, post_image_data in enumerate(data['post_images']):
+                        if post_image_data and post_image_data.startswith('data:image'):
+                            try:
+                                format, imgstr = post_image_data.split(';base64,')
+                                ext = format.split('/')[-1]
+                                img_data = base64.b64decode(imgstr)
+                                file_name = f"{uuid.uuid4()}.{ext}"
+                                
+                                # Create PostImage instance
+                                post_image = PostImage.objects.create(
+                                    post=new_post,
+                                    order=index
+                                )
+                                post_image.image.save(file_name, ContentFile(img_data), save=True)
+                                print(f'Saved multiple image {index}: {post_image.image.url}', file=sys.stderr)
+                            except Exception as img_exc:
+                                print(f'Error saving multiple image {index}: {img_exc}', file=sys.stderr)
+                
+                if 'post_image' not in data and 'post_images' not in data:
+                    print('No images in data', file=sys.stderr)
             except Exception as e:
                 print(f'Exception in image handling: {e}', file=sys.stderr)
-            # --- END DEBUG LOGGING ---
+            # --- END IMAGE HANDLING ---
 
+            # Get multiple images for response
+            post_images = []
+            if hasattr(new_post, 'images'):
+                for img in new_post.images.all():
+                    post_images.append({
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    })
+            
             return JsonResponse({
                 'success': True,
                 'post': {
                     'post_id': new_post.post_id,
                     'post_content': new_post.post_content,
-                    'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),
+                    'post_image': (new_post.post_image.url if getattr(new_post, 'post_image', None) else None),  # Backward compatibility
+                    'post_images': post_images,  # Multiple images
                     'type': new_post.type,
                     'created_at': new_post.created_at.isoformat() if hasattr(new_post, 'created_at') else None,
                     'user': {
@@ -3437,11 +3384,6 @@ def posts_view(request):
                         'profile_pic': build_profile_pic_url(request.user),
                     },
                     'category': {
-                        'post_cat_id': post_cat.post_cat_id if post_cat else None,
-                        'events': getattr(post_cat, 'events', False) if post_cat else False,
-                        'announcements': getattr(post_cat, 'announcements', False) if post_cat else False,
-                        'donation': getattr(post_cat, 'donation', False) if post_cat else False,
-                        'personal': getattr(post_cat, 'personal', False) if post_cat else False,
                     }
                 }
             }, status=201)
@@ -3449,6 +3391,8 @@ def posts_view(request):
         # Use the filtered posts from above (don't override with all posts)
         # Build a combined feed with both posts and reposts as separate items
         feed_items = []
+        
+        print(f"GET request - Found {posts.count()} posts for user {user.user_id}")
 
         for post in posts:
             try:
@@ -3475,6 +3419,7 @@ def posts_view(request):
                     likes_data.append({
                         'user_id': like.user.user_id,
                         'f_name': like.user.f_name,
+                        'm_name': like.user.m_name,
                         'l_name': like.user.l_name,
                         'profile_pic': pic,
                         'initials': initials,
@@ -3491,16 +3436,28 @@ def posts_view(request):
                         'user': {
                             'user_id': comment.user.user_id,
                             'f_name': comment.user.f_name,
+                            'm_name': comment.user.m_name,
                             'l_name': comment.user.l_name,
                             'profile_pic': build_profile_pic_url(comment.user),
                         }
                     })
 
+                # Get multiple images for the post
+                post_images = []
+                if hasattr(post, 'images'):
+                    for img in post.images.all():
+                        post_images.append({
+                            'image_id': img.image_id,
+                            'image_url': img.image.url,
+                            'order': img.order
+                        })
+
                 # Add the original post as a feed item
                 feed_items.append({
                     'post_id': post.post_id,
                     'post_content': post.post_content,
-                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                    'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
+                    'post_images': post_images,  # Multiple images
                     'type': post.type,
                     'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                     'likes_count': likes_count,
@@ -3511,15 +3468,11 @@ def posts_view(request):
                     'user': {
                         'user_id': post.user.user_id,
                         'f_name': post.user.f_name,
+                        'm_name': post.user.m_name,
                         'l_name': post.user.l_name,
                         'profile_pic': build_profile_pic_url(post.user),
                     },
                     'category': {
-                        'post_cat_id': post.post_cat.post_cat_id if getattr(post, 'post_cat', None) else False,
-                        'events': post.post_cat.events if getattr(post, 'post_cat', None) else False,
-                        'announcements': post.post_cat.announcements if getattr(post, 'post_cat', None) else False,
-                        'donation': post.post_cat.donation if getattr(post, 'post_cat', None) else False,
-                        'personal': post.post_cat.personal if getattr(post, 'post_cat', None) else False,
                     },
                     'item_type': 'post',  # Mark as original post
                     'sort_date': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
@@ -3528,31 +3481,79 @@ def posts_view(request):
                 # Add each repost as a separate feed item
                 reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
+                    # Get repost likes count and data
+                    repost_likes_count = RepostLike.objects.filter(repost=repost).count()
+                    repost_likes = RepostLike.objects.filter(repost=repost).select_related('user')
+                    repost_likes_data = []
+                    for like in repost_likes:
+                        pic = build_profile_pic_url(like.user)
+                        initials = None
+                        if not pic:
+                            try:
+                                f = (like.user.f_name or '').strip()[:1].upper()
+                                l = (like.user.l_name or '').strip()[:1].upper()
+                                initials = f + l if (f or l) else None
+                            except Exception:
+                                initials = None
+                        repost_likes_data.append({
+                            'user_id': like.user.user_id,
+                            'f_name': like.user.f_name,
+                            'm_name': like.user.m_name,
+                            'l_name': like.user.l_name,
+                            'profile_pic': pic,
+                            'initials': initials,
+                        })
+
+                    # Get repost comments count and data
+                    repost_comments_count = RepostComment.objects.filter(repost=repost).count()
+                    repost_comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+                    repost_comments_data = []
+                    for comment in repost_comments:
+                        repost_comments_data.append({
+                            'comment_id': comment.repost_comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat(),
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': build_profile_pic_url(comment.user),
+                            }
+                        })
+
                     feed_items.append({
                         'repost_id': repost.repost_id,
                         'repost_date': repost.repost_date.isoformat(),
                         'repost_caption': repost.caption,
+                        'likes_count': repost_likes_count,
+                        'comments_count': repost_comments_count,
+                        'likes': repost_likes_data,
+                        'comments': repost_comments_data,
                         'user': {
                             'user_id': repost.user.user_id,
                             'f_name': repost.user.f_name,
+                            'm_name': repost.user.m_name,
                             'l_name': repost.user.l_name,
                             'profile_pic': build_profile_pic_url(repost.user),
                         },
                         'original_post': {
                             'post_id': post.post_id,
                             'post_content': post.post_content,
-                            'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
+                            'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
+                            'post_images': post_images,  # Multiple images (already calculated above)
                             'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                             'user': {
                                 'user_id': post.user.user_id,
                                 'f_name': post.user.f_name,
+                                'm_name': post.user.m_name,
                                 'l_name': post.user.l_name,
                                 'profile_pic': build_profile_pic_url(post.user),
                             }
                         },
                         'item_type': 'repost',  # Mark as repost
                         'sort_date': repost.repost_date.isoformat(),
-                    })
+                })
             except Exception:
                 continue
 
@@ -3584,7 +3585,7 @@ def posts_by_user_type_view(request):
         else:
             users = User.objects.all()
 
-        posts = Post.objects.filter(user__in=users).select_related('user', 'post_cat').order_by('-post_id')
+        posts = Post.objects.filter(user__in=users).select_related('user').order_by('-post_id')
         posts_data = []
 
         for post in posts:
@@ -3609,29 +3610,29 @@ def posts_by_user_type_view(request):
                         'created_at': comment.created_at.isoformat() if hasattr(comment, 'created_at') else None,
                         'user': {
                             'id': comment.user.user_id,
-                            'username': comment.user.username,
-                            'first_name': comment.user.f_name,
-                            'last_name': comment.user.l_name,
+                            'f_name': comment.user.f_name,
+                            'm_name': comment.user.m_name,
+                            'l_name': comment.user.l_name,
+                            'profile_pic': build_profile_pic_url(comment.user),
                         }
                     })
 
                 posts_data.append({
                     'id': post.post_id,
-                    'post_title': getattr(post, 'post_title', ''),
                     'post_content': post.post_content,
                     'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),
                     'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
-                    'updated_at': post.updated_at.isoformat() if hasattr(post, 'updated_at') else None,
                     'likes_count': likes_count,
                     'comments_count': comments_count,
                     'is_liked': is_liked,
                     'comments': comments_data,
-                    'user': {
-                        'id': post.user.user_id,
-                        'username': post.user.username,
-                        'first_name': post.user.f_name,
-                        'last_name': post.user.l_name,
-                    }
+                        'user': {
+                            'id': post.user.user_id,
+                            'f_name': post.user.f_name,
+                            'm_name': post.user.m_name,
+                            'l_name': post.user.l_name,
+                            'profile_pic': build_profile_pic_url(post.user),
+                        }
                 })
             except Exception:
                 continue
@@ -3880,3 +3881,4 @@ def forgot_password_view(request):
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
+
