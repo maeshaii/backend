@@ -67,11 +67,12 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 # CORS Configuration - Robust development setup
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000').split(',')
+CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001').split(',')
 CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
 
 # Do not use wildcard '*' when credentials are included. Prefer specific origins and regex for ngrok.
-CORS_ALLOW_ALL_ORIGINS = False
+# Temporarily enable for development to fix CORS issues
+CORS_ALLOW_ALL_ORIGINS = True
 
 # Allow typical headers/methods during development
 CORS_ALLOW_HEADERS = [

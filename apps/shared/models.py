@@ -758,6 +758,7 @@ class OJTInfo(models.Model):
     ojt_end_date = models.DateField(null=True, blank=True)
     job_code = models.CharField(max_length=20, null=True, blank=True)
     ojtstatus = models.CharField(max_length=50, null=True, blank=True)
+    is_sent_to_admin = models.BooleanField(default=False)  # Track if sent to admin
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -968,6 +969,7 @@ class OJTImport(models.Model):
     coordinator = models.CharField(max_length=100)  # Coordinator who imported
     batch_year = models.IntegerField()
     course = models.CharField(max_length=100)
+    section = models.CharField(max_length=50, blank=True, null=True)  # Section like "4-1", "4-A", "4th year"
     import_date = models.DateTimeField(auto_now_add=True)
     file_name = models.CharField(max_length=255)
     records_imported = models.IntegerField(default=0)

@@ -1198,6 +1198,17 @@ def ojt_by_year_view(request):
 
         ojt_list = []
         for ojt in ojt_data:
+            # Fallback signal: if there is a pending coordinator request for this batch,
+            # mark the row as sent to admin even if the per-user flag was not yet set.
+            try:
+                from apps.shared.models import OJTImport
+                pending_for_batch = OJTImport.objects.filter(
+                    batch_year=getattr(ojt.academic_info, 'year_graduated', None),
+                    status='Requested'
+                ).exists()
+            except Exception:
+                pending_for_batch = False
+
             ojt_list.append({
                 'id': ojt.user_id,
                 'ctu_id': ojt.acc_username,
@@ -1217,6 +1228,7 @@ def ojt_by_year_view(request):
                 'ojt_start_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_start_date', None),
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
+                'is_sent_to_admin': getattr(getattr(ojt, 'ojt_info', None), 'is_sent_to_admin', False) or pending_for_batch,
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
             })
 
@@ -1340,6 +1352,18 @@ def send_completed_to_admin_view(request):
             users_qs = users_qs.filter(user_id__in=[int(x) for x in user_ids])
 
         completed_count = users_qs.filter(ojt_info__ojtstatus='Completed').count()
+
+        # Persist: mark completed users as sent to admin
+        try:
+            from apps.shared.models import OJTInfo
+            completed_users = users_qs.filter(ojt_info__ojtstatus='Completed')
+            for user in completed_users:
+                ojt_info, _ = OJTInfo.objects.get_or_create(user=user)
+                if not getattr(ojt_info, 'is_sent_to_admin', False):
+                    ojt_info.is_sent_to_admin = True
+                    ojt_info.save()
+        except Exception:
+            pass
 
         # Mark this batch as requested by coordinator so admin sees 1 per batch
         try:
@@ -1546,6 +1570,7 @@ def approve_ojt_to_alumni_view(request):
             return JsonResponse({'success': False, 'message': 'Missing year'}, status=400)
 
         from apps.shared.models import User, AccountType, OJTInfo, UserInitialPassword, AcademicInfo
+        from django.db.models import Q
         from django.db import transaction
         import secrets
         import string
@@ -1566,12 +1591,14 @@ def approve_ojt_to_alumni_view(request):
         except Exception:
             alumni_type = AccountType.objects.filter(user=True).first() or AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
 
-        # Find completed OJT students for this year (use AcademicInfo.year_graduated)
-        completed_ojt_users = User.objects.filter(
-            account_type__ojt=True,
-            ojt_info__ojtstatus='Completed',
-            academic_info__year_graduated=year_int
-        ).select_related('ojt_info', 'academic_info')
+        # Find completed OJT students for this year.
+        # Be tolerant of missing AcademicInfo.year_graduated by including those with null academic_info
+        completed_ojt_users = (
+            User.objects
+            .filter(account_type__ojt=True, ojt_info__ojtstatus='Completed')
+            .filter(Q(academic_info__year_graduated=year_int) | Q(academic_info__isnull=True))
+            .select_related('ojt_info', 'academic_info')
+        )
 
         print(f"Found {completed_ojt_users.count()} completed OJT students for year {year_int}")
         if not completed_ojt_users.exists():
@@ -3175,7 +3202,7 @@ def follow_user_view(request, user_id):
                     pass
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
+                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
                 })
             else:
                 return JsonResponse({
@@ -3192,7 +3219,7 @@ def follow_user_view(request, user_id):
                 follow_obj.delete()
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
+                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
                 })
             except Follow.DoesNotExist:
                 return JsonResponse({
