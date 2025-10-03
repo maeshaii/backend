@@ -14,7 +14,8 @@ from django.views.decorators.http import require_http_methods
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword
+from django.utils import timezone
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -25,6 +26,9 @@ from datetime import datetime
 import secrets
 import string
 import base64
+import uuid
+from django.core.files.base import ContentFile
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 import pandas as pd
 import io
@@ -34,8 +38,9 @@ from collections import Counter
 from apps.shared.models import Question
 from django.core.mail import send_mail
 from django.utils import timezone
-from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework import status
@@ -2024,7 +2029,7 @@ def post_detail_view(request, post_id):
                         'image_id': img.image_id,
                         'image_url': img.image.url,
                         'order': img.order
-                    })
+                })
 
             post_data = {
                 'post_id': post.post_id,
@@ -2102,8 +2107,8 @@ def repost_detail_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
-    likes = RepostLike.objects.filter(repost=repost).select_related('user')
-    comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+    likes = Like.objects.filter(repost=repost).select_related('user')
+    comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
     data = {
         'repost_id': repost.repost_id,
         'caption': repost.caption,
@@ -2161,16 +2166,16 @@ def repost_like_view(request, repost_id):
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
     if request.method == 'POST':
-        like, created = RepostLike.objects.get_or_create(repost=repost, user=request.user)
+        like, created = Like.objects.get_or_create(repost=repost, user=request.user)
         if created:
             return JsonResponse({'success': True})
         return JsonResponse({'success': False, 'message': 'Already liked'})
     else:
         try:
-            like = RepostLike.objects.get(repost=repost, user=request.user)
+            like = Like.objects.get(repost=repost, user=request.user)
             like.delete()
             return JsonResponse({'success': True})
-        except RepostLike.DoesNotExist:
+        except Like.DoesNotExist:
             return JsonResponse({'success': False, 'message': 'Not liked'})
 
 
@@ -2181,7 +2186,7 @@ def repost_likes_list_view(request, repost_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
-    likes = RepostLike.objects.filter(repost=repost).select_related('user')
+    likes = Like.objects.filter(repost=repost).select_related('user')
     return JsonResponse({'likes': [{
         'user_id': l.user.user_id,
         'f_name': l.user.f_name,
@@ -2198,9 +2203,9 @@ def repost_comments_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
     if request.method == 'GET':
-        comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+        comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
         return JsonResponse({'comments': [{
-            'comment_id': c.repost_comment_id,
+            'comment_id': c.comment_id,
             'comment_content': c.comment_content,
             'date_created': c.date_created.isoformat() if c.date_created else None,
             'user': {
@@ -2216,8 +2221,22 @@ def repost_comments_view(request, repost_id):
             content = (payload.get('comment_content') or '').strip()
             if not content:
                 return JsonResponse({'error': 'content required'}, status=400)
-            c = RepostComment.objects.create(repost=repost, user=request.user, comment_content=content, date_created=timezone.now())
-            return JsonResponse({'success': True, 'comment_id': c.repost_comment_id})
+            c = Comment.objects.create(repost=repost, user=request.user, comment_content=content, date_created=timezone.now())
+            return JsonResponse({
+                'success': True, 
+                'comment': {
+                    'comment_id': c.comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat(),
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'm_name': c.user.m_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                }
+            })
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
 
@@ -2230,8 +2249,8 @@ def repost_comment_edit_view(request, repost_id, comment_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
     try:
-        comment = RepostComment.objects.get(repost_comment_id=comment_id, repost=repost)
-    except RepostComment.DoesNotExist:
+        comment = Comment.objects.get(comment_id=comment_id, repost=repost)
+    except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
     if comment.user.user_id != request.user.user_id:
         return JsonResponse({'error': 'Unauthorized'}, status=403)
@@ -2419,8 +2438,18 @@ def post_comments_view(request, post_id):
 
             return JsonResponse({
                 'success': True,
-                'message': 'Comment added',
-                'comment_id': comment.comment_id
+                'comment': {
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat(),
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': build_profile_pic_url(comment.user),
+                    }
+                }
             })
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
@@ -2502,10 +2531,7 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
-        # Check if user already reposted this post
-        existing_repost = Repost.objects.filter(user=user, post=post).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
+        # Allow multiple reposts by the same user (no restriction)
 
         # Create repost with optional caption
         payload = {}
@@ -2683,8 +2709,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
-from apps.shared.models import Forum, Like, Comment, Repost
-from apps.shared.models import Post, Like, Comment, Repost, RepostLike, RepostComment
+from apps.shared.models import Forum, Like, Comment, Repost, Post
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2771,6 +2796,31 @@ def forum_list_create_view(request):
                         'repost_id': r.repost_id,
                         'repost_date': r.repost_date.isoformat(),
                         'repost_caption': r.caption,
+                        'likes_count': Like.objects.filter(repost=r).count(),
+                        'comments_count': Comment.objects.filter(repost=r).count(),
+                        'likes': [{
+                            'user_id': l.user.user_id,
+                            'f_name': l.user.f_name,
+                            'm_name': l.user.m_name,
+                            'l_name': l.user.l_name,
+                            'profile_pic': build_profile_pic_url(l.user),
+                            'initials': None if build_profile_pic_url(l.user) else (
+                                ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                                if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                            ),
+                        } for l in Like.objects.filter(repost=r).select_related('user')],
+                        'comments': [{
+                            'comment_id': c.comment_id,
+                            'comment_content': c.comment_content,
+                            'date_created': c.date_created.isoformat() if c.date_created else None,
+                            'user': {
+                                'user_id': c.user.user_id,
+                                'f_name': c.user.f_name,
+                                'm_name': c.user.m_name,
+                                'l_name': c.user.l_name,
+                                'profile_pic': build_profile_pic_url(c.user),
+                            }
+                        } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
                         'user': {
                             'user_id': r.user.user_id,
                             'f_name': r.user.f_name,
@@ -2877,6 +2927,31 @@ def forum_detail_edit_view(request, forum_id):
                     'repost_id': r.repost_id,
                     'repost_date': r.repost_date.isoformat() if r.repost_date else None,
                     'repost_caption': r.caption,
+                    'likes_count': Like.objects.filter(repost=r).count(),
+                    'comments_count': Comment.objects.filter(repost=r).count(),
+                    'likes': [{
+                        'user_id': l.user.user_id,
+                        'f_name': l.user.f_name,
+                        'm_name': l.user.m_name,
+                        'l_name': l.user.l_name,
+                        'profile_pic': build_profile_pic_url(l.user),
+                        'initials': None if build_profile_pic_url(l.user) else (
+                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                        ),
+                    } for l in Like.objects.filter(repost=r).select_related('user')],
+                    'comments': [{
+                        'comment_id': c.comment_id,
+                        'comment_content': c.comment_content,
+                        'date_created': c.date_created.isoformat() if c.date_created else None,
+                        'user': {
+                            'user_id': c.user.user_id,
+                            'f_name': c.user.f_name,
+                            'm_name': c.user.m_name,
+                            'l_name': c.user.l_name,
+                            'profile_pic': build_profile_pic_url(c.user),
+                        }
+                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
                     'user': {
                         'user_id': r.user.user_id,
                         'f_name': r.user.f_name,
@@ -3013,7 +3088,21 @@ def forum_comments_view(request, forum_id):
                     notifi_content=f"{request.user.full_name} commented on your forum post",
                     notif_date=timezone.now()
                 )
-            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
+            return JsonResponse({
+                'success': True, 
+                'comment': {
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat(),
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': build_profile_pic_url(comment.user),
+                    }
+                }
+            })
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -3069,9 +3158,7 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        exists = Repost.objects.filter(forum=forum, user=request.user).first()
-        if exists:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
+        # Allow multiple reposts by the same user (no restriction)
         r = Repost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
         if request.method == "POST" and request.user.user_id != forum.user.user_id:
             Notification.objects.create(
@@ -3367,7 +3454,7 @@ def posts_view(request):
                         'image_url': img.image.url,
                         'order': img.order
                     })
-            
+
             return JsonResponse({
                 'success': True,
                 'post': {
@@ -3450,7 +3537,7 @@ def posts_view(request):
                             'image_id': img.image_id,
                             'image_url': img.image.url,
                             'order': img.order
-                        })
+                    })
 
                 # Add the original post as a feed item
                 feed_items.append({
@@ -3479,11 +3566,26 @@ def posts_view(request):
                 })
                 
                 # Add each repost as a separate feed item
-                reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
+                # Only show reposts from visible users (followed, admin, peso, or current user)
+                if user.account_type.admin or user.account_type.peso:
+                    # Admin/PESO can see all reposts
+                    reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
+                elif user.account_type.user or user.account_type.ojt:
+                    followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
+                    admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
+                    peso_users = SharedUser.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
+                    # Only show reposts from followed users, admin users, peso users, or current user
+                    reposts = Repost.objects.filter(
+                        post=post,
+                        user__in=list(followed_users) + list(admin_users) + list(peso_users) + [user.user_id]
+                    ).select_related('user', 'post', 'post__user')
+                else:
+                    reposts = Repost.objects.none()
+                
                 for repost in reposts:
-                    # Get repost likes count and data
-                    repost_likes_count = RepostLike.objects.filter(repost=repost).count()
-                    repost_likes = RepostLike.objects.filter(repost=repost).select_related('user')
+                    # Get repost likes count and data using unified Like model
+                    repost_likes_count = Like.objects.filter(repost=repost).count()
+                    repost_likes = Like.objects.filter(repost=repost).select_related('user')
                     repost_likes_data = []
                     for like in repost_likes:
                         pic = build_profile_pic_url(like.user)
@@ -3504,13 +3606,13 @@ def posts_view(request):
                             'initials': initials,
                         })
 
-                    # Get repost comments count and data
-                    repost_comments_count = RepostComment.objects.filter(repost=repost).count()
-                    repost_comments = RepostComment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+                    # Get repost comments count and data using unified Comment model
+                    repost_comments_count = Comment.objects.filter(repost=repost).count()
+                    repost_comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
                     repost_comments_data = []
                     for comment in repost_comments:
                         repost_comments_data.append({
-                            'comment_id': comment.repost_comment_id,
+                            'comment_id': comment.comment_id,
                             'comment_content': comment.comment_content,
                             'date_created': comment.date_created.isoformat(),
                             'user': {
@@ -3881,4 +3983,447 @@ def forgot_password_view(request):
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
+
+
+# Donation API Views
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_requests_view(request):
+    """Handle donation request listing and creation"""
+    if request.method == 'GET':
+        try:
+            # Get all donation requests with user info and images
+            donations = DonationRequest.objects.select_related('user').prefetch_related('images').all()
+            logger.info(f"Found {donations.count()} donation requests in database")
+            
+            donation_data = []
+            for donation in donations:
+                # Get likes and comments for this donation
+                likes = Like.objects.filter(donation_request=donation)
+                comments = Comment.objects.filter(donation_request=donation).select_related('user')
+                # Get reposts for this donation
+                reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
+                
+                donation_info = {
+                    'donation_id': donation.donation_id,
+                    'user': {
+                        'user_id': donation.user.user_id,
+                        'f_name': donation.user.f_name,
+                        'm_name': donation.user.m_name,
+                        'l_name': donation.user.l_name,
+                        'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                        'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                    },
+                    'description': donation.description,
+                    'status': donation.status,
+                    'created_at': donation.created_at.isoformat(),
+                    'updated_at': donation.updated_at.isoformat(),
+                    'images': [
+                        {
+                            'image_id': img.image_id,
+                            'image_url': img.image.url,
+                            'order': img.order
+                        } for img in donation.images.all()
+                    ],
+                    'likes_count': likes.count(),
+                    'comments_count': comments.count(),
+                    'reposts_count': reposts.count(),
+                    'likes': [
+                        {
+                            'like_id': like.like_id,
+                            'user': {
+                                'user_id': like.user.user_id,
+                                'f_name': like.user.f_name,
+                                'm_name': like.user.m_name,
+                                'l_name': like.user.l_name,
+                                'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
+                            }
+                        } for like in likes
+                    ],
+                    'comments': [
+                        {
+                            'comment_id': comment.comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat(),
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                            }
+                        } for comment in comments
+                    ],
+                    'reposts': [
+                        {
+                            'repost_id': repost.repost_id,
+                            'repost_date': repost.repost_date.isoformat(),
+                            'repost_caption': repost.caption,
+                            'user': {
+                                'user_id': repost.user.user_id,
+                                'f_name': repost.user.f_name,
+                                'm_name': repost.user.m_name,
+                                'l_name': repost.user.l_name,
+                                'profile_pic': repost.user.profile.profile_pic.url if hasattr(repost.user, 'profile') and repost.user.profile.profile_pic else None,
+                            },
+                            'likes_count': Like.objects.filter(repost=repost).count(),
+                            'comments_count': Comment.objects.filter(repost=repost).count(),
+                            'likes': [
+                                {
+                                    'like_id': like.like_id,
+                                    'user': {
+                                        'user_id': like.user.user_id,
+                                        'f_name': like.user.f_name,
+                                        'm_name': like.user.m_name,
+                                        'l_name': like.user.l_name,
+                                        'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
+                                    }
+                                } for like in Like.objects.filter(repost=repost)
+                            ],
+                            'comments': [
+                                {
+                                    'comment_id': comment.comment_id,
+                                    'comment_content': comment.comment_content,
+                                    'date_created': comment.date_created.isoformat(),
+                                    'user': {
+                                        'user_id': comment.user.user_id,
+                                        'f_name': comment.user.f_name,
+                                        'm_name': comment.user.m_name,
+                                        'l_name': comment.user.l_name,
+                                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                                    }
+                                } for comment in Comment.objects.filter(repost=repost).select_related('user')
+                            ]
+                        } for repost in reposts
+                    ]
+                }
+                donation_data.append(donation_info)
+            
+            response_data = {
+                'success': True,
+                'donations': donation_data
+            }
+            
+            logger.info(f"Returning {len(donation_data)} donations to frontend")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error fetching donation requests: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to fetch donation requests'}, status=500)
+    
+    elif request.method == 'POST':
+        try:
+            data = request.data
+            description = data.get('description')
+            images = data.get('images', [])
+            
+            logger.info(f"Creating donation request for user {request.user.user_id}: {description[:50]}...")
+            
+            if not description or not description.strip():
+                logger.warning("Donation request failed: Description is required")
+                return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
+            
+            # Create donation request
+            donation = DonationRequest.objects.create(
+                user=request.user,
+                description=description.strip()
+            )
+            
+            # Handle image uploads if any
+            if images:
+                for index, image_data in enumerate(images):
+                    if image_data and image_data.startswith('data:image'):
+                        # Handle base64 image data
+                        try:
+                            format, imgstr = image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            imgdata = base64.b64decode(imgstr)
+                            
+                            # Create a unique filename
+                            filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
+                            
+                            # Save the image
+                            donation_image = DonationImage.objects.create(
+                                donation_request=donation,
+                                order=index
+                            )
+                            donation_image.image.save(filename, ContentFile(imgdata), save=True)
+                            
+                        except Exception as e:
+                            logger.error(f"Error saving donation image {index}: {e}")
+                            # Continue with other images even if one fails
+                            continue
+            
+            # Return the created donation with full details
+            likes = Like.objects.filter(donation_request=donation)
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            reposts = Repost.objects.filter(donation_request=donation)
+            
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'm_name': donation.user.m_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                'images': [
+                    {
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    } for img in donation.images.all()
+                ],
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'likes': [],
+                'comments': [],
+                'reposts': []
+            }
+            
+            response_data = {
+                'success': True,
+                'message': 'Donation request created successfully',
+                'donation': donation_info
+            }
+            
+            logger.info(f"Successfully created donation request {donation.donation_id} for user {request.user.user_id}")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error creating donation request: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to create donation request'}, status=500)
+
+
+@api_view(['POST', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_like_view(request, donation_id):
+    """Handle donation like/unlike"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'POST':
+            # Like the donation
+            like, created = Like.objects.get_or_create(
+                donation_request=donation,
+                user=request.user
+            )
+            
+            if created:
+                return JsonResponse({'success': True, 'message': 'Donation liked'})
+            else:
+                return JsonResponse({'success': False, 'message': 'Already liked'})
+        
+        elif request.method == 'DELETE':
+            # Unlike the donation
+            try:
+                like = Like.objects.get(donation_request=donation, user=request.user)
+                like.delete()
+                return JsonResponse({'success': True, 'message': 'Donation unliked'})
+            except Like.DoesNotExist:
+                return JsonResponse({'success': False, 'message': 'Not liked'})
+                
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation like: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comments_view(request, donation_id):
+    """Handle donation comments"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'GET':
+            # Get all comments for this donation
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            
+            comments_data = [
+                {
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat(),
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                    }
+                } for comment in comments
+            ]
+            
+            return JsonResponse({
+                'success': True,
+                'comments': comments_data
+            })
+        
+        elif request.method == 'POST':
+            # Create a new comment
+            data = request.data
+            comment_content = data.get('comment_content', '').strip()
+            
+            if not comment_content:
+                return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
+            
+            comment = Comment.objects.create(
+                donation_request=donation,
+                user=request.user,
+                comment_content=comment_content,
+                date_created=timezone.now()
+            )
+            
+            # Return the full comment data
+            comment_data = {
+                'comment_id': comment.comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat(),
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'm_name': comment.user.m_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                }
+            }
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Comment added successfully',
+                'comment': comment_data
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comments: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_repost_view(request, donation_id):
+    """Handle donation reposting"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        # Get caption from request data
+        caption = request.data.get('caption', '')
+        
+        # Create a repost of the donation
+        repost = Repost.objects.create(
+            donation_request=donation,
+            user=request.user,
+            caption=caption,
+            repost_date=timezone.now()
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Donation reposted successfully',
+            'repost_id': repost.repost_id
+        })
+        
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error reposting donation: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_detail_edit_view(request, donation_id):
+    """Handle donation detail view, edit, and delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        # Check if user owns the donation or is admin
+        if donation.user != request.user and not request.user.account_type == 'admin':
+            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
+        
+        if request.method == 'GET':
+            # Return donation details
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'm_name': donation.user.m_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                'images': [
+                    {
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    } for img in donation.images.all()
+                ]
+            }
+            
+            return JsonResponse({
+                'success': True,
+                'donation': donation_info
+            })
+            
+        elif request.method == 'PUT':
+            # Update donation
+            data = request.data
+            
+            if 'description' in data:
+                donation.description = data['description']
+            
+            if 'status' in data:
+                donation.status = data['status']
+            
+            donation.updated_at = timezone.now()
+            donation.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation updated successfully',
+                'donation_id': donation.donation_id
+            })
+            
+        elif request.method == 'DELETE':
+            # Delete donation
+            donation.delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation deleted successfully'
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error in donation detail/edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
 

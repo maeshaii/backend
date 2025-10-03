@@ -133,6 +133,13 @@ urlpatterns = [
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
     path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
     
+    # Donation API endpoints
+    path('donations/', views.donation_requests_view, name='donation_requests'),
+    path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
+    path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
+    path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
+    path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
+    
     # # User Managem    ent API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),

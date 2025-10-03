@@ -38,23 +38,26 @@ class Ched(models.Model):
     job_alignment_count = models.IntegerField(default=0)
 
 class Comment(models.Model):
-    """User comments on posts and forums.
-
-    Used by Mobile: GET/POST/PUT/DELETE via /api/posts/{post_id}/comments/ and /api/forum/{forum_id}/comments/
+    """User comments on posts, forums, and donations.
+    Used by Mobile: GET/POST/PUT/DELETE via /api/posts/{post_id}/comments/, /api/forum/{forum_id}/comments/, and /api/donations/{donation_id}/comments/
     """
     comment_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='comments')
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_comments', null=True, blank=True)
     forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_comments', null=True, blank=True)
+    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='comments', null=True, blank=True)
+    donation_request = models.ForeignKey('DonationRequest', on_delete=models.CASCADE, related_name='donation_comments', null=True, blank=True)
     comment_content = models.TextField(null=True, blank=True)
     date_created = models.DateTimeField()
     
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=(models.Q(post__isnull=False, forum__isnull=True) | 
-                      models.Q(post__isnull=True, forum__isnull=False)),
-                name='comment_post_or_forum_not_both'
+                check=(models.Q(post__isnull=False, forum__isnull=True, repost__isnull=True, donation_request__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False, repost__isnull=True, donation_request__isnull=True) |
+                      models.Q(post__isnull=True, forum__isnull=True, repost__isnull=False, donation_request__isnull=True) |
+                      models.Q(post__isnull=True, forum__isnull=True, repost__isnull=True, donation_request__isnull=False)),
+                name='comment_one_content_type_only'
             )
         ]
 
@@ -147,14 +150,18 @@ class Like(models.Model):
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='likes')
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_likes', null=True, blank=True)
     forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_likes', null=True, blank=True)
-    # Used by Mobile: toggled at /api/posts/{post_id}/like/ and /api/forum/{forum_id}/like/
+    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='likes', null=True, blank=True)
+    donation_request = models.ForeignKey('DonationRequest', on_delete=models.CASCADE, related_name='donation_likes', null=True, blank=True)
+    # Used by Mobile: toggled at /api/posts/{post_id}/like/, /api/forum/{forum_id}/like/, and /api/donations/{donation_id}/like/
     
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=(models.Q(post__isnull=False, forum__isnull=True) | 
-                      models.Q(post__isnull=True, forum__isnull=False)),
-                name='like_post_or_forum_not_both'
+                check=(models.Q(post__isnull=False, forum__isnull=True, repost__isnull=True, donation_request__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False, repost__isnull=True, donation_request__isnull=True) |
+                      models.Q(post__isnull=True, forum__isnull=True, repost__isnull=False, donation_request__isnull=True) |
+                      models.Q(post__isnull=True, forum__isnull=True, repost__isnull=True, donation_request__isnull=False)),
+                name='like_one_content_type_only'
             )
         ]
 
@@ -295,50 +302,61 @@ class Qpro(models.Model):
     qpro_id = models.AutoField(primary_key=True)
     standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='qpros')
 
+class DonationRequest(models.Model):
+    """Donation requests from alumni"""
+    donation_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='donation_requests')
+    description = models.TextField()
+    status = models.CharField(max_length=20, choices=[
+        ('active', 'Active'),
+        ('fulfilled', 'Fulfilled'),
+        ('closed', 'Closed')
+    ], default='active')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        db_table = 'shared_donationrequest'
+    
+    def __str__(self):
+        return f"Donation Request {self.donation_id} by {self.user.f_name} {self.user.l_name}"
+
+class DonationImage(models.Model):
+    """Multiple images for donation requests"""
+    image_id = models.AutoField(primary_key=True)
+    donation_request = models.ForeignKey(DonationRequest, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='donation_images/')
+    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['order', 'created_at']
+        db_table = 'shared_donationimage'
+    
+    def __str__(self):
+        return f"Image {self.image_id} for Donation Request {self.donation_request.donation_id}"
+
 class Repost(models.Model):
     repost_id = models.AutoField(primary_key=True)
     post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='post_reposts', null=True, blank=True)
     forum = models.ForeignKey('Forum', on_delete=models.CASCADE, related_name='forum_reposts', null=True, blank=True)
+    donation_request = models.ForeignKey('DonationRequest', on_delete=models.CASCADE, related_name='donation_reposts', null=True, blank=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='reposts')
     repost_date = models.DateTimeField()
     caption = models.TextField(null=True, blank=True)
-    # Used by Mobile: /api/posts/{post_id}/repost/, /api/forum/{forum_id}/repost/ and /api/reposts/{repost_id}/
+    # Used by Mobile: /api/posts/{post_id}/repost/, /api/forum/{forum_id}/repost/, /api/donations/{donation_id}/repost/ and /api/reposts/{repost_id}/
     
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=(models.Q(post__isnull=False, forum__isnull=True) | 
-                      models.Q(post__isnull=True, forum__isnull=False)),
-                name='repost_post_or_forum_not_both'
+                check=(models.Q(post__isnull=False, forum__isnull=True, donation_request__isnull=True) | 
+                      models.Q(post__isnull=True, forum__isnull=False, donation_request__isnull=True) |
+                      models.Q(post__isnull=True, forum__isnull=True, donation_request__isnull=False)),
+                name='repost_one_content_type_only'
             )
         ]
 
-class RepostLike(models.Model):
-    """Used by Mobile: likes attached to a specific Repost (not the original Post).
-
-    Endpoints to be exposed under /api/reposts/{repost_id}/like/ and /likes/.
-    """
-    repost_like_id = models.AutoField(primary_key=True)
-    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='likes')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='repost_likes')
-
-    class Meta:
-        unique_together = ('repost', 'user')
-        db_table = 'shared_repostlike'
-
-class RepostComment(models.Model):
-    """Used by Mobile: comments attached to a specific Repost.
-
-    Endpoints to be exposed under /api/reposts/{repost_id}/comments/ ...
-    """
-    repost_comment_id = models.AutoField(primary_key=True)
-    repost = models.ForeignKey('Repost', on_delete=models.CASCADE, related_name='comments')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='repost_comments')
-    comment_content = models.TextField(null=True, blank=True)
-    date_created = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'shared_repostcomment'
 
 class Standard(models.Model):
     standard_id = models.AutoField(primary_key=True)
