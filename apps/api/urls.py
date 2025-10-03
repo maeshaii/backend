@@ -59,7 +59,7 @@ urlpatterns = [
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
-    path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
+   #  path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
 
     path('users_list_view/', views.users_list_view, name='users_list_view'),
     

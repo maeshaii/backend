@@ -1119,7 +1119,7 @@ def ojt_by_year_view(request):
         ojt_data = (
             User.objects
             .filter(academic_info__year_graduated=year_int)
-            .select_related('profile', 'academic_info', 'ojt_info')
+            .select_related('profile', 'academic_info', 'ojt_info', 'account_type')
             .order_by('l_name', 'f_name')
         )
 
@@ -1131,7 +1131,7 @@ def ojt_by_year_view(request):
                 recent_users = (
                     User.objects
                     .filter(updated_at__gte=recent_since)
-                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .select_related('profile', 'academic_info', 'ojt_info', 'account_type')
                     .order_by('-updated_at', 'l_name', 'f_name')
                 )
             except Exception:
@@ -1144,7 +1144,7 @@ def ojt_by_year_view(request):
                 ojt_data = (
                     User.objects
                     .filter(account_type__ojt=True)
-                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .select_related('profile', 'academic_info', 'ojt_info', 'account_type')
                     .order_by('l_name', 'f_name')
                 )
 
@@ -1170,6 +1170,7 @@ def ojt_by_year_view(request):
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
+                'is_alumni': getattr(getattr(ojt, 'account_type', None), 'user', False),
             })
 
         return JsonResponse({
@@ -1232,6 +1233,12 @@ def ojt_status_update_view(request):
             print(f"User not found with ID: {user_id}")
             return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
         from apps.shared.models import OJTInfo
+        # Prevent status changes if already approved as Alumni
+        try:
+            if getattr(user.account_type, 'user', False):
+                return JsonResponse({'success': False, 'message': 'Already approved by admin. Status cannot be modified.'}, status=403)
+        except Exception:
+            pass
         ojt_info, created = OJTInfo.objects.get_or_create(user=user)
         print(f"OJTInfo created: {created}, existing ojtstatus: {ojt_info.ojtstatus}")
         ojt_info.ojtstatus = status_val
