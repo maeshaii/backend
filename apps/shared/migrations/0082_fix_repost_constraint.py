@@ -34,3 +34,4 @@ class Migration(migrations.Migration):
             reverse_sql="ALTER TABLE shared_repost DROP CONSTRAINT IF EXISTS repost_one_content_type_only;"
         ),
     ]
+
