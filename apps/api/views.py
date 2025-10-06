@@ -26,9 +26,6 @@ from datetime import datetime
 import secrets
 import string
 import base64
-import uuid
-from django.core.files.base import ContentFile
-from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 import pandas as pd
 import io
@@ -38,9 +35,8 @@ from collections import Counter
 from apps.shared.models import Question
 from django.core.mail import send_mail
 from django.utils import timezone
-from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
-from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework import status
@@ -777,17 +773,25 @@ def import_ojt_view(request):
         batch_year = request.POST.get('batch_year', '')
         course = request.POST.get('course', '')
         coordinator_username = request.POST.get('coordinator_username', '')
+        section = request.POST.get('section', '')
+
+        print(f"DEBUG - Form data received:")
+        print(f"  batch_year: '{batch_year}'")
+        print(f"  course: '{course}'")
+        print(f"  coordinator_username: '{coordinator_username}'")
+        print(f"  section: '{section}'")
 
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
 
-        if not batch_year or not course or not coordinator_username:
-            return JsonResponse({'success': False, 'message': 'Batch year, course, and coordinator username are required'}, status=400)
+        if not batch_year or not course or not coordinator_username or not section:
+            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, course: {bool(course)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
 
         # Read Excel file
         try:
             df = pd.read_excel(file)
             print('OJT IMPORT - HEADERS:', list(df.columns))
+            print('OJT IMPORT - SECTION FROM FORM:', section)
         except Exception as e:
             return JsonResponse({'success': False, 'message': f'Error reading Excel file: {str(e)}'}, status=400)
 
@@ -832,6 +836,7 @@ def import_ojt_view(request):
             coordinator=coordinator_username,
             batch_year=normalized_year,
             course=course,
+            section=section or '',  # Use section from form, or empty string if not provided
             file_name=file.name
         )
 
@@ -861,7 +866,29 @@ def import_ojt_view(request):
                 first_name = str(row.get('First_Name', '')).strip()
                 middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
                 last_name = str(row.get('Last_Name', '')).strip()
-                gender = str(row.get('Gender', '')).strip().upper()
+                gender_raw = str(row.get('Gender', '')).strip()
+                # Normalize gender values
+                if gender_raw.upper() in ['MALE', 'M']:
+                    gender = 'M'
+                elif gender_raw.upper() in ['FEMALE', 'F']:
+                    gender = 'F'
+                else:
+                    gender = gender_raw.upper()
+                # Note: Using section from form parameter, not from Excel file
+                print(f"Row {index+2} - Using section from form: '{section}'")
+
+                # --- Section Filtering ---
+                # Check if Excel file has a Section column and filter by selected section
+                excel_section = str(row.get('Section', '')).strip()
+                if excel_section and section:
+                    # If Excel has section data, only process rows that match the selected section
+                    if excel_section.upper() != section.upper():
+                        print(f"Row {index+2} - SKIPPING: Section '{excel_section}' doesn't match selected section '{section}'")
+                        skipped_count += 1
+                        continue
+                elif section:
+                    # If no section column in Excel but section is selected, apply section to all rows
+                    print(f"Row {index+2} - No section column in Excel, applying selected section: '{section}'")
 
                 # --- Password Handling (no birthdate login) ---
                 password_raw = str(row.get('Password', '')).strip()
@@ -881,11 +908,18 @@ def import_ojt_view(request):
                 print(f"Row {index+2} - Raw Start Date: '{start_date_raw}', Type: {type(start_date_raw)}")
                 if pd.notna(start_date_raw):
                     try:
+                        # Try multiple date parsing methods
                         ojt_start_date = pd.to_datetime(start_date_raw, dayfirst=True).date()
-                        print(f"Row {index+2} - Parsed start date successfully: {ojt_start_date}")
+                        if ojt_start_date and ojt_start_date.year > 2020:  # Valid date check
+                            print(f"Row {index+2} - Parsed start date successfully: {ojt_start_date}")
+                        else:
+                            print(f"Row {index+2} - Invalid start date: {ojt_start_date}")
+                            ojt_start_date = None
                     except Exception as e:
                         print(f"Row {index+2} - FAILED to parse start date. Error: {e}")
                         ojt_start_date = None
+                else:
+                    print(f"Row {index+2} - No start date found in row")
 
                 # Try different possible column names for end date
                 end_date_raw = row.get('Ojt_End_Date') or row.get('End_Date')
@@ -916,7 +950,7 @@ def import_ojt_view(request):
 
                 # --- Gender Validation ---
                 if gender not in ['M', 'F']:
-                    error_msg = f"Row {index + 2}: Gender must be 'M' or 'F', but was '{gender}'"
+                    error_msg = f"Row {index + 2}: Gender must be 'M'/'Male' or 'F'/'Female', but was '{gender}'"
                     print(f"SKIPPING: {error_msg}")
                     errors.append(error_msg)
                     skipped_count += 1
@@ -1016,21 +1050,32 @@ def import_ojt_view(request):
                     pass
                 from apps.shared.models import UserProfile, AcademicInfo, EmploymentHistory, OJTInfo
                 birthdate_val = row.get('Birthdate')
+                # Extract phone number from Contact_No column (your Excel uses Contact_No, not Phone_Number)
+                phone_num = str(row.get('Contact_No', '')).strip() if pd.notna(row.get('Contact_No')) else None
+                # Clean up phone number format (remove scientific notation)
+                if phone_num and 'E+' in phone_num:
+                    try:
+                        phone_num = str(int(float(phone_num)))
+                    except:
+                        pass
+                
                 profile_kwargs = dict(
                     user=ojt_user,
                     age=None,
-                    phone_num=str(row.get('Phone_Number', '')).strip() if pd.notna(row.get('Phone_Number')) else None,
+                    phone_num=phone_num,
                     address=str(row.get('Address', '')).strip() if pd.notna(row.get('Address')) else None,
                     civil_status=str(row.get('Civil_Status', '')).strip() if pd.notna(row.get('Civil_Status')) else None,
                     social_media=str(row.get('Social_Media', '')).strip() if pd.notna(row.get('Social_Media')) else None,
                 )
                 if pd.notna(birthdate_val):
                     try:
+                        # Try different date formats
                         bd = pd.to_datetime(birthdate_val, errors='coerce').date()
-                    except Exception:
-                        bd = None
-                    if bd:
-                        profile_kwargs['birthdate'] = bd
+                        if bd and bd.year > 1900:  # Valid date check
+                            profile_kwargs['birthdate'] = bd
+                    except Exception as e:
+                        print(f"Row {index+2} - Failed to parse birthdate '{birthdate_val}': {e}")
+                        pass
                 UserProfile.objects.create(**profile_kwargs)
                 # Employment: company name
                 company_name_new = (
@@ -1076,8 +1121,8 @@ def import_ojt_view(request):
                 skipped_count += 1
                 continue
 
-        # Update import record
-        import_record.records_imported = total_rows
+        # Update import record with actual created count (after section filtering)
+        import_record.records_imported = created_count
         if errors:
             import_record.status = 'Partial' if created_count > 0 else 'Failed'
         import_record.save()
@@ -1085,7 +1130,7 @@ def import_ojt_view(request):
         # Export passwords to Excel after import
         if exported_passwords:
             # Ensure the import record reflects counts before any early return
-            import_record.records_imported = total_rows
+            import_record.records_imported = created_count
             if errors:
                 import_record.status = 'Partial' if created_count > 0 else 'Failed'
             import_record.save()
@@ -1107,6 +1152,9 @@ def import_ojt_view(request):
         })
 
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"IMPORT ERROR DETAILS: {error_details}")
         return JsonResponse({'success': False, 'message': f'Import failed: {str(e)}'}, status=500)
 
 # OJT statistics for coordinators
@@ -1117,10 +1165,22 @@ def ojt_statistics_view(request):
         coordinator_username = request.GET.get('coordinator', '')
 
         # Build cards from OJT users' academic years and also any years from OJTImport
-        users_qs = User.objects.filter(account_type__ojt=True).select_related('academic_info')
+        users_qs = (
+            User.objects
+            .filter(account_type__ojt=True)
+            .exclude(acc_username='1334335')
+            .exclude(f_name__iexact='Carlo', l_name__iexact='Mendoza')
+            .select_related('academic_info')
+        )
         years_to_counts = {}
         for u in users_qs:
             try:
+                # Extra safety: exclude specific user (4-B)
+                if str(getattr(u, 'acc_username', '')).strip() == '1334335' or (
+                    str(getattr(u, 'f_name', '')).strip().lower() == 'carlo' and
+                    str(getattr(u, 'l_name', '')).strip().lower() == 'mendoza'
+                ):
+                    continue
                 year = getattr(u.academic_info, 'year_graduated', None)
                 if year is None:
                     continue
@@ -1129,6 +1189,7 @@ def ojt_statistics_view(request):
                 continue
 
         # Also include any batch years that were imported, so a card appears immediately after import
+        # Do NOT inflate counts from imported record totals; just create the card with a minimal count
         try:
             from apps.shared.models import OJTImport
             for imp in OJTImport.objects.all():
@@ -1136,8 +1197,8 @@ def ojt_statistics_view(request):
                 if y is None:
                     continue
                 if y not in years_to_counts:
-                    # Show at least 1 so a card appears; clicking will query users by year
-                    years_to_counts[y] = max(int(getattr(imp, 'records_imported', 0) or 1), 1)
+                    # Ensure the card appears, but don't use records_imported to avoid overcounting
+                    years_to_counts[y] = 1
         except Exception:
             pass
 
@@ -1168,11 +1229,12 @@ def ojt_by_year_view(request):
         except Exception:
             return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
 
-        # Include all users for the batch year so data shows even if they were not created as OJT type
+        # Include only section 4-A users for the batch year (coordinator only imported 4-A)
         ojt_data = (
             User.objects
             .filter(academic_info__year_graduated=year_int)
-            .select_related('profile', 'academic_info', 'ojt_info')
+            .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
+            .select_related('profile', 'academic_info', 'ojt_info', 'employment')
             .order_by('l_name', 'f_name')
         )
 
@@ -1184,7 +1246,8 @@ def ojt_by_year_view(request):
                 recent_users = (
                     User.objects
                     .filter(updated_at__gte=recent_since)
-                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
+                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
                     .order_by('-updated_at', 'l_name', 'f_name')
                 )
             except Exception:
@@ -1197,12 +1260,22 @@ def ojt_by_year_view(request):
                 ojt_data = (
                     User.objects
                     .filter(account_type__ojt=True)
-                    .select_related('profile', 'academic_info', 'ojt_info')
+                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
+                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
                     .order_by('l_name', 'f_name')
                 )
 
         ojt_list = []
         for ojt in ojt_data:
+            # Debug: Check the actual values
+            ojt_info = getattr(ojt, 'ojt_info', None)
+            is_sent_to_admin_val = getattr(ojt_info, 'is_sent_to_admin', False) if ojt_info else False
+            print(f"🔍 DEBUG Backend: User {ojt.f_name} {ojt.l_name} (ID: {ojt.user_id})")
+            print(f"   OJT Info exists: {ojt_info is not None}")
+            print(f"   is_sent_to_admin: {is_sent_to_admin_val} (type: {type(is_sent_to_admin_val)})")
+            print(f"   Account Type: {ojt.account_type}")
+            print(f"   Is Alumni (user=True): {getattr(ojt.account_type, 'user', False)}")
+            
             ojt_list.append({
                 'id': ojt.user_id,
                 'ctu_id': ojt.acc_username,
@@ -1219,16 +1292,25 @@ def ojt_by_year_view(request):
                 'social_media': getattr(ojt.profile, 'social_media', None),
                 'course': getattr(ojt.academic_info, 'course', None),
                 'company': getattr(ojt.employment, 'company_name_current', None),
-                'ojt_start_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_start_date', None),
+                'ojt_start_date': getattr(getattr(ojt, 'employment', None), 'date_started', None),
                 'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
+                'is_sent_to_admin': is_sent_to_admin_val,
+                'is_alumni': getattr(ojt.account_type, 'user', False),  # Check if account_type is alumni (user=True)
                 'batch_year': getattr(ojt.academic_info, 'year_graduated', None),
             })
 
-        return JsonResponse({
+        response_data = {
             'success': True,
             'ojt_data': ojt_list
-        })
+        }
+        
+        # Debug: Print the final response data
+        print(f"🔍 DEBUG Final Response Data:")
+        for i, user in enumerate(ojt_list):
+            print(f"   User {i+1}: {user['name']} - is_sent_to_admin: {user['is_sent_to_admin']} (type: {type(user['is_sent_to_admin'])})")
+        
+        return JsonResponse(response_data)
 
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
@@ -1278,13 +1360,20 @@ def ojt_status_update_view(request):
         if not user_id or not status_val:
             print("Missing user_id or status")
             return JsonResponse({'success': False, 'message': 'user_id and status are required'}, status=400)
+        
         try:
             user = User.objects.get(user_id=int(user_id))
             print(f"Found user: {user.acc_username}")
         except User.DoesNotExist:
             print(f"User not found with ID: {user_id}")
             return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
-        from apps.shared.models import OJTInfo
+        
+        from apps.shared.models import OJTInfo, OJTImport
+        
+        # Allow coordinators to set status to "Completed" before sending to admin
+        if status_val == 'Completed':
+            print(f"🔍 DEBUG: User {user.acc_username} setting status to Completed - allowing this change")
+        
         ojt_info, created = OJTInfo.objects.get_or_create(user=user)
         print(f"OJTInfo created: {created}, existing ojtstatus: {ojt_info.ojtstatus}")
         ojt_info.ojtstatus = status_val
@@ -1346,6 +1435,27 @@ def send_completed_to_admin_view(request):
 
         completed_count = users_qs.filter(ojt_info__ojtstatus='Completed').count()
 
+        # Mark individual users as sent to admin
+        from apps.shared.models import OJTInfo
+        from django.utils import timezone
+        
+        sent_users_count = 0
+        for user in users_qs.filter(ojt_info__ojtstatus='Completed'):
+            # Skip users who are already alumni (already approved)
+            if getattr(user.account_type, 'user', False):
+                print(f"Skipping already approved user: {user.acc_username}")
+                continue
+                
+            try:
+                ojt_info, created = OJTInfo.objects.get_or_create(user=user)
+                ojt_info.is_sent_to_admin = True
+                ojt_info.sent_to_admin_date = timezone.now()
+                ojt_info.save()
+                sent_users_count += 1
+                print(f"Marked user {user.acc_username} as sent to admin")
+            except Exception as e:
+                print(f"Error marking user {user.acc_username} as sent to admin: {e}")
+
         # Mark this batch as requested by coordinator so admin sees 1 per batch
         try:
             from apps.shared.models import OJTImport
@@ -1358,24 +1468,24 @@ def send_completed_to_admin_view(request):
                     year_int = getattr(first_user.academic_info, 'year_graduated', None)
             if year_int is None:
                 # As a last resort, avoid creating invalid rows
-                return JsonResponse({'success': True, 'completed_count': completed_count, 'note': 'No batch year provided'}, status=200)
+                return JsonResponse({'success': True, 'completed_count': sent_users_count, 'note': 'No batch year provided'}, status=200)
 
             obj, created = OJTImport.objects.get_or_create(batch_year=year_int, defaults={
                 'coordinator': coord_name,
                 'course': '',
                 'file_name': 'send_to_admin',
-                'records_imported': completed_count,
+                'records_imported': sent_users_count,
                 'status': 'Requested',
             })
             if not created:
                 obj.coordinator = coord_name or obj.coordinator
                 obj.status = 'Requested'
-                obj.records_imported = completed_count
+                obj.records_imported = sent_users_count
                 obj.save()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error creating/updating OJTImport: {e}")
 
-        return JsonResponse({'success': True, 'completed_count': completed_count})
+        return JsonResponse({'success': True, 'completed_count': sent_users_count})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
@@ -1432,72 +1542,45 @@ def coordinator_requests_list_view(request):
         for imp in all_imports:
             print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
         
-        # Base: group Requested imports by year and course, take max count to avoid duplicates
+        # Get all completed OJT users grouped by year and course
         try:
             from django.db.models import Max, Value as V
             from django.db.models.functions import Coalesce
-            requested_imports = OJTImport.objects.filter(status='Requested')
-            print(f"DEBUG: Found {requested_imports.count()} Requested imports")
             
-            grouped = (
-                requested_imports
-                .values('batch_year', 'course')
-                .annotate(count=Coalesce(Max('records_imported'), V(0)))
-                .order_by('-batch_year')
-            )
-            for row in grouped:
-                items.append({
-                    'batch_year': row.get('batch_year'), 
-                    'course': row.get('course', ''),
-                    'count': row.get('count', 0) or 0
-                })
-        except Exception as e:
-            print(f"DEBUG: Exception in grouped query: {e}")
-            # Fallback: if aggregation not available, compute max per year and course in Python
+            # Get all completed OJT users who are not yet alumni
+            completed_users = User.objects.filter(
+                ojt_info__ojtstatus='Completed'
+            ).exclude(
+                account_type__user=True  # Exclude alumni (already approved)
+            ).select_related('academic_info', 'ojt_info', 'account_type')
+            
+            print(f"🔍 DEBUG coordinator_requests_list_view: Found {completed_users.count()} completed OJT users")
+            
+            # Group by year and course
             by_year_course = {}
-            for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
-                year = getattr(imp, 'batch_year', None)
-                course = getattr(imp, 'course', '')
-                count_val = getattr(imp, 'records_imported', 0) or 0
+            for user in completed_users:
+                year = getattr(user.academic_info, 'year_graduated', None)
+                course = getattr(user.academic_info, 'course', '')
                 if year is None:
                     continue
                 key = (year, course)
-                by_year_course[key] = max(by_year_course.get(key, 0), count_val)
-            for (y, course), c in by_year_course.items():
-                items.append({'batch_year': y, 'course': course, 'count': c})
-
-        # Fallback: for any batch lacking a Requested import but has Completed users
-        # BUT only if there's no Approved OJTImport for that batch
-        try:
-            completed_years_courses = (
-                User.objects.filter(ojt_info__ojtstatus='Completed')
-                .values('academic_info__year_graduated', 'academic_info__course')
-                .annotate()
-            )
-            existing_keys = {(it['batch_year'], it.get('course', '')) for it in items if it.get('batch_year') is not None}
+                by_year_course[key] = by_year_course.get(key, 0) + 1
+                
+            print(f"🔍 DEBUG coordinator_requests_list_view: Grouped by year/course: {by_year_course}")
             
-            # Get all approved batches to exclude them from fallback
-            approved_batches = set(OJTImport.objects.filter(status='Approved').values_list('batch_year', flat=True))
-            print(f"DEBUG: Approved batches: {approved_batches}")
-            print(f"DEBUG: Existing keys from main query: {existing_keys}")
-            
-            for row in completed_years_courses:
-                y = row.get('academic_info__year_graduated')
-                course = row.get('academic_info__course', '')
-                print(f"DEBUG: Checking completed year {y}, course {course}")
-                if y and (y, course) not in existing_keys and y not in approved_batches:
-                    count = User.objects.filter(
-                        academic_info__year_graduated=y, 
-                        academic_info__course=course,
-                        ojt_info__ojtstatus='Completed'
-                    ).count()
-                    print(f"DEBUG: Adding fallback item for year {y}, course {course}, count {count}")
-                    items.append({'batch_year': y, 'course': course, 'count': count})
-                else:
-                    print(f"DEBUG: Skipping year {y}, course {course} - existing_keys: {(y, course) in existing_keys}, approved: {y in approved_batches}")
+            # Add items for each year/course combination
+            for (year, course), count in by_year_course.items():
+                items.append({
+                    'batch_year': year,
+                    'course': course,
+                    'count': count
+                })
+                
         except Exception as e:
-            print(f"DEBUG: Exception in fallback: {e}")
-            pass
+            print(f"DEBUG: Exception in completed users query: {e}")
+            # Fallback: if query fails, return empty list
+            items = []
+
 
         # Sort newest first and ensure unique year-course combinations
         dedup = {}
@@ -1510,6 +1593,9 @@ def coordinator_requests_list_view(request):
             dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
         items = [{'batch_year': y, 'course': course, 'count': c} for (y, course), c in dedup.items()]
         items.sort(key=lambda x: int(x['batch_year']), reverse=True)
+        
+        print(f"🔍 DEBUG coordinator_requests_list_view FINAL RESPONSE: {items}")
+        
         return JsonResponse({'success': True, 'items': items})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
@@ -1538,6 +1624,48 @@ def approve_coordinator_request_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def get_coordinator_sections_view(request):
+    """Get sections that a coordinator has previously imported"""
+    try:
+        coordinator_username = request.GET.get('coordinator', '')
+        
+        if not coordinator_username:
+            return JsonResponse({'success': False, 'message': 'Coordinator username required'}, status=400)
+        
+        # Get unique sections from OJTImport records for this coordinator
+        from apps.shared.models import OJTImport
+        sections = OJTImport.objects.filter(
+            coordinator=coordinator_username,
+            section__isnull=False
+        ).exclude(
+            section=''
+        ).values_list('section', flat=True).distinct().order_by('section')
+        
+        # Also get sections from actual user records for this coordinator
+        from apps.shared.models import User
+        user_sections = User.objects.filter(
+            account_type__ojt=True,
+            academic_info__isnull=False
+        ).exclude(
+            academic_info__section__isnull=True
+        ).exclude(
+            academic_info__section=''
+        ).values_list('academic_info__section', flat=True).distinct().order_by('academic_info__section')
+        
+        # Combine and deduplicate sections
+        all_sections = list(set(list(sections) + list(user_sections)))
+        all_sections.sort()
+        
+        return JsonResponse({
+            'success': True,
+            'sections': all_sections
+        })
+        
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -1603,8 +1731,17 @@ def approve_ojt_to_alumni_view(request):
 
             # Remove the coordinator request card after approval
             from apps.shared.models import OJTImport
+            print(f"🔍 DEBUG: Before approval - checking OJTImport records for year {year_int}")
+            requested_before = OJTImport.objects.filter(batch_year=year_int, status='Requested')
+            print(f"🔍 DEBUG: Found {requested_before.count()} records with status 'Requested' for year {year_int}")
+            
             updated_imports = OJTImport.objects.filter(batch_year=year_int, status='Requested').update(status='Approved')
-            print(f"Updated {updated_imports} OJTImport records from Requested to Approved for year {year_int}")
+            print(f"🔍 DEBUG: Updated {updated_imports} OJTImport records from Requested to Approved for year {year_int}")
+            
+            # Verify the update
+            requested_after = OJTImport.objects.filter(batch_year=year_int, status='Requested')
+            approved_after = OJTImport.objects.filter(batch_year=year_int, status='Approved')
+            print(f"🔍 DEBUG: After update - Requested: {requested_after.count()}, Approved: {approved_after.count()}")
 
             for user in completed_ojt_users:
                 try:
@@ -1617,6 +1754,11 @@ def approve_ojt_to_alumni_view(request):
                     user.user_status = 'active'
                     user.acc_password = make_password(password)
                     user.save()
+
+                    # Clear sent to admin flag since user is now approved
+                    if hasattr(user, 'ojt_info') and user.ojt_info:
+                        user.ojt_info.is_sent_to_admin = False
+                        user.ojt_info.save()
 
                     # Store initial password for export
                     UserInitialPassword.objects.update_or_create(
@@ -2029,7 +2171,7 @@ def post_detail_view(request, post_id):
                         'image_id': img.image_id,
                         'image_url': img.image.url,
                         'order': img.order
-                })
+                    })
 
             post_data = {
                 'post_id': post.post_id,
@@ -2107,8 +2249,8 @@ def repost_detail_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
-    likes = Like.objects.filter(repost=repost).select_related('user')
-    comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+    likes = []  # RepostLike model doesn't exist
+    comments = []  # RepostComment model doesn't exist
     data = {
         'repost_id': repost.repost_id,
         'caption': repost.caption,
@@ -2165,18 +2307,8 @@ def repost_like_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
-    if request.method == 'POST':
-        like, created = Like.objects.get_or_create(repost=repost, user=request.user)
-        if created:
-            return JsonResponse({'success': True})
-        return JsonResponse({'success': False, 'message': 'Already liked'})
-    else:
-        try:
-            like = Like.objects.get(repost=repost, user=request.user)
-            like.delete()
-            return JsonResponse({'success': True})
-        except Like.DoesNotExist:
-            return JsonResponse({'success': False, 'message': 'Not liked'})
+    # RepostLike model doesn't exist, so like functionality is disabled
+    return JsonResponse({'success': False, 'message': 'Like functionality not available'})
 
 
 @api_view(["GET"]) 
@@ -2186,13 +2318,8 @@ def repost_likes_list_view(request, repost_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
-    likes = Like.objects.filter(repost=repost).select_related('user')
-    return JsonResponse({'likes': [{
-        'user_id': l.user.user_id,
-        'f_name': l.user.f_name,
-        'l_name': l.user.l_name,
-        'profile_pic': build_profile_pic_url(l.user),
-    } for l in likes]})
+    # RepostLike model doesn't exist, so return empty likes list
+    return JsonResponse({'likes': []})
 
 
 @api_view(["GET", "POST"]) 
@@ -2203,40 +2330,16 @@ def repost_comments_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
     if request.method == 'GET':
-        comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
-        return JsonResponse({'comments': [{
-            'comment_id': c.comment_id,
-            'comment_content': c.comment_content,
-            'date_created': c.date_created.isoformat() if c.date_created else None,
-            'user': {
-                'user_id': c.user.user_id,
-                'f_name': c.user.f_name,
-                'l_name': c.user.l_name,
-                'profile_pic': build_profile_pic_url(c.user),
-            }
-        } for c in comments]})
+        # RepostComment model doesn't exist, so return empty comments list
+        return JsonResponse({'comments': []})
     else:
         try:
             payload = json.loads(request.body or '{}')
             content = (payload.get('comment_content') or '').strip()
             if not content:
                 return JsonResponse({'error': 'content required'}, status=400)
-            c = Comment.objects.create(repost=repost, user=request.user, comment_content=content, date_created=timezone.now())
-            return JsonResponse({
-                'success': True, 
-                'comment': {
-                    'comment_id': c.comment_id,
-                    'comment_content': c.comment_content,
-                    'date_created': c.date_created.isoformat(),
-                    'user': {
-                        'user_id': c.user.user_id,
-                        'f_name': c.user.f_name,
-                        'm_name': c.user.m_name,
-                        'l_name': c.user.l_name,
-                        'profile_pic': build_profile_pic_url(c.user),
-                    }
-                }
-            })
+            # RepostComment model doesn't exist, so comment creation is disabled
+            return JsonResponse({'error': 'Comment functionality not available'}, status=400)
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
 
@@ -2248,23 +2351,8 @@ def repost_comment_edit_view(request, repost_id, comment_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
-    try:
-        comment = Comment.objects.get(comment_id=comment_id, repost=repost)
-    except Comment.DoesNotExist:
-        return JsonResponse({'error': 'Comment not found'}, status=404)
-    if comment.user.user_id != request.user.user_id:
-        return JsonResponse({'error': 'Unauthorized'}, status=403)
-    if request.method == 'PUT':
-        try:
-            payload = json.loads(request.body or '{}')
-            comment.comment_content = (payload.get('comment_content') or '').strip()
-            comment.save(update_fields=['comment_content'])
-            return JsonResponse({'success': True})
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=400)
-    else:
-        comment.delete()
-        return JsonResponse({'success': True})
+    # RepostComment model doesn't exist, so comment editing is disabled
+    return JsonResponse({'error': 'Comment functionality not available'}, status=400)
 
 @api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
@@ -2438,18 +2526,8 @@ def post_comments_view(request, post_id):
 
             return JsonResponse({
                 'success': True,
-                'comment': {
-                    'comment_id': comment.comment_id,
-                    'comment_content': comment.comment_content,
-                    'date_created': comment.date_created.isoformat(),
-                    'user': {
-                        'user_id': comment.user.user_id,
-                        'f_name': comment.user.f_name,
-                        'm_name': comment.user.m_name,
-                        'l_name': comment.user.l_name,
-                        'profile_pic': build_profile_pic_url(comment.user),
-                    }
-                }
+                'message': 'Comment added',
+                'comment_id': comment.comment_id
             })
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
@@ -2531,7 +2609,10 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
-        # Allow multiple reposts by the same user (no restriction)
+        # Check if user already reposted this post
+        existing_repost = Repost.objects.filter(user=user, post=post).first()
+        if existing_repost:
+            return JsonResponse({'error': 'You have already reposted this'}, status=400)
 
         # Create repost with optional caption
         payload = {}
@@ -2709,7 +2790,8 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
-from apps.shared.models import Forum, Like, Comment, Repost, Post
+from apps.shared.models import Forum, Like, Comment, Repost
+from apps.shared.models import Post, Like, Comment, Repost
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2796,31 +2878,6 @@ def forum_list_create_view(request):
                         'repost_id': r.repost_id,
                         'repost_date': r.repost_date.isoformat(),
                         'repost_caption': r.caption,
-                        'likes_count': Like.objects.filter(repost=r).count(),
-                        'comments_count': Comment.objects.filter(repost=r).count(),
-                        'likes': [{
-                            'user_id': l.user.user_id,
-                            'f_name': l.user.f_name,
-                            'm_name': l.user.m_name,
-                            'l_name': l.user.l_name,
-                            'profile_pic': build_profile_pic_url(l.user),
-                            'initials': None if build_profile_pic_url(l.user) else (
-                                ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
-                                if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
-                            ),
-                        } for l in Like.objects.filter(repost=r).select_related('user')],
-                        'comments': [{
-                            'comment_id': c.comment_id,
-                            'comment_content': c.comment_content,
-                            'date_created': c.date_created.isoformat() if c.date_created else None,
-                            'user': {
-                                'user_id': c.user.user_id,
-                                'f_name': c.user.f_name,
-                                'm_name': c.user.m_name,
-                                'l_name': c.user.l_name,
-                                'profile_pic': build_profile_pic_url(c.user),
-                            }
-                        } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
                         'user': {
                             'user_id': r.user.user_id,
                             'f_name': r.user.f_name,
@@ -2927,31 +2984,6 @@ def forum_detail_edit_view(request, forum_id):
                     'repost_id': r.repost_id,
                     'repost_date': r.repost_date.isoformat() if r.repost_date else None,
                     'repost_caption': r.caption,
-                    'likes_count': Like.objects.filter(repost=r).count(),
-                    'comments_count': Comment.objects.filter(repost=r).count(),
-                    'likes': [{
-                        'user_id': l.user.user_id,
-                        'f_name': l.user.f_name,
-                        'm_name': l.user.m_name,
-                        'l_name': l.user.l_name,
-                        'profile_pic': build_profile_pic_url(l.user),
-                        'initials': None if build_profile_pic_url(l.user) else (
-                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
-                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
-                        ),
-                    } for l in Like.objects.filter(repost=r).select_related('user')],
-                    'comments': [{
-                        'comment_id': c.comment_id,
-                        'comment_content': c.comment_content,
-                        'date_created': c.date_created.isoformat() if c.date_created else None,
-                        'user': {
-                            'user_id': c.user.user_id,
-                            'f_name': c.user.f_name,
-                            'm_name': c.user.m_name,
-                            'l_name': c.user.l_name,
-                            'profile_pic': build_profile_pic_url(c.user),
-                        }
-                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
                     'user': {
                         'user_id': r.user.user_id,
                         'f_name': r.user.f_name,
@@ -3088,21 +3120,7 @@ def forum_comments_view(request, forum_id):
                     notifi_content=f"{request.user.full_name} commented on your forum post",
                     notif_date=timezone.now()
                 )
-            return JsonResponse({
-                'success': True, 
-                'comment': {
-                    'comment_id': comment.comment_id,
-                    'comment_content': comment.comment_content,
-                    'date_created': comment.date_created.isoformat(),
-                    'user': {
-                        'user_id': comment.user.user_id,
-                        'f_name': comment.user.f_name,
-                        'm_name': comment.user.m_name,
-                        'l_name': comment.user.l_name,
-                        'profile_pic': build_profile_pic_url(comment.user),
-                    }
-                }
-            })
+            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
@@ -3158,7 +3176,9 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        # Allow multiple reposts by the same user (no restriction)
+        exists = Repost.objects.filter(forum=forum, user=request.user).first()
+        if exists:
+            return JsonResponse({'error': 'You have already reposted this'}, status=400)
         r = Repost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
         if request.method == "POST" and request.user.user_id != forum.user.user_id:
             Notification.objects.create(
@@ -3262,7 +3282,7 @@ def follow_user_view(request, user_id):
                     pass
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
+                    'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
                 })
             else:
                 return JsonResponse({
@@ -3279,7 +3299,7 @@ def follow_user_view(request, user_id):
                 follow_obj.delete()
                 return JsonResponse({
                     'success': True,
-                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ''} {user_to_follow.l_name}'.strip()
+                    'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
                 })
             except Follow.DoesNotExist:
                 return JsonResponse({
@@ -3454,7 +3474,7 @@ def posts_view(request):
                         'image_url': img.image.url,
                         'order': img.order
                     })
-
+            
             return JsonResponse({
                 'success': True,
                 'post': {
@@ -3537,7 +3557,7 @@ def posts_view(request):
                             'image_id': img.image_id,
                             'image_url': img.image.url,
                             'order': img.order
-                    })
+                        })
 
                 # Add the original post as a feed item
                 feed_items.append({
@@ -3566,63 +3586,16 @@ def posts_view(request):
                 })
                 
                 # Add each repost as a separate feed item
-                # Only show reposts from visible users (followed, admin, peso, or current user)
-                if user.account_type.admin or user.account_type.peso:
-                    # Admin/PESO can see all reposts
-                    reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
-                elif user.account_type.user or user.account_type.ojt:
-                    followed_users = Follow.objects.filter(follower=user).values_list('following', flat=True)
-                    admin_users = SharedUser.objects.filter(account_type__admin=True).values_list('user_id', flat=True)
-                    peso_users = SharedUser.objects.filter(account_type__peso=True).values_list('user_id', flat=True)
-                    # Only show reposts from followed users, admin users, peso users, or current user
-                    reposts = Repost.objects.filter(
-                        post=post,
-                        user__in=list(followed_users) + list(admin_users) + list(peso_users) + [user.user_id]
-                    ).select_related('user', 'post', 'post__user')
-                else:
-                    reposts = Repost.objects.none()
-                
+                reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
-                    # Get repost likes count and data using unified Like model
-                    repost_likes_count = Like.objects.filter(repost=repost).count()
-                    repost_likes = Like.objects.filter(repost=repost).select_related('user')
+                    # Get repost likes count and data (RepostLike model doesn't exist)
+                    repost_likes_count = 0
                     repost_likes_data = []
-                    for like in repost_likes:
-                        pic = build_profile_pic_url(like.user)
-                        initials = None
-                        if not pic:
-                            try:
-                                f = (like.user.f_name or '').strip()[:1].upper()
-                                l = (like.user.l_name or '').strip()[:1].upper()
-                                initials = f + l if (f or l) else None
-                            except Exception:
-                                initials = None
-                        repost_likes_data.append({
-                            'user_id': like.user.user_id,
-                            'f_name': like.user.f_name,
-                            'm_name': like.user.m_name,
-                            'l_name': like.user.l_name,
-                            'profile_pic': pic,
-                            'initials': initials,
-                        })
 
-                    # Get repost comments count and data using unified Comment model
-                    repost_comments_count = Comment.objects.filter(repost=repost).count()
-                    repost_comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+                    # Get repost comments count and data (RepostComment model doesn't exist)
+                    repost_comments_count = 0
                     repost_comments_data = []
-                    for comment in repost_comments:
-                        repost_comments_data.append({
-                            'comment_id': comment.comment_id,
-                            'comment_content': comment.comment_content,
-                            'date_created': comment.date_created.isoformat(),
-                            'user': {
-                                'user_id': comment.user.user_id,
-                                'f_name': comment.user.f_name,
-                                'm_name': comment.user.m_name,
-                                'l_name': comment.user.l_name,
-                                'profile_pic': build_profile_pic_url(comment.user),
-                            }
-                        })
+                    # RepostComment model doesn't exist, so no comments to process
 
                     feed_items.append({
                         'repost_id': repost.repost_id,
@@ -3983,447 +3956,4 @@ def forgot_password_view(request):
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
-
-
-# Donation API Views
-@api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_requests_view(request):
-    """Handle donation request listing and creation"""
-    if request.method == 'GET':
-        try:
-            # Get all donation requests with user info and images
-            donations = DonationRequest.objects.select_related('user').prefetch_related('images').all()
-            logger.info(f"Found {donations.count()} donation requests in database")
-            
-            donation_data = []
-            for donation in donations:
-                # Get likes and comments for this donation
-                likes = Like.objects.filter(donation_request=donation)
-                comments = Comment.objects.filter(donation_request=donation).select_related('user')
-                # Get reposts for this donation
-                reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
-                
-                donation_info = {
-                    'donation_id': donation.donation_id,
-                    'user': {
-                        'user_id': donation.user.user_id,
-                        'f_name': donation.user.f_name,
-                        'm_name': donation.user.m_name,
-                        'l_name': donation.user.l_name,
-                        'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
-                        'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                        'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                        'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
-                    },
-                    'description': donation.description,
-                    'status': donation.status,
-                    'created_at': donation.created_at.isoformat(),
-                    'updated_at': donation.updated_at.isoformat(),
-                    'images': [
-                        {
-                            'image_id': img.image_id,
-                            'image_url': img.image.url,
-                            'order': img.order
-                        } for img in donation.images.all()
-                    ],
-                    'likes_count': likes.count(),
-                    'comments_count': comments.count(),
-                    'reposts_count': reposts.count(),
-                    'likes': [
-                        {
-                            'like_id': like.like_id,
-                            'user': {
-                                'user_id': like.user.user_id,
-                                'f_name': like.user.f_name,
-                                'm_name': like.user.m_name,
-                                'l_name': like.user.l_name,
-                                'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
-                            }
-                        } for like in likes
-                    ],
-                    'comments': [
-                        {
-                            'comment_id': comment.comment_id,
-                            'comment_content': comment.comment_content,
-                            'date_created': comment.date_created.isoformat(),
-                            'user': {
-                                'user_id': comment.user.user_id,
-                                'f_name': comment.user.f_name,
-                                'm_name': comment.user.m_name,
-                                'l_name': comment.user.l_name,
-                                'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                            }
-                        } for comment in comments
-                    ],
-                    'reposts': [
-                        {
-                            'repost_id': repost.repost_id,
-                            'repost_date': repost.repost_date.isoformat(),
-                            'repost_caption': repost.caption,
-                            'user': {
-                                'user_id': repost.user.user_id,
-                                'f_name': repost.user.f_name,
-                                'm_name': repost.user.m_name,
-                                'l_name': repost.user.l_name,
-                                'profile_pic': repost.user.profile.profile_pic.url if hasattr(repost.user, 'profile') and repost.user.profile.profile_pic else None,
-                            },
-                            'likes_count': Like.objects.filter(repost=repost).count(),
-                            'comments_count': Comment.objects.filter(repost=repost).count(),
-                            'likes': [
-                                {
-                                    'like_id': like.like_id,
-                                    'user': {
-                                        'user_id': like.user.user_id,
-                                        'f_name': like.user.f_name,
-                                        'm_name': like.user.m_name,
-                                        'l_name': like.user.l_name,
-                                        'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
-                                    }
-                                } for like in Like.objects.filter(repost=repost)
-                            ],
-                            'comments': [
-                                {
-                                    'comment_id': comment.comment_id,
-                                    'comment_content': comment.comment_content,
-                                    'date_created': comment.date_created.isoformat(),
-                                    'user': {
-                                        'user_id': comment.user.user_id,
-                                        'f_name': comment.user.f_name,
-                                        'm_name': comment.user.m_name,
-                                        'l_name': comment.user.l_name,
-                                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                                    }
-                                } for comment in Comment.objects.filter(repost=repost).select_related('user')
-                            ]
-                        } for repost in reposts
-                    ]
-                }
-                donation_data.append(donation_info)
-            
-            response_data = {
-                'success': True,
-                'donations': donation_data
-            }
-            
-            logger.info(f"Returning {len(donation_data)} donations to frontend")
-            return JsonResponse(response_data)
-            
-        except Exception as e:
-            logger.error(f"Error fetching donation requests: {e}")
-            return JsonResponse({'success': False, 'message': 'Failed to fetch donation requests'}, status=500)
-    
-    elif request.method == 'POST':
-        try:
-            data = request.data
-            description = data.get('description')
-            images = data.get('images', [])
-            
-            logger.info(f"Creating donation request for user {request.user.user_id}: {description[:50]}...")
-            
-            if not description or not description.strip():
-                logger.warning("Donation request failed: Description is required")
-                return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
-            
-            # Create donation request
-            donation = DonationRequest.objects.create(
-                user=request.user,
-                description=description.strip()
-            )
-            
-            # Handle image uploads if any
-            if images:
-                for index, image_data in enumerate(images):
-                    if image_data and image_data.startswith('data:image'):
-                        # Handle base64 image data
-                        try:
-                            format, imgstr = image_data.split(';base64,')
-                            ext = format.split('/')[-1]
-                            imgdata = base64.b64decode(imgstr)
-                            
-                            # Create a unique filename
-                            filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
-                            
-                            # Save the image
-                            donation_image = DonationImage.objects.create(
-                                donation_request=donation,
-                                order=index
-                            )
-                            donation_image.image.save(filename, ContentFile(imgdata), save=True)
-                            
-                        except Exception as e:
-                            logger.error(f"Error saving donation image {index}: {e}")
-                            # Continue with other images even if one fails
-                            continue
-            
-            # Return the created donation with full details
-            likes = Like.objects.filter(donation_request=donation)
-            comments = Comment.objects.filter(donation_request=donation).select_related('user')
-            reposts = Repost.objects.filter(donation_request=donation)
-            
-            donation_info = {
-                'donation_id': donation.donation_id,
-                'user': {
-                    'user_id': donation.user.user_id,
-                    'f_name': donation.user.f_name,
-                    'm_name': donation.user.m_name,
-                    'l_name': donation.user.l_name,
-                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
-                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
-                },
-                'description': donation.description,
-                'status': donation.status,
-                'created_at': donation.created_at.isoformat(),
-                'updated_at': donation.updated_at.isoformat(),
-                'images': [
-                    {
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    } for img in donation.images.all()
-                ],
-                'likes_count': likes.count(),
-                'comments_count': comments.count(),
-                'reposts_count': reposts.count(),
-                'likes': [],
-                'comments': [],
-                'reposts': []
-            }
-            
-            response_data = {
-                'success': True,
-                'message': 'Donation request created successfully',
-                'donation': donation_info
-            }
-            
-            logger.info(f"Successfully created donation request {donation.donation_id} for user {request.user.user_id}")
-            return JsonResponse(response_data)
-            
-        except Exception as e:
-            logger.error(f"Error creating donation request: {e}")
-            return JsonResponse({'success': False, 'message': 'Failed to create donation request'}, status=500)
-
-
-@api_view(['POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_like_view(request, donation_id):
-    """Handle donation like/unlike"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        if request.method == 'POST':
-            # Like the donation
-            like, created = Like.objects.get_or_create(
-                donation_request=donation,
-                user=request.user
-            )
-            
-            if created:
-                return JsonResponse({'success': True, 'message': 'Donation liked'})
-            else:
-                return JsonResponse({'success': False, 'message': 'Already liked'})
-        
-        elif request.method == 'DELETE':
-            # Unlike the donation
-            try:
-                like = Like.objects.get(donation_request=donation, user=request.user)
-                like.delete()
-                return JsonResponse({'success': True, 'message': 'Donation unliked'})
-            except Like.DoesNotExist:
-                return JsonResponse({'success': False, 'message': 'Not liked'})
-                
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error handling donation like: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
-
-
-@api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_comments_view(request, donation_id):
-    """Handle donation comments"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        if request.method == 'GET':
-            # Get all comments for this donation
-            comments = Comment.objects.filter(donation_request=donation).select_related('user')
-            
-            comments_data = [
-                {
-                    'comment_id': comment.comment_id,
-                    'comment_content': comment.comment_content,
-                    'date_created': comment.date_created.isoformat(),
-                    'user': {
-                        'user_id': comment.user.user_id,
-                        'f_name': comment.user.f_name,
-                        'm_name': comment.user.m_name,
-                        'l_name': comment.user.l_name,
-                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                    }
-                } for comment in comments
-            ]
-            
-            return JsonResponse({
-                'success': True,
-                'comments': comments_data
-            })
-        
-        elif request.method == 'POST':
-            # Create a new comment
-            data = request.data
-            comment_content = data.get('comment_content', '').strip()
-            
-            if not comment_content:
-                return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
-            
-            comment = Comment.objects.create(
-                donation_request=donation,
-                user=request.user,
-                comment_content=comment_content,
-                date_created=timezone.now()
-            )
-            
-            # Return the full comment data
-            comment_data = {
-                'comment_id': comment.comment_id,
-                'comment_content': comment.comment_content,
-                'date_created': comment.date_created.isoformat(),
-                'user': {
-                    'user_id': comment.user.user_id,
-                    'f_name': comment.user.f_name,
-                    'm_name': comment.user.m_name,
-                    'l_name': comment.user.l_name,
-                    'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                }
-            }
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Comment added successfully',
-                'comment': comment_data
-            })
-            
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error handling donation comments: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
-
-
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_repost_view(request, donation_id):
-    """Handle donation reposting"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        # Get caption from request data
-        caption = request.data.get('caption', '')
-        
-        # Create a repost of the donation
-        repost = Repost.objects.create(
-            donation_request=donation,
-            user=request.user,
-            caption=caption,
-            repost_date=timezone.now()
-        )
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'Donation reposted successfully',
-            'repost_id': repost.repost_id
-        })
-        
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error reposting donation: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
-
-
-@api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_detail_edit_view(request, donation_id):
-    """Handle donation detail view, edit, and delete"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        # Check if user owns the donation or is admin
-        if donation.user != request.user and not request.user.account_type == 'admin':
-            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
-        
-        if request.method == 'GET':
-            # Return donation details
-            donation_info = {
-                'donation_id': donation.donation_id,
-                'user': {
-                    'user_id': donation.user.user_id,
-                    'f_name': donation.user.f_name,
-                    'm_name': donation.user.m_name,
-                    'l_name': donation.user.l_name,
-                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
-                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
-                },
-                'description': donation.description,
-                'status': donation.status,
-                'created_at': donation.created_at.isoformat(),
-                'updated_at': donation.updated_at.isoformat(),
-                'images': [
-                    {
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    } for img in donation.images.all()
-                ]
-            }
-            
-            return JsonResponse({
-                'success': True,
-                'donation': donation_info
-            })
-            
-        elif request.method == 'PUT':
-            # Update donation
-            data = request.data
-            
-            if 'description' in data:
-                donation.description = data['description']
-            
-            if 'status' in data:
-                donation.status = data['status']
-            
-            donation.updated_at = timezone.now()
-            donation.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Donation updated successfully',
-                'donation_id': donation.donation_id
-            })
-            
-        elif request.method == 'DELETE':
-            # Delete donation
-            donation.delete()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Donation deleted successfully'
-            })
-            
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error in donation detail/edit/delete: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
 

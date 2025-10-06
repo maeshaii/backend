@@ -59,6 +59,7 @@ urlpatterns = [
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
+    path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
@@ -133,12 +134,12 @@ urlpatterns = [
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
     path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
     
-    # Donation API endpoints
-    path('donations/', views.donation_requests_view, name='donation_requests'),
-    path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
-    path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
-    path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
-    path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
+    # Donation API endpoints - commented out as views don't exist
+    # path('donations/', views.donation_requests_view, name='donation_requests'),
+    # path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
+    # path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
+    # path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
+    # path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
     # # User Managem    ent API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
