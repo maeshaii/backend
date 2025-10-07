@@ -524,6 +524,8 @@ class UserProfile(models.Model):
     profile_pic = models.ImageField(upload_to='profile_pics/', null=True, blank=True)
     profile_bio = models.TextField(null=True, blank=True)
     profile_resume = models.FileField(upload_to='resumes/', null=True, blank=True)
+    # PESO: list of partnered companies [{"name": str, "url": str}]
+    partnered_companies = models.JSONField(null=True, blank=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -799,6 +801,7 @@ class Question(models.Model):
     text = models.CharField(max_length=255)
     type = models.CharField(max_length=50)
     options = models.JSONField(blank=True, null=True)  # For radio/multiple/checkbox
+    required = models.BooleanField(default=False)  # Added required field
 
 class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)

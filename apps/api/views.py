@@ -589,13 +589,14 @@ def notifications_view(request):
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     # Role-based filtering:
-    # - Admin: receive like/comment/repost + tracker submission notifications (hide tracker reminders to admin)
+    # - Admin: receive SAME notifications as alumni (reminders/thank-you/engagement)
+    #          PLUS tracker submission notifications from users who answered the tracker.
+    #          Therefore, do not exclude 'CCICT' (reminders/thank-you) for admins.
     # - Alumni/OJT/PESO: receive tracker reminders + thank you + like/comment/repost (hide admin-only tracker submissions)
     if getattr(user.account_type, 'admin', False):
         notifications = (
             Notification.objects
             .filter(user_id=user_id)
-            .exclude(notif_type__iexact='CCICT')  # exclude tracker reminder/thank-you format if not needed
             .order_by('-notif_date')
         )
     else:
@@ -1849,7 +1850,14 @@ def alumni_profile_view(request, user_id):
                 'home_address': user.profile.home_address if hasattr(user, 'profile') and user.profile else '',
                 'social_media': user.profile.social_media if hasattr(user, 'profile') and user.profile else '',
                 'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else '',
-                'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None
+                'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None,
+                'partnered_companies': getattr(user.profile, 'partnered_companies', None) if hasattr(user, 'profile') and user.profile else None,
+                'account_type': {
+                    'admin': getattr(user.account_type, 'admin', False),
+                    'peso': getattr(user.account_type, 'peso', False),
+                    'ccict': getattr(user.account_type, 'ccict', False),
+                    'user': getattr(user.account_type, 'user', False),
+                }
             }
             return JsonResponse(profile_data)
             
@@ -1881,6 +1889,23 @@ def alumni_profile_view(request, user_id):
                 profile.civil_status = data['civil_status']
             if 'social_media' in data:
                 profile.social_media = data['social_media']
+            # PESO: update partnered companies list
+            if 'partnered_companies' in data:
+                companies = data.get('partnered_companies')
+                # normalize value: expect list of {name, url}
+                if isinstance(companies, list):
+                    normalized = []
+                    for c in companies:
+                        if isinstance(c, dict):
+                            name = (c.get('name') or '').strip()
+                            url = (c.get('url') or '').strip()
+                            if name:
+                                normalized.append({'name': name, 'url': url})
+                        elif isinstance(c, str) and c.strip():
+                            normalized.append({'name': c.strip(), 'url': ''})
+                    profile.partnered_companies = normalized
+                else:
+                    profile.partnered_companies = None
             
             profile.save()
             
@@ -2892,6 +2917,7 @@ def forum_detail_edit_view(request, forum_id):
             likes = Like.objects.filter(forum=forum).select_related('user')
             comments = Comment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
             reposts = Repost.objects.filter(forum=forum).select_related('user')
+            is_liked = Like.objects.filter(forum=forum, user=request.user).exists()
 
             return JsonResponse({
                 'post_id': forum.forum_id,
@@ -2902,6 +2928,7 @@ def forum_detail_edit_view(request, forum_id):
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
                 'reposts_count': reposts.count(),
+                'liked_by_user': is_liked,
                 'likes': [{
                     'user_id': l.user.user_id,
                     'f_name': l.user.f_name,
@@ -4362,9 +4389,16 @@ def donation_detail_edit_view(request, donation_id):
             return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
         
         if request.method == 'GET':
-            # Return donation details
+            # Get likes, comments, and reposts for this donation
+            likes = Like.objects.filter(donation_request=donation).select_related('user')
+            comments = Comment.objects.filter(donation_request=donation).select_related('user').order_by('-date_created')
+            reposts = Repost.objects.filter(donation_request=donation).select_related('user')
+            is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
+            
+            # Return donation details with full interaction data
             donation_info = {
                 'donation_id': donation.donation_id,
+                'post_id': donation.donation_id,  # Add for compatibility with frontend
                 'user': {
                     'user_id': donation.user.user_id,
                     'f_name': donation.user.f_name,
@@ -4385,13 +4419,82 @@ def donation_detail_edit_view(request, donation_id):
                         'image_url': img.image.url,
                         'order': img.order
                     } for img in donation.images.all()
-                ]
+                ],
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'liked_by_user': is_liked,
+                'likes': [{
+                    'user_id': l.user.user_id,
+                    'f_name': l.user.f_name,
+                    'l_name': l.user.l_name,
+                    'profile_pic': build_profile_pic_url(l.user),
+                    'initials': None if build_profile_pic_url(l.user) else (
+                        ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                        if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                    ),
+                } for l in likes],
+                'comments': [{
+                    'comment_id': c.comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat() if c.date_created else None,
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                } for c in comments],
+                'reposts': [{
+                    'repost_id': r.repost_id,
+                    'repost_date': r.repost_date.isoformat() if r.repost_date else None,
+                    'repost_caption': r.caption,
+                    'likes_count': Like.objects.filter(repost=r).count(),
+                    'comments_count': Comment.objects.filter(repost=r).count(),
+                    'likes': [{
+                        'user_id': l.user.user_id,
+                        'f_name': l.user.f_name,
+                        'm_name': l.user.m_name,
+                        'l_name': l.user.l_name,
+                        'profile_pic': build_profile_pic_url(l.user),
+                        'initials': None if build_profile_pic_url(l.user) else (
+                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                        ),
+                    } for l in Like.objects.filter(repost=r).select_related('user')],
+                    'comments': [{
+                        'comment_id': c.comment_id,
+                        'comment_content': c.comment_content,
+                        'date_created': c.date_created.isoformat() if c.date_created else None,
+                        'user': {
+                            'user_id': c.user.user_id,
+                            'f_name': c.user.f_name,
+                            'm_name': c.user.m_name,
+                            'l_name': c.user.l_name,
+                            'profile_pic': build_profile_pic_url(c.user),
+                        }
+                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
+                    'user': {
+                        'user_id': r.user.user_id,
+                        'f_name': r.user.f_name,
+                        'l_name': r.user.l_name,
+                        'profile_pic': build_profile_pic_url(r.user),
+                    },
+                    'original_donation': {
+                        'donation_id': donation.donation_id,
+                        'description': donation.description,
+                        'created_at': donation.created_at.isoformat(),
+                        'user': {
+                            'user_id': donation.user.user_id,
+                            'f_name': donation.user.f_name,
+                            'l_name': donation.user.l_name,
+                            'profile_pic': build_profile_pic_url(donation.user),
+                        }
+                    }
+                } for r in reposts]
             }
             
-            return JsonResponse({
-                'success': True,
-                'donation': donation_info
-            })
+            return JsonResponse(donation_info)
             
         elif request.method == 'PUT':
             # Update donation
