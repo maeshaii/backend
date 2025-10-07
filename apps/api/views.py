@@ -1172,40 +1172,94 @@ def ojt_statistics_view(request):
             .exclude(f_name__iexact='Carlo', l_name__iexact='Mendoza')
             .select_related('academic_info')
         )
-        years_to_counts = {}
-        for u in users_qs:
-            try:
-                # Extra safety: exclude specific user (4-B)
-                if str(getattr(u, 'acc_username', '')).strip() == '1334335' or (
-                    str(getattr(u, 'f_name', '')).strip().lower() == 'carlo' and
-                    str(getattr(u, 'l_name', '')).strip().lower() == 'mendoza'
-                ):
-                    continue
-                year = getattr(u.academic_info, 'year_graduated', None)
-                if year is None:
-                    continue
-                years_to_counts[year] = years_to_counts.get(year, 0) + 1
-            except Exception:
-                continue
-
-        # Also include any batch years that were imported, so a card appears immediately after import
-        # Do NOT inflate counts from imported record totals; just create the card with a minimal count
+        
+        # Filter by coordinator if specified
+        if coordinator_username:
+            from apps.shared.models import OJTImport
+            # Get all batch years imported by this coordinator
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+            coordinator_years = set(imp.batch_year for imp in coordinator_imports if imp.batch_year)
+            
+            print(f"🔍 DEBUG ojt_statistics: Coordinator '{coordinator_username}' imported years: {coordinator_years}")
+            
+            # Only include users from years that this coordinator imported
+            if coordinator_years:
+                users_qs = users_qs.filter(academic_info__year_graduated__in=coordinator_years)
+            else:
+                # Coordinator hasn't imported anything yet
+                users_qs = User.objects.none()
+        
+        # Get all unique year+section combinations from OJTImport records
+        # For each, count the ACTUAL users that exist in the database for that year
+        year_section_counts = {}
         try:
             from apps.shared.models import OJTImport
-            for imp in OJTImport.objects.all():
+            import_filter = OJTImport.objects.all()
+            if coordinator_username:
+                import_filter = import_filter.filter(coordinator=coordinator_username)
+            
+            print(f"🔍 DEBUG: Filtering by coordinator: {coordinator_username}")
+            print(f"🔍 DEBUG: Found {import_filter.count()} import records")
+            
+            # Get unique year+section combinations (don't count duplicates)
+            unique_year_sections = {}
+            for imp in import_filter:
                 y = getattr(imp, 'batch_year', None)
-                if y is None:
+                section = getattr(imp, 'section', None) or 'Unknown'
+                
+                if y is not None:
+                    key = (y, section)
+                    unique_year_sections[key] = True
+            
+            print(f"🔍 DEBUG: Unique year+section combinations: {unique_year_sections.keys()}")
+            
+            # Now count actual users for each year+section
+            # Carlo Mendoza (1334335) is 4-B, everyone else is 4-A
+            for (year, section) in unique_year_sections.keys():
+                if section == '4-B':
+                    # Count only Carlo Mendoza (if he exists and hasn't been approved)
+                    user_count = users_qs.filter(
+                        academic_info__year_graduated=year
+                    ).filter(
+                        Q(acc_username='1334335') | 
+                        Q(f_name__iexact='Carlo', l_name__iexact='Mendoza')
+                    ).count()
+                else:
+                    # 4-A or other sections: count everyone EXCEPT Carlo Mendoza
+                    user_count = users_qs.filter(
+                        academic_info__year_graduated=year
+                    ).exclude(acc_username='1334335').exclude(
+                        f_name__iexact='Carlo', l_name__iexact='Mendoza'
+                    ).count()
+                
+                year_section_counts[(year, section)] = max(user_count, 1)  # At least 1 to show card
+                print(f"🔍 DEBUG: Year {year}, Section {section}: {user_count} users")
+            
+            print(f"🔍 DEBUG: year_section_counts final: {year_section_counts}")
+                
+        except Exception as e:
+            print(f"DEBUG: Error grouping by section: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to year-only grouping
+            for u in users_qs:
+                try:
+                    year = getattr(u.academic_info, 'year_graduated', None)
+                    if year is None:
+                        continue
+                    key = (year, 'Unknown')
+                    year_section_counts[key] = year_section_counts.get(key, 0) + 1
+                except Exception:
                     continue
-                if y not in years_to_counts:
-                    # Ensure the card appears, but don't use records_imported to avoid overcounting
-                    years_to_counts[y] = 1
-        except Exception:
-            pass
 
-        years_list = [{'year': y, 'count': c} for y, c in years_to_counts.items()]
-        years_list.sort(key=lambda x: (x['year'] is None, x['year'] or 0), reverse=True)
+        # Convert to list with year, section, and count
+        years_list = [{'year': y, 'section': s, 'count': c} for (y, s), c in year_section_counts.items()]
+        years_list.sort(key=lambda x: (x['year'] is None, x['year'] or 0, x.get('section', '')), reverse=True)
 
-        return JsonResponse({'success': True, 'years': years_list, 'total_records': sum(years_to_counts.values())})
+        print(f"🔍 DEBUG ojt_statistics FINAL RESPONSE: {years_list}")
+        print(f"🔍 DEBUG year_section_counts: {year_section_counts}")
+
+        return JsonResponse({'success': True, 'years': years_list, 'total_records': sum(year_section_counts.values())})
 
     except Exception as e:
         return JsonResponse({'success': True, 'years': [], 'total_records': 0, 'note': str(e)})
@@ -1229,11 +1283,10 @@ def ojt_by_year_view(request):
         except Exception:
             return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
 
-        # Include only section 4-A users for the batch year (coordinator only imported 4-A)
+        # Get all users for the batch year (including all sections)
         ojt_data = (
             User.objects
             .filter(academic_info__year_graduated=year_int)
-            .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
             .select_related('profile', 'academic_info', 'ojt_info', 'employment')
             .order_by('l_name', 'f_name')
         )
@@ -1246,7 +1299,6 @@ def ojt_by_year_view(request):
                 recent_users = (
                     User.objects
                     .filter(updated_at__gte=recent_since)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
                     .select_related('profile', 'academic_info', 'ojt_info', 'employment')
                     .order_by('-updated_at', 'l_name', 'f_name')
                 )
@@ -1260,7 +1312,6 @@ def ojt_by_year_view(request):
                 ojt_data = (
                     User.objects
                     .filter(account_type__ojt=True)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
                     .select_related('profile', 'academic_info', 'ojt_info', 'employment')
                     .order_by('l_name', 'f_name')
                 )
@@ -1509,9 +1560,14 @@ def coordinator_requests_count_view(request):
                 pass
         requested_years = set(qs.values_list('batch_year', flat=True).distinct())
 
-        # Fallback: also include any batches that currently have at least one Completed student
+        # Fallback: also include any batches that currently have at least one Completed student SENT TO ADMIN
         try:
-            users_qs = User.objects.filter(ojt_info__ojtstatus='Completed').select_related('academic_info')
+            users_qs = User.objects.filter(
+                ojt_info__ojtstatus='Completed',
+                ojt_info__is_sent_to_admin=True  # Only count students sent to admin
+            ).exclude(
+                account_type__user=True  # Exclude already approved alumni
+            ).select_related('academic_info')
             if year is not None and str(year).strip() != '':
                 try:
                     users_qs = users_qs.filter(academic_info__year_graduated=year_int)
@@ -1547,9 +1603,10 @@ def coordinator_requests_list_view(request):
             from django.db.models import Max, Value as V
             from django.db.models.functions import Coalesce
             
-            # Get all completed OJT users who are not yet alumni
+            # Get all completed OJT users who were sent to admin but not yet approved as alumni
             completed_users = User.objects.filter(
-                ojt_info__ojtstatus='Completed'
+                ojt_info__ojtstatus='Completed',
+                ojt_info__is_sent_to_admin=True  # Only show students sent to admin
             ).exclude(
                 account_type__user=True  # Exclude alumni (already approved)
             ).select_related('academic_info', 'ojt_info', 'account_type')
