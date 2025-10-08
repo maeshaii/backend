@@ -2,27 +2,10 @@ from django.urls import path, include
 from . import views
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view, approve_ojt_to_alumni_view, approve_individual_ojt_to_alumni_view
-from apps.tracker.views import (
-    tracker_questions_view,
-    tracker_responses_view,
-    add_category_view,
-    delete_category_view,
-    delete_question_view,
-    add_question_view,
-    update_category_view,
-    update_question_view,
-    update_tracker_form_title_view,
-    submit_tracker_response_view,
-    tracker_responses_by_user_view,
-    tracker_form_view,
-    check_user_tracker_status_view,
-    tracker_accepting_responses_view,
-    update_tracker_accepting_responses_view,
-    get_active_tracker_form,
-    file_upload_stats_view,
-)
+from apps.tracker.views import *
 from apps.alumni_users.views import alumni_list_view, alumni_detail_view
-from apps.shared.views import export_alumni_excel, import_alumni_excel, import_exported_alumni_excel, export_initial_passwords
+from apps.shared.views import import_exported_alumni_excel, export_initial_passwords
+from apps.alumni_stats.views import export_detailed_alumni_data
 from .views import *
 
 urlpatterns = [
@@ -41,9 +24,9 @@ urlpatterns = [
     path('alumni/statistics/', views.alumni_statistics_view, name='alumni_statistics'),
     path('alumni/list/', views.alumni_list_view, name='alumni_list'),
     path('alumni-list/', alumni_list_view, name='alumni_list_alias'),
-    path('export-alumni/', export_alumni_excel, name='export_alumni_excel'),
+    path('export-alumni/', export_detailed_alumni_data, name='export_alumni_excel'),
     path('export-initial-passwords/', export_initial_passwords, name='export_initial_passwords'),
-    path('import-alumni/', import_alumni_excel, name='import_alumni_excel'),
+    path('import-alumni/', views.import_alumni_view, name='import_alumni_excel'),
     path('import-exported-alumni/', import_exported_alumni_excel, name='import_exported_alumni_excel'),
      
     # OJT-specific routes for coordinators
@@ -139,6 +122,7 @@ urlpatterns = [
     path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
     path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
     path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
+    path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
     # # User Managem    ent API endpoints (Admin only)

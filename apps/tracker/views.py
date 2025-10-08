@@ -31,7 +31,8 @@ def tracker_questions_view(request):
                         "id": q.id,
                         "text": q.text,
                         "type": q.type,
-                        "options": q.options or []
+                        "options": q.options or [],
+                        "required": q.required
                     }
                     for q in cat.questions.all()
                 ]
@@ -171,15 +172,16 @@ def add_question_view(request):
     text = data.get('text')
     qtype = data.get('type')
     options = data.get('options', [])
+    required = data.get('required', False)
     if not (category_id and text and qtype):
         return JsonResponse({'success': False, 'message': 'Missing required fields'}, status=400)
     try:
         category = QuestionCategory.objects.get(id=category_id)
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
-    q = Question.objects.create(category=category, text=text, type=qtype, options=options)
+    q = Question.objects.create(category=category, text=text, type=qtype, options=options, required=required)
     return JsonResponse({'success': True, 'question': {
-        'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or []
+        'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required
     }})
 
 @api_view(["PUT"]) 
@@ -204,16 +206,23 @@ def update_question_view(request, question_id):
     data = json.loads(request.body)
     text = data.get('text')
     qtype = data.get('type')
-    options = data.get('options', [])
+    # Only update fields that are explicitly provided to avoid unintended resets
+    options_provided = 'options' in data
+    required_provided = 'required' in data
+    options = data.get('options')
+    required = data.get('required')
     try:
         q = Question.objects.get(id=question_id)
         if text:
             q.text = text
         if qtype:
             q.type = qtype
-        q.options = options
+        if options_provided:
+            q.options = options or []
+        if required_provided:
+            q.required = bool(required)
         q.save()
-        return JsonResponse({'success': True, 'question': {'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or []}})
+        return JsonResponse({'success': True, 'question': {'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required}})
     except Question.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Question not found'}, status=404)
 
