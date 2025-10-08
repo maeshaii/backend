@@ -54,14 +54,48 @@ def safe_mode_related(qs, field_path):
                 obj = getattr(obj, part, None)
                 if obj is None:
                     break
-            if obj:
-                vals.append(obj)
+            
+            # Only add non-empty, non-null values
+            if obj and str(obj).strip() and str(obj).strip().lower() not in ['nan', 'none', 'null', 'n/a', '']:
+                vals.append(str(obj).strip())
         except:
             continue
-    return Counter(vals).most_common(1)[0][0] if vals else None
+    
+    if vals:
+        result = Counter(vals).most_common(1)[0][0]
+        # Ensure we never return "nan" - return "Not Available" instead
+        return result if result.lower() != 'nan' else "Not Available"
+    return "Not Available"
+
+def convert_salary_range_to_number(salary_str):
+    """Convert salary range strings to numerical values for averaging."""
+    if not salary_str or not isinstance(salary_str, str):
+        return None
+    
+    salary_str = salary_str.strip().lower()
+    
+    # Handle the new categorical salary ranges
+    if 'below' in salary_str and '5000' in salary_str:
+        return 2500  # Midpoint of 0-5000
+    elif '5001' in salary_str and '10000' in salary_str:
+        return 7500  # Midpoint of 5001-10000
+    elif '10001' in salary_str and '20000' in salary_str:
+        return 15000  # Midpoint of 10001-20000
+    elif '20001' in salary_str and '30000' in salary_str:
+        return 25000  # Midpoint of 20001-30000
+    elif 'above' in salary_str and '30000' in salary_str:
+        return 35000  # Conservative estimate for 30000+
+    
+    # Handle old numerical formats
+    try:
+        # Remove commas and spaces, try to convert to float
+        cleaned = salary_str.replace(',', '').replace(' ', '')
+        return float(cleaned)
+    except:
+        return None
 
 def safe_mean_related(qs, field_path):
-    """Return the mean of values resolved via `field_path`, coercing strings when possible."""
+    """Return the mean of values resolved via `field_path`, handling salary ranges properly."""
     vals = []
     for user in qs:
         try:
@@ -71,16 +105,29 @@ def safe_mean_related(qs, field_path):
                 obj = getattr(obj, part, None)
                 if obj is None:
                     break
+            
             if obj and isinstance(obj, (int, float)):
                 vals.append(float(obj))
             elif obj and isinstance(obj, str):
-                try:
-                    vals.append(float(obj.replace(',', '').replace(' ', '')))
-                except:
-                    continue
+                # Special handling for salary fields
+                if 'salary' in field_path.lower():
+                    converted = convert_salary_range_to_number(obj)
+                    if converted is not None:
+                        vals.append(converted)
+                else:
+                    # For non-salary fields, try direct conversion
+                    try:
+                        vals.append(float(obj.replace(',', '').replace(' ', '')))
+                    except:
+                        continue
         except:
             continue
-    return round(mean(vals), 2) if vals else None
+    
+    if vals:
+        result = round(mean(vals), 2)
+        # Ensure we never return NaN - return 0 instead
+        return result if not (result != result) else 0  # NaN check: NaN != NaN is True
+    return 0
 
 def safe_sample_related(qs, field_path):
     """Return the first non-empty value resolved via `field_path`, else None."""
@@ -92,11 +139,13 @@ def safe_sample_related(qs, field_path):
                 obj = getattr(obj, part, None)
                 if obj is None:
                     break
-            if obj:
-                return obj
+            
+            # Only return non-empty, non-null values
+            if obj and str(obj).strip() and str(obj).strip().lower() not in ['nan', 'none', 'null', 'n/a', '']:
+                return str(obj).strip()
         except:
             continue
-    return None
+    return "Not Available"
 
 # Create your views here.
 
@@ -106,12 +155,12 @@ def alumni_statistics_view(request):
     """Simple overview of alumni employment status counts and available years."""
     try:
         year = request.GET.get('year')
-        course = request.GET.get('course')
+        course = request.GET.get('program')
         alumni_qs = User.objects.filter(account_type__user=True)
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__course=course)
+            alumni_qs = alumni_qs.filter(academic_info__program=course)
 
         total_alumni = alumni_qs.count()
 
@@ -160,7 +209,7 @@ def alumni_statistics_view(request):
 def generate_statistics_view(request):
     try:
         year = request.GET.get('year', 'ALL')
-        course = request.GET.get('course', 'ALL')
+        course = request.GET.get('program', 'ALL')
         stats_type = request.GET.get('type', 'ALL')
         
         alumni_qs = User.objects.filter(account_type__user=True)
@@ -168,7 +217,7 @@ def generate_statistics_view(request):
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__course=course)
+            alumni_qs = alumni_qs.filter(academic_info__program=course)
         
         total_alumni = alumni_qs.count()
         
@@ -196,47 +245,71 @@ def generate_statistics_view(request):
             })
         
         elif stats_type == 'QPRO':
-            # QPRO: Employment statistics based on tracker data
-            # Get employment status from tracker data instead of user_status
+            # QPRO: Employment statistics - prefer tracker data, fallback to employment records
             from apps.shared.models import TrackerData
             tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
-            
-            # Count employment statuses from tracker data
+            tracker_by_user = {td.user_id: td for td in tracker_data}
+
             employed = 0
             unemployed = 0
-            for tracker in tracker_data:
-                status = tracker.q_employment_status
-                if status and status.lower() == 'yes':
+            tracked_alumni = 0
+
+            for user in alumni_qs:
+                td = tracker_by_user.get(getattr(user, 'user_id', None))
+                if td and (td.q_employment_status is not None and td.q_employment_status != ''):
+                    tracked_alumni += 1
+                    status = (td.q_employment_status or '').strip().lower()
+                    if status in ('yes', 'y', 'true', '1'):
+                        employed += 1
+                    elif status in ('no', 'n', 'false', '0'):
+                        unemployed += 1
+                    continue
+
+                # Fallback when no tracker status: infer from EmploymentHistory
+                employment = getattr(user, 'employment', None)
+                if employment and (
+                    getattr(employment, 'company_name_current', None) or
+                    getattr(employment, 'position_current', None)
+                ):
                     employed += 1
-                elif status and status.lower() == 'no':
+                else:
                     unemployed += 1
-            
-            # Calculate untracked alumni (those who haven't answered the tracker)
-            tracked_alumni = tracker_data.count()
-            untracked = total_alumni - tracked_alumni
-            
-            employment_rate = (employed / total_alumni * 100) if total_alumni > 0 else 0
+
+            total_alumni_count = total_alumni  # preserve original count explicitly
+            untracked = max(total_alumni_count - tracked_alumni, 0)
+            employment_rate = (employed / total_alumni_count * 100) if total_alumni_count > 0 else 0
+
+            # Calculate statistics with proper null handling
+            most_common_company = safe_mode_related(alumni_qs, 'employment__company_name_current')
+            most_common_position = safe_mode_related(alumni_qs, 'employment__position_current')
+            most_common_sector = safe_mode_related(alumni_qs, 'employment__sector_current')
+            average_salary = safe_mean_related(alumni_qs, 'employment__salary_current')
+            most_common_awards = safe_mode_related(alumni_qs, 'employment__awards_recognition_current')
+            most_common_unemployment_reason = safe_mode_related(alumni_qs, 'employment__unemployment_reason')
+            most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
+            average_age = safe_mean_related(alumni_qs, 'profile__age')
+            sample_email = safe_sample_related(alumni_qs, 'profile__email')
             
             return JsonResponse({
                 'success': True,
                 'type': 'QPRO',
-                'total_alumni': total_alumni,
+                'total_alumni': total_alumni_count,
                 'employment_rate': round(employment_rate, 2),
                 'employed_count': employed,
                 'unemployed_count': unemployed,
                 'untracked_count': untracked,
                 'tracker_employed_count': employed,
                 'tracker_unemployed_count': unemployed,
-                # Real data fields using related models
-                'most_common_company': safe_mode_related(alumni_qs, 'employment__company_name_current'),
-                'most_common_position': safe_mode_related(alumni_qs, 'employment__position_current'),
-                'most_common_sector': safe_mode_related(alumni_qs, 'employment__sector_current'),
-                'average_salary': safe_mean_related(alumni_qs, 'employment__salary_current'),
-                'most_common_awards': safe_mode_related(alumni_qs, 'employment__awards_recognition_current'),
-                'most_common_unemployment_reason': safe_mode_related(alumni_qs, 'employment__unemployment_reason'),
-                'most_common_civil_status': safe_mode_related(alumni_qs, 'profile__civil_status'),
-                'average_age': safe_mean_related(alumni_qs, 'profile__age'),
-                'sample_email': safe_sample_related(alumni_qs, 'profile__email'),
+                # Real data fields using related models with null safety
+                'most_common_company': most_common_company,
+                'most_common_position': most_common_position,
+                'most_common_sector': most_common_sector,
+                'average_salary': average_salary,
+                'most_common_awards': most_common_awards,
+                'most_common_unemployment_reason': most_common_unemployment_reason,
+                'most_common_civil_status': most_common_civil_status,
+                'average_age': average_age,
+                'sample_email': sample_email,
                 'year': year,
                 'course': course
             })
@@ -258,6 +331,14 @@ def generate_statistics_view(request):
             for ched in ched_records:
                 ched_count += getattr(ched, 'job_alignment_count', 0)
             
+            # Calculate statistics with proper null handling
+            most_common_school = safe_mode_related(alumni_qs, 'academic_info__school_name')
+            most_common_program = safe_mode_related(alumni_qs, 'academic_info__program')
+            most_common_awards = safe_mode_related(alumni_qs, 'employment__awards_recognition_current')
+            most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
+            average_age = safe_mean_related(alumni_qs, 'profile__age')
+            sample_email = safe_sample_related(alumni_qs, 'profile__email')
+            
             return JsonResponse({
                 'success': True,
                 'type': 'CHED',
@@ -270,12 +351,13 @@ def generate_statistics_view(request):
                 'self_employed_count': self_employed,
                 'not_aligned_count': not_aligned,
                 'job_alignment_rate': round((job_aligned / total_alumni * 100), 2) if total_alumni > 0 else 0,
-                'most_common_school': safe_mode_related(alumni_qs, 'academic_info__school_name'),
-                'most_common_program': safe_mode_related(alumni_qs, 'academic_info__program'),
-                'most_common_awards': safe_mode_related(alumni_qs, 'employment__awards_recognition_current'),
-                'most_common_civil_status': safe_mode_related(alumni_qs, 'profile__civil_status'),
-                'average_age': safe_mean_related(alumni_qs, 'profile__age'),
-                'sample_email': safe_sample_related(alumni_qs, 'profile__email'),
+                # Real data fields using related models with null safety
+                'most_common_school': most_common_school,
+                'most_common_program': most_common_program,
+                'most_common_awards': most_common_awards,
+                'most_common_civil_status': most_common_civil_status,
+                'average_age': average_age,
+                'sample_email': sample_email,
                 'year': year,
                 'course': course
             })
@@ -289,16 +371,16 @@ def generate_statistics_view(request):
             from apps.shared.models import TrackerData
             tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
             
-            public_count = 0
+            government_count = 0
             private_count = 0
             local_count = 0
             international_count = 0
             
             for tracker in tracker_data:
-                # Check sector (Public/Private) - this would be question 27
+                # Check sector (Government/Private) - this would be question 27
                 sector = tracker.q_sector_current
-                if sector and sector.lower() == 'public':
-                    public_count += 1
+                if sector and sector.lower() in ['public', 'government']:
+                    government_count += 1
                 elif sector and sector.lower() == 'private':
                     private_count += 1
                 
@@ -312,6 +394,15 @@ def generate_statistics_view(request):
             high_position_rate = (high_position / total_alumni * 100) if total_alumni > 0 else 0
             job_alignment_rate = (job_aligned / total_alumni * 100) if total_alumni > 0 else 0
             
+            # Calculate statistics with proper null handling
+            most_common_company = safe_mode_related(alumni_qs, 'employment__company_name_current')
+            most_common_position = safe_mode_related(alumni_qs, 'employment__position_current')
+            most_common_sector = safe_mode_related(alumni_qs, 'employment__sector_current')
+            most_common_awards = safe_mode_related(alumni_qs, 'employment__awards_recognition_current')
+            most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
+            average_age = safe_mean_related(alumni_qs, 'profile__age')
+            sample_email = safe_sample_related(alumni_qs, 'profile__email')
+            
             return JsonResponse({
                 'success': True,
                 'type': 'SUC',
@@ -320,17 +411,18 @@ def generate_statistics_view(request):
                 'high_position_rate': round(high_position_rate, 2),
                 'job_aligned_count': job_aligned,
                 'job_alignment_rate': round(job_alignment_rate, 2),
-                'public_count': public_count,
+                'public_count': government_count,
                 'private_count': private_count,
                 'local_count': local_count,
                 'international_count': international_count,
-                'most_common_company': safe_mode_related(alumni_qs, 'employment__company_name_current'),
-                'most_common_position': safe_mode_related(alumni_qs, 'employment__position_current'),
-                'most_common_sector': safe_mode_related(alumni_qs, 'employment__sector_current'),
-                'most_common_awards': safe_mode_related(alumni_qs, 'employment__awards_recognition_current'),
-                'most_common_civil_status': safe_mode_related(alumni_qs, 'profile__civil_status'),
-                'average_age': safe_mean_related(alumni_qs, 'profile__age'),
-                'sample_email': safe_sample_related(alumni_qs, 'profile__email'),
+                # Real data fields using related models with null safety
+                'most_common_company': most_common_company,
+                'most_common_position': most_common_position,
+                'most_common_sector': most_common_sector,
+                'most_common_awards': most_common_awards,
+                'most_common_civil_status': most_common_civil_status,
+                'average_age': average_age,
+                'sample_email': sample_email,
                 'year': year,
                 'course': course
             })
@@ -356,6 +448,17 @@ def generate_statistics_view(request):
             absorption_rate = (absorbed / total_alumni * 100) if total_alumni > 0 else 0
             high_position_rate = (high_position / total_alumni * 100) if total_alumni > 0 else 0
             
+            # Calculate statistics with proper null handling
+            most_common_company = safe_mode_related(alumni_qs, 'employment__company_name_current')
+            most_common_position = safe_mode_related(alumni_qs, 'employment__position_current')
+            most_common_sector = safe_mode_related(alumni_qs, 'employment__sector_current')
+            average_salary = safe_mean_related(alumni_qs, 'employment__salary_current')
+            most_common_awards = safe_mode_related(alumni_qs, 'employment__awards_recognition_current')
+            most_common_school = safe_mode_related(alumni_qs, 'academic_info__school_name')
+            most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
+            average_age = safe_mean_related(alumni_qs, 'profile__age')
+            sample_email = safe_sample_related(alumni_qs, 'profile__email')
+            
             return JsonResponse({
                 'success': True,
                 'type': 'AACUP',
@@ -367,15 +470,16 @@ def generate_statistics_view(request):
                 'absorbed_count': absorbed,
                 'high_position_count': high_position,
                 'self_employed_count': self_employed,
-                'most_common_company': safe_mode_related(alumni_qs, 'employment__company_name_current'),
-                'most_common_position': safe_mode_related(alumni_qs, 'employment__position_current'),
-                'most_common_sector': safe_mode_related(alumni_qs, 'employment__sector_current'),
-                'average_salary': safe_mean_related(alumni_qs, 'employment__salary_current'),
-                'most_common_awards': safe_mode_related(alumni_qs, 'employment__awards_recognition_current'),
-                'most_common_school': safe_mode_related(alumni_qs, 'academic_info__school_name'),
-                'most_common_civil_status': safe_mode_related(alumni_qs, 'profile__civil_status'),
-                'average_age': safe_mean_related(alumni_qs, 'profile__age'),
-                'sample_email': safe_sample_related(alumni_qs, 'profile__email'),
+                # Real data fields using related models with null safety
+                'most_common_company': most_common_company,
+                'most_common_position': most_common_position,
+                'most_common_sector': most_common_sector,
+                'average_salary': average_salary,
+                'most_common_awards': most_common_awards,
+                'most_common_school': most_common_school,
+                'most_common_civil_status': most_common_civil_status,
+                'average_age': average_age,
+                'sample_email': sample_email,
                 'year': year,
                 'course': course
             })
@@ -418,7 +522,7 @@ def generate_statistics_view(request):
                 'most_common_position': safe_mode_related(high_position_alumni, 'employment__position_current'),
                 'most_common_company': safe_mode_related(high_position_alumni, 'employment__company_name_current'),
                 'most_common_sector': safe_mode_related(high_position_alumni, 'employment__sector_current'),
-                'most_common_course': safe_mode_related(high_position_alumni, 'academic_info__course'),
+                'most_common_course': safe_mode_related(high_position_alumni, 'academic_info__program'),
                 'average_salary': safe_mean_related(high_position_alumni, 'employment__salary_current'),
                 'year': year,
                 'course': course
@@ -445,14 +549,14 @@ def export_detailed_alumni_data(request):
     """Export detailed alumni data for the current filter, including tracker answers."""
     try:
         year = request.GET.get('year', 'ALL')
-        course = request.GET.get('course', 'ALL')
+        course = request.GET.get('program', 'ALL')
         
         alumni_qs = User.objects.filter(account_type__user=True)
         
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__course=course)
+            alumni_qs = alumni_qs.filter(academic_info__program=course)
         
         # Collect all tracker question texts that have been answered by any alumni in the queryset
         all_tracker_qids = set()

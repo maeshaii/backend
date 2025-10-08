@@ -520,7 +520,7 @@ def alumni_list_view(request):
             'id': a.user_id,
             'ctu_id': a.acc_username,
             'name': f"{a.f_name} {a.m_name or ''} {a.l_name}",
-            'course': getattr(a.academic_info, 'course', None) if hasattr(a, 'academic_info') else None,
+            'program': getattr(a.academic_info, 'program', None) if hasattr(a, 'academic_info') else None,
             'batch': getattr(a.academic_info, 'year_graduated', None) if hasattr(a, 'academic_info') else None,
             'status': a.user_status,
             'gender': a.gender,
@@ -951,7 +951,7 @@ def import_ojt_view(request):
                         except Exception:
                             pass
                         if course:
-                            academic.course = course
+                            academic.program = course
                         academic.save()
 
                         # Update profile birthdate if present
@@ -1430,7 +1430,7 @@ def coordinator_requests_list_view(request):
         all_imports = OJTImport.objects.all()
         print(f"DEBUG: Total OJTImport records: {all_imports.count()}")
         for imp in all_imports:
-            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
+            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.program}")
         
         # Base: group Requested imports by year and course, take max count to avoid duplicates
         try:
@@ -3780,7 +3780,7 @@ def get_all_alumni(request):
                     'id': a.user_id,
                     'ctu_id': a.acc_username,
                     'name': f"{a.f_name} {a.m_name or ''} {a.l_name}".strip(),
-                    'course': getattr(a.academic_info, 'course', None) if hasattr(a, 'academic_info') else None,
+                    'program': getattr(a.academic_info, 'program', None) if hasattr(a, 'academic_info') else None,
                     'batch': getattr(a.academic_info, 'year_graduated', None) if hasattr(a, 'academic_info') else None,
                     'status': a.user_status,
                     'gender': a.gender,

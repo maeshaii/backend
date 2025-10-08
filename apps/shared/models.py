@@ -552,7 +552,6 @@ class AcademicInfo(models.Model):
     """Education and academic information"""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='academic_info')
     year_graduated = models.IntegerField(null=True, blank=True)
-    course = models.CharField(max_length=100, null=True, blank=True)
     program = models.CharField(max_length=100, null=True, blank=True)
     section = models.CharField(max_length=50, null=True, blank=True)
     school_name = models.CharField(max_length=255, null=True, blank=True)
@@ -570,12 +569,12 @@ class AcademicInfo(models.Model):
     
     class Meta:
         indexes = [
-            models.Index(fields=['year_graduated', 'course']),
+            models.Index(fields=['year_graduated', 'program']),
             models.Index(fields=['pursue_further_study']),
         ]
     
     def __str__(self):
-        return f"Academic info for {self.user.full_name} - {self.course} ({self.year_graduated})"
+        return f"Academic info for {self.user.full_name} - {self.program} ({self.year_graduated})"
 
 
 class EmploymentHistory(models.Model):
@@ -618,7 +617,7 @@ class EmploymentHistory(models.Model):
         ]
     
     def update_job_alignment(self):
-        """Update job alignment fields based on position_current and course
+        """Update job alignment fields based on position_current and program
         This connects tracker answers to statistics types (CHED, SUC, AACUP)
         """
         if not self.position_current:
@@ -628,7 +627,7 @@ class EmploymentHistory(models.Model):
             return
         
         position_lower = self.position_current.lower().strip()
-        course_lower = (self.user.academic_info.course or '').lower() if hasattr(self.user, 'academic_info') else ''
+        course_lower = (self.user.academic_info.program or '').lower() if hasattr(self.user, 'academic_info') else ''
         
         # STEP 1: Self-employed status based on tracker answer Q23 (q_employment_type)
         # Check if user is self-employed based on tracker response
@@ -667,13 +666,13 @@ class EmploymentHistory(models.Model):
                 self.absorbed = False
         
         # STEP 4: Job alignment logic using simple job models
-        # This determines if the job aligns with the course, regardless of employment type
+        # This determines if the job aligns with the program, regardless of employment type
         job_aligned = False
         
         # Import simple job models
         from django.db import connection
         
-        # Check based on course type using simple job models
+        # Check based on program type using simple job models
         if 'bit-ct' in course_lower or 'computer technology' in course_lower:
             # Computer Technology jobs
             with connection.cursor() as cursor:
@@ -716,9 +715,9 @@ class EmploymentHistory(models.Model):
                     self.job_alignment_title = result[0]
                     job_aligned = True
         
-        # REMOVED: Fallback logic that allowed cross-course alignment
+        # REMOVED: Fallback logic that allowed cross-program alignment
         # This was causing BSIT graduates to be marked as aligned for BSIS-exclusive jobs
-        # Job alignment should only be based on the graduate's specific course
+        # Job alignment should only be based on the graduate's specific program
         
         # If still not aligned
         if not job_aligned:
@@ -853,7 +852,7 @@ class TrackerResponse(models.Model):
                 if question_id == 1:  # Year Graduated
                     academic.year_graduated = int(answer) if str(answer).isdigit() else academic.year_graduated
                 elif question_id == 2:  # Course Graduated
-                    academic.course = str(answer) if answer else academic.course
+                    academic.program = str(answer) if answer else academic.program
                 elif question_id == 3:  # Email
                     profile.email = str(answer) if answer else profile.email
                 elif question_id == 4:  # Last Name

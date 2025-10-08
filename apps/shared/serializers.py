@@ -27,7 +27,7 @@ class AcademicInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = AcademicInfo
         fields = [
-            'year_graduated', 'course', 'program', 'section', 'school_name',
+            'year_graduated', 'program', 'section', 'school_name',
             'pursue_further_study', 'q_pursue_study', 'q_study_start_date', 
             'q_post_graduate_degree', 'q_institution_name', 'q_units_obtained'
         ]
@@ -177,7 +177,7 @@ class AlumniListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for alumni lists."""
     full_name = serializers.ReadOnlyField()
     email = serializers.CharField(source='profile.email', read_only=True)
-    course = serializers.CharField(source='academic_info.course', read_only=True)
+    course = serializers.CharField(source='academic_info.program', read_only=True)
     year_graduated = serializers.IntegerField(source='academic_info.year_graduated', read_only=True)
     employment_status = serializers.CharField(source='tracker_data.q_employment_status', read_only=True)
     current_company = serializers.CharField(source='employment.company_name_current', read_only=True)
