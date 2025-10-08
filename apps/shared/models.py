@@ -590,6 +590,10 @@ class EmploymentHistory(models.Model):
     salary_current = models.CharField(max_length=100, null=True, blank=True)
     date_started = models.DateField(null=True, blank=True)
     company_address = models.TextField(null=True, blank=True)
+    company_email = models.EmailField(null=True, blank=True)
+    company_contact = models.CharField(max_length=20, null=True, blank=True)
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    position = models.CharField(max_length=255, null=True, blank=True)
     
     # Employment status and alignment
     job_alignment_status = models.CharField(max_length=50, null=True, blank=True, default='not_aligned')
