@@ -922,6 +922,7 @@ class Question(models.Model):
     text = models.CharField(max_length=255)
     type = models.CharField(max_length=50)
     options = models.JSONField(blank=True, null=True)  # For radio/multiple/checkbox
+    required = models.BooleanField(default=False)  # Added required field
 
 class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
