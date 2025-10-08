@@ -27,7 +27,7 @@ class AcademicInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = AcademicInfo
         fields = [
-            'year_graduated', 'course', 'program', 'section', 'school_name',
+            'year_graduated', 'program', 'section', 'school_name',
             'pursue_further_study', 'q_pursue_study', 'q_study_start_date', 
             'q_post_graduate_degree', 'q_institution_name', 'q_units_obtained'
         ]
@@ -177,7 +177,7 @@ class AlumniListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for alumni lists."""
     full_name = serializers.ReadOnlyField()
     email = serializers.CharField(source='profile.email', read_only=True)
-    course = serializers.CharField(source='academic_info.course', read_only=True)
+    course = serializers.CharField(source='academic_info.program', read_only=True)
     year_graduated = serializers.IntegerField(source='academic_info.year_graduated', read_only=True)
     employment_status = serializers.CharField(source='tracker_data.q_employment_status', read_only=True)
     current_company = serializers.CharField(source='employment.company_name_current', read_only=True)
@@ -220,10 +220,11 @@ class SmallUserSerializer(serializers.ModelSerializer):
 
 class MessageAttachmentSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
+    file_category = serializers.SerializerMethodField()
     
     class Meta:
         model = MessageAttachment
-        fields = ['attachment_id', 'file', 'file_url', 'file_name', 'file_type', 'file_size', 'uploaded_at']
+        fields = ['attachment_id', 'file', 'file_url', 'file_name', 'file_type', 'file_category', 'file_size', 'uploaded_at']
         read_only_fields = ['attachment_id', 'uploaded_at']
     
     def get_file_url(self, obj):
@@ -232,6 +233,11 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
             if request:
                 return request.build_absolute_uri(obj.file.url)
         return None
+    
+    def get_file_category(self, obj):
+        """Determine file category based on MIME type"""
+        from apps.messaging.views import get_file_category
+        return get_file_category(obj.file_type)
 
 class MessageSerializer(serializers.ModelSerializer):
     sender = SmallUserSerializer(read_only=True)
