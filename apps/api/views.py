@@ -1851,7 +1851,6 @@ def alumni_profile_view(request, user_id):
                 'social_media': user.profile.social_media if hasattr(user, 'profile') and user.profile else '',
                 'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else '',
                 'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None,
-                'partnered_companies': getattr(user.profile, 'partnered_companies', None) if hasattr(user, 'profile') and user.profile else None,
                 'account_type': {
                     'admin': getattr(user.account_type, 'admin', False),
                     'peso': getattr(user.account_type, 'peso', False),
@@ -1890,22 +1889,6 @@ def alumni_profile_view(request, user_id):
             if 'social_media' in data:
                 profile.social_media = data['social_media']
             # PESO: update partnered companies list
-            if 'partnered_companies' in data:
-                companies = data.get('partnered_companies')
-                # normalize value: expect list of {name, url}
-                if isinstance(companies, list):
-                    normalized = []
-                    for c in companies:
-                        if isinstance(c, dict):
-                            name = (c.get('name') or '').strip()
-                            url = (c.get('url') or '').strip()
-                            if name:
-                                normalized.append({'name': name, 'url': url})
-                        elif isinstance(c, str) and c.strip():
-                            normalized.append({'name': c.strip(), 'url': ''})
-                    profile.partnered_companies = normalized
-                else:
-                    profile.partnered_companies = None
             
             profile.save()
             
@@ -2277,7 +2260,8 @@ def repost_comment_edit_view(request, repost_id, comment_id):
         comment = Comment.objects.get(comment_id=comment_id, repost=repost)
     except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
-    if comment.user.user_id != request.user.user_id:
+    # Allow comment owner OR repost owner to delete/edit comment
+    if comment.user.user_id != request.user.user_id and repost.user.user_id != request.user.user_id:
         return JsonResponse({'error': 'Unauthorized'}, status=403)
     if request.method == 'PUT':
         try:
@@ -2387,9 +2371,11 @@ def post_edit_view(request, post_id):
 @permission_classes([IsAuthenticated])
 def comment_edit_view(request, post_id, comment_id):
     try:
-        comment = Comment.objects.get(comment_id=comment_id)
+        # First verify the post exists
+        post = Post.objects.get(post_id=post_id)
+        # Then get the comment that belongs to this specific post
+        comment = Comment.objects.get(comment_id=comment_id, post=post)
         user = request.user
-        post = comment.post
         # Allow if user owns the comment, or user owns the post, or user is admin
         if not (
             comment.user.user_id == user.user_id or
@@ -2409,6 +2395,8 @@ def comment_edit_view(request, post_id, comment_id):
         elif request.method == "DELETE":
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
+    except Post.DoesNotExist:
+        return JsonResponse({'error': 'Post not found'}, status=404)
     except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
     except Exception as e:
@@ -2734,7 +2722,84 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import Follow
-from apps.shared.models import Forum, Like, Comment, Repost, Post
+from apps.shared.models import Forum, Like, Comment, Repost, Post, Notification
+
+# ==========================
+# Helper Functions
+# ==========================
+
+def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None):
+    """Notify all OJT and alumni users when admin or PESO users post"""
+    try:
+        # Check if the post author is admin or PESO
+        if not (post_author.account_type.admin or post_author.account_type.peso):
+            return 0  # Only notify for admin/PESO posts
+        
+        # Get all OJT and alumni users
+        ojt_users = User.objects.filter(account_type__ojt=True)
+        alumni_users = User.objects.filter(account_type__user=True)
+        
+        # Combine both user types
+        target_users = list(ojt_users) + list(alumni_users)
+        
+        # Create notification for each user
+        notifications_created = 0
+        for user in target_users:
+            # Skip notifying the post author themselves
+            if user.user_id == post_author.user_id:
+                continue
+                
+            # Get author's profile picture URL
+            profile_pic_url = ""
+            if hasattr(post_author, 'profile') and post_author.profile and post_author.profile.profile_pic:
+                profile_pic_url = post_author.profile.profile_pic.url
+            
+            # Determine author label
+            if post_author.account_type.admin:
+                author_label = "Admin"
+            elif post_author.account_type.peso:
+                author_label = "PESO"
+            
+            # Determine notification content based on post type and author label
+            if post_type == "forum":
+                content = f"{author_label} posted a new forum discussion."
+                subject = f"New Forum Discussion from {author_label}"
+            elif post_type == "donation":
+                content = f"{author_label} created a new donation request."
+                subject = f"New Donation Request from {author_label}"
+            else:
+                content = f"{author_label} shared a new post."
+                subject = f"New Post from {author_label}"
+            
+            # Add author info (hidden metadata)
+            content += f"<!--AUTHOR_ID:{post_author.user_id}-->"
+            content += f"<!--AUTHOR_NAME:{post_author.full_name}-->"
+            if profile_pic_url:
+                content += f"<!--AUTHOR_PIC:{profile_pic_url}-->"
+            
+            # Add post link if available
+            if post_id:
+                if post_type == "forum":
+                    content += f"<!--FORUM_ID:{post_id}-->"
+                elif post_type == "donation":
+                    content += f"<!--DONATION_ID:{post_id}-->"
+                else:
+                    content += f"<!--POST_ID:{post_id}-->"
+            
+            Notification.objects.create(
+                user=user,
+                notif_type='admin_peso_post',
+                subject=subject,
+                notifi_content=content,
+                notif_date=timezone.now()
+            )
+            notifications_created += 1
+        
+        return notifications_created
+        
+    except Exception as e:
+        print(f"Error creating notifications: {e}")
+        return 0
 
 # ==========================
 # Forum API (shared_forum links to shared_post)
@@ -2756,6 +2821,10 @@ def forum_list_create_view(request):
                 content=content,
                 type='forum',
             )
+            
+            # Notify OJT and alumni users if post author is admin or PESO
+            notify_users_of_admin_peso_post(request.user, "forum", forum.forum_id)
+            
             return JsonResponse({'success': True, 'forum_id': forum.forum_id})
 
         # GET list - filter by user's batch (year_graduated)
@@ -3423,6 +3492,9 @@ def posts_view(request):
             )
             
             print(f"Post created successfully - ID: {new_post.post_id}, User: {new_post.user.user_id}")
+            
+            # Notify OJT and alumni users if post author is admin or PESO
+            notify_users_of_admin_peso_post(request.user, "post", new_post.post_id)
 
             # --- HANDLE MULTIPLE IMAGES ---
             import sys
@@ -4039,7 +4111,7 @@ def donation_requests_view(request):
                         'f_name': donation.user.f_name,
                         'm_name': donation.user.m_name,
                         'l_name': donation.user.l_name,
-                        'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                        'profile_pic': build_profile_pic_url(donation.user),
                         'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
                         'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
                         'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
@@ -4158,6 +4230,9 @@ def donation_requests_view(request):
                 user=request.user,
                 description=description.strip()
             )
+            
+            # Notify OJT and alumni users if post author is admin or PESO
+            notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
             
             # Handle image uploads if any
             if images:
@@ -4344,6 +4419,46 @@ def donation_comments_view(request, donation_id):
         return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
 
 
+@api_view(['PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comment_edit_view(request, donation_id, comment_id):
+    """Handle donation comment edit/delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
+        
+        # Allow comment owner OR donation owner to delete/edit comment
+        comment_owner = comment.user.user_id == request.user.user_id
+        donation_owner = donation.user.user_id == request.user.user_id
+        
+        if not (comment_owner or donation_owner):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+            
+        if request.method == 'PUT':
+            # Only comment owner can edit
+            if not comment_owner:
+                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
+            data = request.data
+            content = data.get('comment_content')
+            if content is None:
+                return JsonResponse({'error': 'No content provided'}, status=400)
+            comment.comment_content = content
+            comment.save()
+            return JsonResponse({'success': True})
+        else:
+            # Both comment owner and donation owner can delete
+            comment.delete()
+            return JsonResponse({'success': True})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'error': 'Donation request not found'}, status=404)
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comment edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comment operation'}, status=500)
+
+
 @api_view(['POST'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -4404,7 +4519,7 @@ def donation_detail_edit_view(request, donation_id):
                     'f_name': donation.user.f_name,
                     'm_name': donation.user.m_name,
                     'l_name': donation.user.l_name,
-                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                    'profile_pic': build_profile_pic_url(donation.user),
                     'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
                     'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
                     'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()

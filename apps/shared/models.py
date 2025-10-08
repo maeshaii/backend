@@ -524,8 +524,6 @@ class UserProfile(models.Model):
     profile_pic = models.ImageField(upload_to='profile_pics/', null=True, blank=True)
     profile_bio = models.TextField(null=True, blank=True)
     profile_resume = models.FileField(upload_to='resumes/', null=True, blank=True)
-    # PESO: list of partnered companies [{"name": str, "url": str}]
-    partnered_companies = models.JSONField(null=True, blank=True)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

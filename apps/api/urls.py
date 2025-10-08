@@ -120,6 +120,7 @@ urlpatterns = [
     path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
     path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
     path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
+    path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
     # # User Managem    ent API endpoints (Admin only)
