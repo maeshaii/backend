@@ -358,6 +358,19 @@ class Repost(models.Model):
         ]
 
 
+class RecentSearch(models.Model):
+    """Per-user recent search entries for user discovery.
+    One row per searched user, deduped by (owner, searched_user).
+    """
+    id = models.AutoField(primary_key=True)
+    owner = models.ForeignKey('User', on_delete=models.CASCADE, related_name='recent_searches')
+    searched_user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='appears_in_recent_searches')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('owner', 'searched_user')
+        ordering = ['-created_at']
+
 class Standard(models.Model):
     standard_id = models.AutoField(primary_key=True)
     name = models.CharField(max_length=255, default="CTU Standard")

@@ -15,7 +15,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage, RecentSearch
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -1836,6 +1836,20 @@ def alumni_profile_view(request, user_id):
             return JsonResponse({'error': 'Permission denied'}, status=403)
         
         if request.method == 'GET':
+            # Record recent search when viewing someone else's profile
+            try:
+                viewer_id = getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None)
+                if viewer_id and int(viewer_id) != int(user_id):
+                    try:
+                        from apps.shared.models import RecentSearch
+                        RecentSearch.objects.filter(owner=request.user, searched_user=user).delete()
+                        RecentSearch.objects.create(owner=request.user, searched_user=user)
+                        logger.info("alumni_profile_view recent search created owner=%s searched_user=%s", viewer_id, user.user_id)
+                    except Exception as e:
+                        logger.warning("alumni_profile_view recent search insert skipped: %s", e)
+            except Exception:
+                pass
+
             # Return profile data in the format expected by Settings.tsx
             profile_data = {
                 'user_id': user.user_id,
@@ -2408,6 +2422,7 @@ def post_comments_view(request, post_id):
                     'user': {
                         'user_id': comment.user.user_id,
                         'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
                         'l_name': comment.user.l_name,
                         'profile_pic': build_profile_pic_url(comment.user),
                     }
@@ -4426,4 +4441,73 @@ def donation_detail_edit_view(request, donation_id):
     except Exception as e:
         logger.error(f"Error in donation detail/edit/delete: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
+
+@api_view(['GET', 'POST', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def recent_searches_view(request):
+    """Manage per-user recent searches.
+    GET: list up to ?limit=10
+    POST: { searched_user_id }
+    DELETE: clear all
+    """
+    try:
+        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
+        if request.method == 'GET':
+            limit = int(request.GET.get('limit', '10'))
+            qs = (RecentSearch.objects
+                  .filter(owner=request.user)
+                  .select_related('searched_user')
+                  .order_by('-created_at')[:max(1, min(limit, 50))])
+            logger.info("recent_searches_view GET returning %s rows", qs.count())
+            results = []
+            for rs in qs:
+                u = rs.searched_user
+                results.append({
+                    'user_id': getattr(u, 'id', getattr(u, 'user_id', None)),
+                    'f_name': getattr(u, 'f_name', '') or getattr(u, 'first_name', ''),
+                    'l_name': getattr(u, 'l_name', '') or getattr(u, 'last_name', ''),
+                    'profile_pic': getattr(u, 'profile_pic', None),
+                    'created_at': rs.created_at.isoformat(),
+                })
+            return JsonResponse({ 'recent': results })
+
+        if request.method == 'POST':
+            try:
+                body = json.loads(request.body or '{}')
+            except Exception:
+                body = {}
+            target_id = body.get('searched_user_id')
+            if not isinstance(target_id, int):
+                return JsonResponse({ 'success': False, 'message': 'searched_user_id is required' }, status=400)
+            if target_id == getattr(request.user, 'id', getattr(request.user, 'user_id', None)):
+                return JsonResponse({ 'success': True })
+            # Use primary key lookup; our User model uses user_id as PK
+            logger.info("recent_searches_view POST target_id=%s", target_id)
+            target = get_object_or_404(User, pk=target_id)
+            RecentSearch.objects.filter(owner=request.user, searched_user=target).delete()
+            RecentSearch.objects.create(owner=request.user, searched_user=target)
+            logger.info("recent_searches_view POST created owner=%s searched_user=%s", getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None), getattr(target, 'user_id', None) or getattr(target, 'id', None))
+
+            # Diagnostics: log DB connection and counts to ensure we're writing to the expected database
+            try:
+                from django.db import connection
+                settings_dict = getattr(connection, 'settings_dict', {})
+                db_name = settings_dict.get('NAME')
+                db_host = settings_dict.get('HOST')
+                db_port = settings_dict.get('PORT')
+                owner_count = RecentSearch.objects.filter(owner=request.user).count()
+                logger.info("recent_searches_view DB: name=%s host=%s port=%s owner_recent_count=%s", db_name, db_host, db_port, owner_count)
+            except Exception as diag_e:
+                logger.warning("recent_searches_view diagnostics failed: %s", diag_e)
+            return JsonResponse({ 'success': True })
+
+        if request.method == 'DELETE':
+            RecentSearch.objects.filter(owner=request.user).delete()
+            return JsonResponse({ 'success': True })
+
+        return JsonResponse({ 'success': False, 'message': 'Method not allowed' }, status=405)
+    except Exception as e:
+        logger.error(f"recent_searches_view error: {e}")
+        return JsonResponse({ 'success': False, 'message': 'Server error' }, status=500)
 

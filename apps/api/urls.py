@@ -98,6 +98,7 @@ urlpatterns = [
     path('alumni/profile/delete/', delete_alumni_profile_pic, name='delete_alumni_profile_pic'),
     path('search/', search_alumni, name='search_alumni'),
     path('alumni/search/', views.search_alumni, name='search_alumni'),
+    path('search/recent/', views.recent_searches_view, name='recent_searches'),
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
     
     # Used by Mobile: Posts API endpoints
@@ -145,4 +146,3 @@ urlpatterns = [
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     
 ]
-
