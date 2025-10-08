@@ -26,16 +26,11 @@ class AccountType(models.Model):
 
 
 
-class Aacup(models.Model):
-    """AACUP statistics and relationships."""
-    aacup_id = models.AutoField(primary_key=True)
-    standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='aacups')
-
-class Ched(models.Model):
-    """CHED statistics and job alignment count."""
-    ched_id = models.AutoField(primary_key=True)
-    standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='cheds')
-    job_alignment_count = models.IntegerField(default=0)
+# REMOVED: Legacy statistics models (deleted in migration 0091)
+# These models had circular dependencies and were never populated or used
+# - Aacup
+# - Ched  
+# Statistics now calculated directly from User -> EmploymentHistory -> TrackerData
 
 class Comment(models.Model):
     """User comments on posts, forums, and donations.
@@ -61,26 +56,16 @@ class Comment(models.Model):
             )
         ]
 
-class CompTechJob(models.Model):
-    """Computer Technology job titles and relationships."""
-    comp_tech_jobs_id = models.AutoField(primary_key=True)
-    suc = models.ForeignKey('Suc', on_delete=models.CASCADE, related_name='comptechjob_sucs', null=True, blank=True)
-    info_system_jobs = models.ForeignKey('InfoSystemJob', on_delete=models.CASCADE, related_name='comptechjob_infosystemjobs', null=True, blank=True)
-    info_tech_jobs = models.ForeignKey('InfoTechJob', on_delete=models.CASCADE, related_name='comptechjob_infotechjobs', null=True, blank=True)
-    job_title = models.CharField(max_length=255)
+# REMOVED: Old job models with circular FK relationships (deleted in migration 0091)
+# Replaced by SimpleCompTechJob, SimpleInfoTechJob, SimpleInfoSystemJob
+# - CompTechJob
+# - InfoTechJob  
+# - InfoSystemJob
 
-class ExportedFile(models.Model):
-    """Exported files for standards."""
-    exported_file_id = models.AutoField(primary_key=True)
-    standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='exported_files')
-    file_name = models.CharField(max_length=255)
-    exported_date = models.DateTimeField()
-
-class Feed(models.Model):
-    """Feed entries for user posts."""
-    feed_id = models.AutoField(primary_key=True)
-    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='feeds')
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='feeds')
+# REMOVED: Unused helper models (deleted in migration 0091)
+# - ExportedFile (file tracking never implemented)
+# - Feed (post feed uses direct Post queries)
+# - Import (replaced by OJTImport)
 
 class Forum(models.Model):
     """Forum posts stored separately from shared_post (identical structure).
@@ -94,34 +79,12 @@ class Forum(models.Model):
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
 
-class HighPosition(models.Model):
-    """High position statistics for AACUP and tracker forms."""
-    high_position_id = models.AutoField(primary_key=True)
-    aacup = models.ForeignKey('Aacup', on_delete=models.CASCADE, related_name='high_positions')
-    tracker_form = models.ForeignKey('TrackerForm', on_delete=models.CASCADE, related_name='high_positions')
-
-class Import(models.Model):
-    """Import records for user data."""
-    import_id = models.AutoField(primary_key=True)
-    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='imports')
-    import_year = models.IntegerField()
-    import_by = models.CharField(max_length=255)
-
-class InfoTechJob(models.Model):
-    """Information Technology job titles and relationships."""
-    info_tech_jobs_id = models.AutoField(primary_key=True)
-    suc = models.ForeignKey('Suc', on_delete=models.CASCADE, related_name='infotechjob_sucs', null=True, blank=True)
-    info_systems_jobs = models.ForeignKey('InfoSystemJob', on_delete=models.CASCADE, related_name='infotechjob_infosystemjobs', null=True, blank=True)
-    comp_tech_jobs = models.ForeignKey('CompTechJob', on_delete=models.CASCADE, related_name='infotechjob_comptechjobs', null=True, blank=True)
-    job_title = models.CharField(max_length=255)
-
-class InfoSystemJob(models.Model):
-    """Information System job titles and relationships."""
-    info_system_jobs_id = models.AutoField(primary_key=True)
-    suc = models.ForeignKey('Suc', on_delete=models.CASCADE, related_name='infosystemjob_sucs', null=True, blank=True)
-    info_tech_jobs = models.ForeignKey('InfoTechJob', on_delete=models.CASCADE, related_name='infosystemjob_infotechjobs', null=True, blank=True)
-    comp_tech_jobs = models.ForeignKey('CompTechJob', on_delete=models.CASCADE, related_name='infosystemjob_comptechjobs', null=True, blank=True)
-    job_title = models.CharField(max_length=255)
+# REMOVED: Legacy models deleted in migration 0091
+# - HighPosition (functionality moved to EmploymentHistory.high_position boolean)
+# - Import (replaced by OJTImport)
+# - InfoTechJob (old version with circular FKs)
+# - InfoSystemJob (old version with circular FKs)
+# See SimpleInfoTechJob, SimpleInfoSystemJob for current implementation
 
 # NEW: Simple job models for job alignment (no complex relationships)
 class SimpleCompTechJob(models.Model):
@@ -234,7 +197,7 @@ class MessageAttachment(models.Model):
     message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments', null=True, blank=True)
     file = models.FileField(upload_to='message_attachments/%Y/%m/%d/')
     file_name = models.CharField(max_length=255)
-    file_type = models.CharField(max_length=50)
+    file_type = models.CharField(max_length=255)
     file_size = models.IntegerField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
     
@@ -298,9 +261,7 @@ class PostImage(models.Model):
     def __str__(self):
         return f"Image {self.image_id} for Post {self.post.post_id}"
 
-class Qpro(models.Model):
-    qpro_id = models.AutoField(primary_key=True)
-    standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='qpros')
+# REMOVED: Qpro model (deleted in migration 0091)
 
 class DonationRequest(models.Model):
     """Donation requests from alumni"""
@@ -358,21 +319,21 @@ class Repost(models.Model):
         ]
 
 
-class Standard(models.Model):
-    standard_id = models.AutoField(primary_key=True)
-    name = models.CharField(max_length=255, default="CTU Standard")
-    description = models.TextField(blank=True)
-    qpro = models.ForeignKey('Qpro', on_delete=models.CASCADE, related_name='standards', null=True, blank=True)
-    suc = models.ForeignKey('Suc', on_delete=models.CASCADE, related_name='standards', null=True, blank=True)
-    aacup = models.ForeignKey('Aacup', on_delete=models.CASCADE, related_name='standards', null=True, blank=True)
-    ched = models.ForeignKey('Ched', on_delete=models.CASCADE, related_name='standards', null=True, blank=True)
+class RecentSearch(models.Model):
+    """Per-user recent search entries for user discovery.
+    One row per searched user, deduped by (owner, searched_user).
+    """
+    id = models.AutoField(primary_key=True)
+    owner = models.ForeignKey('User', on_delete=models.CASCADE, related_name='recent_searches')
+    searched_user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='appears_in_recent_searches')
+    created_at = models.DateTimeField(auto_now_add=True)
 
-class Suc(models.Model):
-    suc_id = models.AutoField(primary_key=True)
-    standard = models.ForeignKey('Standard', on_delete=models.CASCADE, related_name='suc_sucs')
-    info_tech_jobs = models.ForeignKey('InfoTechJob', on_delete=models.CASCADE, related_name='suc_infotechjobs')
-    info_system_jobs = models.ForeignKey('InfoSystemJob', on_delete=models.CASCADE, related_name='suc_infosystemjobs')
-    comp_tech_jobs = models.ForeignKey('CompTechJob', on_delete=models.CASCADE, related_name='suc_comptechjobs')
+    class Meta:
+        unique_together = ('owner', 'searched_user')
+        ordering = ['-created_at']
+
+# REMOVED: Standard and Suc models (deleted in migration 0091)
+# These were part of an overly complex statistics hierarchy that was never implemented
 
 class TrackerForm(models.Model):
     id = models.AutoField(primary_key=True)
@@ -397,7 +358,8 @@ class User(models.Model):
     Used by Mobile: auth via /api/token/, profile display, follow relationships.
     """
     user_id = models.AutoField(primary_key=True)
-    import_id = models.ForeignKey('Import', on_delete=models.CASCADE, related_name='users', null=True, blank=True)
+    # REMOVED: import_id FK to deleted Import model (replaced by OJTImport for OJT users)
+    # import_id = models.ForeignKey('Import', on_delete=models.CASCADE, related_name='users', null=True, blank=True)
     account_type = models.ForeignKey('AccountType', on_delete=models.CASCADE, related_name='users')
     acc_username = models.CharField(max_length=100, unique=True)
     acc_password = models.CharField(max_length=128, null=True, blank=True)
@@ -552,7 +514,6 @@ class AcademicInfo(models.Model):
     """Education and academic information"""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='academic_info')
     year_graduated = models.IntegerField(null=True, blank=True)
-    course = models.CharField(max_length=100, null=True, blank=True)
     program = models.CharField(max_length=100, null=True, blank=True)
     section = models.CharField(max_length=50, null=True, blank=True)
     school_name = models.CharField(max_length=255, null=True, blank=True)
@@ -570,12 +531,12 @@ class AcademicInfo(models.Model):
     
     class Meta:
         indexes = [
-            models.Index(fields=['year_graduated', 'course']),
+            models.Index(fields=['year_graduated', 'program']),
             models.Index(fields=['pursue_further_study']),
         ]
     
     def __str__(self):
-        return f"Academic info for {self.user.full_name} - {self.course} ({self.year_graduated})"
+        return f"Academic info for {self.user.full_name} - {self.program} ({self.year_graduated})"
 
 
 class EmploymentHistory(models.Model):
@@ -599,6 +560,12 @@ class EmploymentHistory(models.Model):
     job_alignment_status = models.CharField(max_length=50, null=True, blank=True, default='not_aligned')
     job_alignment_category = models.CharField(max_length=100, null=True, blank=True)
     job_alignment_title = models.CharField(max_length=255, null=True, blank=True)
+    
+    # PHASE 3: Cross-program alignment fields
+    job_alignment_suggested_program = models.CharField(max_length=50, null=True, blank=True, 
+                                                      help_text="Program suggested for cross-alignment")
+    job_alignment_original_program = models.CharField(max_length=50, null=True, blank=True,
+                                                     help_text="Original program of the graduate")
     self_employed = models.BooleanField(default=False)
     high_position = models.BooleanField(default=False)
     absorbed = models.BooleanField(default=False)
@@ -622,7 +589,7 @@ class EmploymentHistory(models.Model):
         ]
     
     def update_job_alignment(self):
-        """Update job alignment fields based on position_current and course
+        """Update job alignment fields based on position_current and program
         This connects tracker answers to statistics types (CHED, SUC, AACUP)
         """
         if not self.position_current:
@@ -632,7 +599,7 @@ class EmploymentHistory(models.Model):
             return
         
         position_lower = self.position_current.lower().strip()
-        course_lower = (self.user.academic_info.course or '').lower() if hasattr(self.user, 'academic_info') else ''
+        course_lower = (self.user.academic_info.program or '').lower() if hasattr(self.user, 'academic_info') else ''
         
         # STEP 1: Self-employed status based on tracker answer Q23 (q_employment_type)
         # Check if user is self-employed based on tracker response
@@ -670,65 +637,234 @@ class EmploymentHistory(models.Model):
             else:
                 self.absorbed = False
         
-        # STEP 4: Job alignment logic using simple job models
-        # This determines if the job aligns with the course, regardless of employment type
+        # STEP 4: Smart Job Alignment with Database Expansion
+        # SENIOR DEV: Intelligent job alignment with automatic database expansion
+        import logging
+        from django.contrib.postgres.search import TrigramSimilarity
+        
+        logger = logging.getLogger('apps.shared.models')
         job_aligned = False
+        match_method = None
         
-        # Import simple job models
-        from django.db import connection
+        # Helper function for multi-tier matching
+        def find_job_match(job_model, position, position_lower):
+            """
+            Three-tier matching strategy:
+            1. Exact match (case-insensitive)
+            2. Substring match (contains)
+            3. Fuzzy match (trigram similarity > 0.6)
+            Returns: (matched_job, match_method)
+            """
+            # Tier 1: Exact match
+            match = job_model.objects.filter(job_title__iexact=position).first()
+            if match:
+                return match, 'exact'
+            
+            # Tier 2: Substring match
+            match = job_model.objects.filter(job_title__icontains=position_lower).first()
+            if match:
+                return match, 'substring'
+            
+            # Tier 3: Fuzzy match using trigram similarity
+            try:
+                match = job_model.objects.annotate(
+                    similarity=TrigramSimilarity('job_title', position_lower)
+                ).filter(similarity__gt=0.6).order_by('-similarity').first()
+                if match:
+                    return match, f'fuzzy (similarity: {match.similarity:.2f})'
+            except Exception:
+                pass  # Trigram not available, skip fuzzy matching
+            
+            return None, None
         
-        # Check based on course type using simple job models
+        # STEP 4A: Check user's own program first
+        user_program_match = None
+        user_program_category = None
+        
         if 'bit-ct' in course_lower or 'computer technology' in course_lower:
-            # Computer Technology jobs
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT job_title FROM shared_simplecomptechjob WHERE LOWER(job_title) LIKE %s",
-                    [f'%{position_lower}%']
-                )
-                result = cursor.fetchone()
-                if result:
-                    self.job_alignment_status = 'aligned'
-                    self.job_alignment_category = 'comp_tech'
-                    self.job_alignment_title = result[0]
-                    job_aligned = True
+            matched_job, match_method = find_job_match(SimpleCompTechJob, self.position_current, position_lower)
+            if matched_job:
+                user_program_match = matched_job
+                user_program_category = 'comp_tech'
         
         elif 'bsit' in course_lower or 'information technology' in course_lower:
-            # Information Technology jobs
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT job_title FROM shared_simpleinfotechjob WHERE LOWER(job_title) LIKE %s",
-                    [f'%{position_lower}%']
-                )
-                result = cursor.fetchone()
-                if result:
-                    self.job_alignment_status = 'aligned'
-                    self.job_alignment_category = 'info_tech'
-                    self.job_alignment_title = result[0]
-                    job_aligned = True
+            matched_job, match_method = find_job_match(SimpleInfoTechJob, self.position_current, position_lower)
+            if matched_job:
+                user_program_match = matched_job
+                user_program_category = 'info_tech'
         
         elif 'bsis' in course_lower or 'information system' in course_lower:
-            # Information System jobs
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT job_title FROM shared_simpleinfosystemjob WHERE LOWER(job_title) LIKE %s",
-                    [f'%{position_lower}%']
-                )
-                result = cursor.fetchone()
-                if result:
-                    self.job_alignment_status = 'aligned'
-                    self.job_alignment_category = 'info_system'
-                    self.job_alignment_title = result[0]
-                    job_aligned = True
+            matched_job, match_method = find_job_match(SimpleInfoSystemJob, self.position_current, position_lower)
+            if matched_job:
+                user_program_match = matched_job
+                user_program_category = 'info_system'
         
-        # REMOVED: Fallback logic that allowed cross-course alignment
-        # This was causing BSIT graduates to be marked as aligned for BSIS-exclusive jobs
-        # Job alignment should only be based on the graduate's specific course
+        # STEP 4B: If found in user's program - align immediately
+        if user_program_match:
+            self.job_alignment_status = 'aligned'
+            self.job_alignment_category = user_program_category
+            self.job_alignment_title = user_program_match.job_title
+            job_aligned = True
+            
+            # Log fuzzy matches for review
+            if match_method and 'fuzzy' in match_method:
+                logger.info(f"Fuzzy match in own program: '{self.position_current}' -> '{user_program_match.job_title}' ({match_method})")
         
-        # If still not aligned
-        if not job_aligned:
-            self.job_alignment_status = 'not_aligned'
+        # STEP 4C: If NOT found in user's program - show radio button for potential expansion
+        else:
+            # SENIOR DEV: Show radio button immediately, don't check other programs yet
+            self.job_alignment_status = 'pending_user_confirmation'
             self.job_alignment_category = None
             self.job_alignment_title = None
+            self.job_alignment_original_program = course_lower
+            
+            logger.info(f"Job not found in user's program: '{self.position_current}' (Program: {course_lower}, User: {self.user.user_id}) - Awaiting user confirmation")
+    
+    def _find_cross_program_match(self, position_lower, original_program):
+        """
+        Find job matches in other programs when no match found in original program.
+        Returns dict with match info or None if no cross-program match found.
+        """
+        # Define program mappings
+        program_job_models = {
+            'bit-ct': SimpleCompTechJob,
+            'bsit': SimpleInfoTechJob, 
+            'bsis': SimpleInfoSystemJob
+        }
+        
+        # Get all programs except the original one
+        other_programs = {k: v for k, v in program_job_models.items() if k not in original_program}
+        
+        for program_name, job_model in other_programs.items():
+            matched_job, match_method = self._find_job_match_in_model(job_model, position_lower)
+            
+            if matched_job:
+                return {
+                    'title': matched_job.job_title,
+                    'category': self._get_category_for_program(program_name),
+                    'suggested_program': program_name,
+                    'match_method': match_method
+                }
+        
+        return None
+    
+    def _find_job_match_in_model(self, job_model, position_lower):
+        """Helper to find job match in a specific model"""
+        from django.contrib.postgres.search import TrigramSimilarity
+        
+        # Tier 1: Exact match
+        match = job_model.objects.filter(job_title__iexact=position_lower).first()
+        if match:
+            return match, 'exact'
+        
+        # Tier 2: Substring match
+        match = job_model.objects.filter(job_title__icontains=position_lower).first()
+        if match:
+            return match, 'substring'
+        
+        # Tier 3: Fuzzy match
+        try:
+            match = job_model.objects.annotate(
+                similarity=TrigramSimilarity('job_title', position_lower)
+            ).filter(similarity__gt=0.6).order_by('-similarity').first()
+            if match:
+                return match, f'fuzzy (similarity: {match.similarity:.2f})'
+        except Exception:
+            pass
+        
+        return None, None
+    
+    def _get_category_for_program(self, program_name):
+        """Get job category string for program name"""
+        category_map = {
+            'bit-ct': 'comp_tech',
+            'bsit': 'info_tech',
+            'bsis': 'info_system'
+        }
+        return category_map.get(program_name, 'unknown')
+    
+    def confirm_job_alignment(self, confirmed=True):
+        """
+        SENIOR DEV: Smart job alignment confirmation with database expansion.
+        Called when user responds to job alignment question.
+        """
+        import logging
+        from django.contrib.postgres.search import TrigramSimilarity
+        
+        logger = logging.getLogger('apps.shared.models')
+        
+        if self.job_alignment_status == 'pending_user_confirmation':
+            if confirmed:
+                # User said YES - now check if it's a cross-course job
+                cross_program_match = self._find_cross_program_match(
+                    self.position_current.lower(), 
+                    self.job_alignment_original_program
+                )
+                
+                if cross_program_match:
+                    # Found in another program - add to user's program table
+                    self._add_job_to_user_program_table(cross_program_match)
+                    
+                    # Mark as aligned
+                    self.job_alignment_status = 'aligned'
+                    self.job_alignment_category = cross_program_match['category']
+                    self.job_alignment_title = cross_program_match['title']
+                    
+                    logger.info(f"Cross-program job added to database: '{self.position_current}' added to {self.job_alignment_original_program} table")
+                else:
+                    # Not found in any program - just mark as aligned (new job type)
+                    self.job_alignment_status = 'aligned'
+                    self.job_alignment_category = self._get_category_for_program(self.job_alignment_original_program)
+                    self.job_alignment_title = self.position_current
+                    
+                    logger.info(f"New job type aligned: '{self.position_current}' (not found in any program table)")
+            else:
+                # User said NO - mark as not aligned
+                self.job_alignment_status = 'not_aligned'
+                self.job_alignment_category = None
+                self.job_alignment_title = None
+                
+                logger.info(f"Job alignment rejected by user: '{self.position_current}'")
+            
+            # Clear temporary fields
+            self.job_alignment_suggested_program = None
+            self.job_alignment_original_program = None
+            self.save()
+    
+    def _add_job_to_user_program_table(self, cross_program_match):
+        """
+        SENIOR DEV: Add cross-program job to user's program table for future use.
+        """
+        import logging
+        logger = logging.getLogger('apps.shared.models')
+        
+        try:
+            # Determine which table to add to based on user's program
+            user_program = self.job_alignment_original_program
+            job_title = cross_program_match['title']
+            
+            # Add to appropriate table
+            if 'bit-ct' in user_program or 'computer technology' in user_program:
+                # Check if already exists
+                if not SimpleCompTechJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleCompTechJob.objects.create(job_title=job_title)
+                    logger.info(f"Added '{job_title}' to BIT-CT job table")
+            
+            elif 'bsit' in user_program or 'information technology' in user_program:
+                # Check if already exists
+                if not SimpleInfoTechJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleInfoTechJob.objects.create(job_title=job_title)
+                    logger.info(f"Added '{job_title}' to BSIT job table")
+            
+            elif 'bsis' in user_program or 'information system' in user_program:
+                # Check if already exists
+                if not SimpleInfoSystemJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleInfoSystemJob.objects.create(job_title=job_title)
+                    logger.info(f"Added '{job_title}' to BSIS job table")
+            
+        except Exception as e:
+            logger.error(f"Failed to add job to user program table: {e}")
+            # Don't let this break the main flow
     
     def __str__(self):
         return f"Employment for {self.user.full_name} - {self.position_current} at {self.company_name_current}"
@@ -805,6 +941,7 @@ class Question(models.Model):
     text = models.CharField(max_length=255)
     type = models.CharField(max_length=50)
     options = models.JSONField(blank=True, null=True)  # For radio/multiple/checkbox
+    required = models.BooleanField(default=False)  # Added required field
 
 class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -859,7 +996,7 @@ class TrackerResponse(models.Model):
                 if question_id == 1:  # Year Graduated
                     academic.year_graduated = int(answer) if str(answer).isdigit() else academic.year_graduated
                 elif question_id == 2:  # Course Graduated
-                    academic.course = str(answer) if answer else academic.course
+                    academic.program = str(answer) if answer else academic.program
                 elif question_id == 3:  # Email
                     profile.email = str(answer) if answer else profile.email
                 elif question_id == 4:  # Last Name
@@ -966,6 +1103,45 @@ class TrackerResponse(models.Model):
             except Exception:
                 continue
 
+    def _invalidate_statistics_cache(self):
+        """PHASE 3: Invalidate statistics cache when tracker data changes"""
+        try:
+            from django.core.cache import cache
+            
+            # Clear all statistics-related cache keys
+            cache_patterns = [
+                'stats:*',  # All statistics cache
+                f'stats:user:{self.user.user_id}:*',  # User-specific stats
+                f'stats:program:{self.user.academic_info.program}:*',  # Program-specific stats
+            ]
+            
+            for pattern in cache_patterns:
+                # Note: Django's cache doesn't support wildcard deletion by default
+                # In production, consider using Redis with pattern-based deletion
+                # For now, we'll clear common cache keys
+                common_keys = [
+                    'stats:ALL:ALL:ALL',
+                    f'stats:ALL:{self.user.academic_info.program}:ALL',
+                    f'stats:ALL:ALL:QPRO',
+                    f'stats:ALL:ALL:CHED',
+                    f'stats:ALL:ALL:SUC',
+                    f'stats:ALL:ALL:AACUP',
+                ]
+                
+                for key in common_keys:
+                    cache.delete(key)
+            
+            # Log cache invalidation
+            import logging
+            logger = logging.getLogger('apps.shared.models')
+            logger.info(f"Statistics cache invalidated for user {self.user.user_id} after tracker submission")
+            
+        except Exception as e:
+            # Don't let cache invalidation errors break the main flow
+            import logging
+            logger = logging.getLogger('apps.shared.models')
+            logger.warning(f"Failed to invalidate statistics cache: {e}")
+
         # Save all models
         user.save()
         profile.save()
@@ -975,6 +1151,9 @@ class TrackerResponse(models.Model):
         employment.save()
         tracker.tracker_submitted_at = self.submitted_at
         tracker.save()
+        
+        # PHASE 3: Invalidate statistics cache after tracker submission
+        self._invalidate_statistics_cache()
 
 # OJT-specific models
 class Follow(models.Model):

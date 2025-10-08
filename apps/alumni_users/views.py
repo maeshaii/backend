@@ -41,7 +41,7 @@ def build_alumni_data(a):
         'id': a.user_id,
         'ctu_id': a.acc_username,
         'name': f"{a.f_name} {a.m_name or ''} {a.l_name}",
-        'course': getattr(academic, 'course', None) if academic else None,
+        'program': getattr(academic, 'program', None) if academic else None,
         'batch': getattr(academic, 'year_graduated', None) if academic else None,
         'status': a.user_status,
         'gender': a.gender,
