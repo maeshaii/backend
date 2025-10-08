@@ -2146,7 +2146,7 @@ def repost_detail_view(request, repost_id):
             ),
         } for l in likes],
         'comments': [{
-            'comment_id': c.repost_comment_id,
+            'comment_id': c.comment_id,
             'comment_content': c.comment_content,
             'date_created': c.date_created.isoformat() if c.date_created else None,
             'user': {
@@ -2166,6 +2166,12 @@ def repost_detail_view(request, repost_id):
             },
             'post_content': repost.post.post_content,
             'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
+            'post_images': [{
+                'image_id': img.image_id,
+                'image_url': img.image_url,
+                'order': img.order
+            } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
+            'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
         }
     }
     return JsonResponse(data)
@@ -2447,7 +2453,7 @@ def post_comments_view(request, post_id):
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
-                    notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}-->",
+                    notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
 
@@ -2568,7 +2574,7 @@ def post_repost_view(request, post_id):
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
-                notifi_content=f"{user.full_name} reposted your post",
+                notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}-->",
                 notif_date=timezone.now()
             )
 
@@ -2657,7 +2663,7 @@ def alumni_followers_view(request, user_id):
             followers_data.append({
                 'user_id': follower.user_id,
                 'ctu_id': follower.acc_username,
-                'name': f"{follower.f_name} {follower.m_name or ''} {follower.l_name}".strip(),
+                'name': ' '.join(filter(None, [follower.f_name, follower.m_name, follower.l_name])),
                 'f_name': follower.f_name,
                 'm_name': follower.m_name,
                 'l_name': follower.l_name,
@@ -2701,7 +2707,7 @@ def alumni_following_view(request, user_id):
             following_data.append({
                 'user_id': followed_user.user_id,
                 'ctu_id': followed_user.acc_username,
-                'name': f"{followed_user.f_name} {followed_user.m_name or ''} {followed_user.l_name}".strip(),
+                'name': ' '.join(filter(None, [followed_user.f_name, followed_user.m_name, followed_user.l_name])),
                 'f_name': followed_user.f_name,
                 'm_name': followed_user.m_name,
                 'l_name': followed_user.l_name,
@@ -3039,7 +3045,7 @@ def forum_like_view(request, forum_id):
                     user=forum.user,
                     notif_type='like',
                     subject='Forum Liked',
-                    notifi_content=f"{request.user.full_name} liked your forum post",
+                    notifi_content=f"{request.user.full_name} liked your forum post<!--FORUM_ID:{forum.forum_id}-->",
                     notif_date=timezone.now()
                 )
             return JsonResponse({'success': True})
@@ -3100,7 +3106,7 @@ def forum_comments_view(request, forum_id):
                     user=forum.user,
                     notif_type='comment',
                     subject='Forum Commented',
-                    notifi_content=f"{request.user.full_name} commented on your forum post",
+                    notifi_content=f"{request.user.full_name} commented on your forum post<!--FORUM_ID:{forum.forum_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
             return JsonResponse({
@@ -3180,7 +3186,7 @@ def forum_repost_view(request, forum_id):
                 user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
-                notifi_content=f"{request.user.full_name} reposted your forum post",
+                notifi_content=f"{request.user.full_name} reposted your forum post<!--FORUM_ID:{forum.forum_id}-->",
                 notif_date=timezone.now()
             )
         return JsonResponse({'success': True, 'repost_id': r.repost_id})
