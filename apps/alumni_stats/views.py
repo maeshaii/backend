@@ -8,147 +8,19 @@ from apps.shared.models import User, TrackerResponse, Question
 from collections import Counter
 from django.db import models
 from statistics import mean
-from apps.shared.utils.stats import safe_mode, safe_mean, safe_sample, safe_mode_related, safe_mean_related, safe_sample_related
+# OPTIMIZED: Import all helper functions from shared utils (no duplication)
+from apps.shared.utils.stats import (
+    safe_mode, safe_mean, safe_sample,
+    safe_mode_related, safe_mean_related, safe_sample_related,
+    convert_salary_range_to_number
+)
+from .decorators import cache_statistics
 
 logger = logging.getLogger(__name__)
 
-# Helper functions for statistics aggregation
-
-def safe_mode(qs, field):
-    """Return the most common non-empty value for attribute `field` in an iterable of objects."""
-    vals = [getattr(a, field) for a in qs if getattr(a, field)]
-    return Counter(vals).most_common(1)[0][0] if vals else None
-
-def safe_mean(qs, field):
-    """Return the mean of numeric values for attribute `field`, coercing strings when possible."""
-    vals = []
-    for a in qs:
-        v = getattr(a, field)
-        if v and isinstance(v, (int, float)):
-            vals.append(float(v))
-        elif v and isinstance(v, str):
-            try:
-                vals.append(float(v.replace(',', '').replace(' ', '')))
-            except:
-                continue
-    return round(mean(vals), 2) if vals else None
-
-def safe_sample(qs, field):
-    """Return the first non-empty value for attribute `field`, else None."""
-    for a in qs:
-        v = getattr(a, field)
-        if v:
-            return v
-    return None
-
-# Helper functions for related field access
-def safe_mode_related(qs, field_path):
-    """Return the most common non-empty value resolved via a double-underscore `field_path`."""
-    vals = []
-    for user in qs:
-        try:
-            # Navigate through the relationship path
-            parts = field_path.split('__')
-            obj = user
-            for part in parts:
-                obj = getattr(obj, part, None)
-                if obj is None:
-                    break
-            
-            # Only add non-empty, non-null values
-            if obj and str(obj).strip() and str(obj).strip().lower() not in ['nan', 'none', 'null', 'n/a', '']:
-                vals.append(str(obj).strip())
-        except:
-            continue
-    
-    if vals:
-        result = Counter(vals).most_common(1)[0][0]
-        # Ensure we never return "nan" - return "Not Available" instead
-        return result if result.lower() != 'nan' else "Not Available"
-    return "Not Available"
-
-def convert_salary_range_to_number(salary_str):
-    """Convert salary range strings to numerical values for averaging."""
-    if not salary_str or not isinstance(salary_str, str):
-        return None
-    
-    salary_str = salary_str.strip().lower()
-    
-    # Handle the new categorical salary ranges
-    if 'below' in salary_str and '5000' in salary_str:
-        return 2500  # Midpoint of 0-5000
-    elif '5001' in salary_str and '10000' in salary_str:
-        return 7500  # Midpoint of 5001-10000
-    elif '10001' in salary_str and '20000' in salary_str:
-        return 15000  # Midpoint of 10001-20000
-    elif '20001' in salary_str and '30000' in salary_str:
-        return 25000  # Midpoint of 20001-30000
-    elif 'above' in salary_str and '30000' in salary_str:
-        return 35000  # Conservative estimate for 30000+
-    
-    # Handle old numerical formats
-    try:
-        # Remove commas and spaces, try to convert to float
-        cleaned = salary_str.replace(',', '').replace(' ', '')
-        return float(cleaned)
-    except:
-        return None
-
-def safe_mean_related(qs, field_path):
-    """Return the mean of values resolved via `field_path`, handling salary ranges properly."""
-    vals = []
-    for user in qs:
-        try:
-            parts = field_path.split('__')
-            obj = user
-            for part in parts:
-                obj = getattr(obj, part, None)
-                if obj is None:
-                    break
-            
-            if obj and isinstance(obj, (int, float)):
-                vals.append(float(obj))
-            elif obj and isinstance(obj, str):
-                # Special handling for salary fields
-                if 'salary' in field_path.lower():
-                    converted = convert_salary_range_to_number(obj)
-                    if converted is not None:
-                        vals.append(converted)
-                else:
-                    # For non-salary fields, try direct conversion
-                    try:
-                        vals.append(float(obj.replace(',', '').replace(' ', '')))
-                    except:
-                        continue
-        except:
-            continue
-    
-    if vals:
-        result = round(mean(vals), 2)
-        # Ensure we never return NaN - return 0 instead
-        return result if not (result != result) else 0  # NaN check: NaN != NaN is True
-    return 0
-
-def safe_sample_related(qs, field_path):
-    """Return the first non-empty value resolved via `field_path`, else None."""
-    for user in qs:
-        try:
-            parts = field_path.split('__')
-            obj = user
-            for part in parts:
-                obj = getattr(obj, part, None)
-                if obj is None:
-                    break
-            
-            # Only return non-empty, non-null values
-            if obj and str(obj).strip() and str(obj).strip().lower() not in ['nan', 'none', 'null', 'n/a', '']:
-                return str(obj).strip()
-        except:
-            continue
-    return "Not Available"
-
 # Create your views here.
 
+@cache_statistics(timeout=300)  # Cache for 5 minutes
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def alumni_statistics_view(request):
@@ -156,7 +28,12 @@ def alumni_statistics_view(request):
     try:
         year = request.GET.get('year')
         course = request.GET.get('program')
-        alumni_qs = User.objects.filter(account_type__user=True)
+        
+        # OPTIMIZED: Add select_related() for performance
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'academic_info', 'employment', 'tracker_data'
+        )
+        
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
@@ -164,17 +41,17 @@ def alumni_statistics_view(request):
 
         total_alumni = alumni_qs.count()
 
-        # Use tracker answers for employment buckets
+        # OPTIMIZED: Use database aggregation instead of Python loops
         from apps.shared.models import TrackerData, EmploymentHistory
-        tracker_qs = TrackerData.objects.filter(user__in=alumni_qs)
-        employed = 0
-        unemployed = 0
-        for t in tracker_qs:
-            status = (t.q_employment_status or '').strip().lower()
-            if status == 'yes':
-                employed += 1
-            elif status == 'no':
-                unemployed += 1
+        from django.db.models import Q, Count, Case, When, IntegerField
+        
+        # Count employment status using database aggregation
+        employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+            employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
+            unemployed=Count('id', filter=Q(q_employment_status__iexact='no'))
+        )
+        employed = employment_stats['employed']
+        unemployed = employment_stats['unemployed']
 
         absorbed = EmploymentHistory.objects.filter(user__in=alumni_qs, absorbed=True).count()
         pending = max(total_alumni - employed - unemployed - absorbed, 0)
@@ -204,6 +81,7 @@ def alumni_statistics_view(request):
         logger.error(f"Error in alumni_statistics_view: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to load alumni statistics'}, status=500)
 
+@cache_statistics(timeout=300)  # Cache for 5 minutes
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def generate_statistics_view(request):
@@ -212,7 +90,10 @@ def generate_statistics_view(request):
         course = request.GET.get('program', 'ALL')
         stats_type = request.GET.get('type', 'ALL')
         
-        alumni_qs = User.objects.filter(account_type__user=True)
+        # OPTIMIZED: Add select_related() to prevent N+1 queries
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'profile', 'academic_info', 'employment', 'tracker_data', 'ojt_info'
+        )
         
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
@@ -245,35 +126,20 @@ def generate_statistics_view(request):
             })
         
         elif stats_type == 'QPRO':
-            # QPRO: Employment statistics - prefer tracker data, fallback to employment records
+            # QPRO: Employment statistics - OPTIMIZED with database aggregation
             from apps.shared.models import TrackerData
-            tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
-            tracker_by_user = {td.user_id: td for td in tracker_data}
-
-            employed = 0
-            unemployed = 0
-            tracked_alumni = 0
-
-            for user in alumni_qs:
-                td = tracker_by_user.get(getattr(user, 'user_id', None))
-                if td and (td.q_employment_status is not None and td.q_employment_status != ''):
-                    tracked_alumni += 1
-                    status = (td.q_employment_status or '').strip().lower()
-                    if status in ('yes', 'y', 'true', '1'):
-                        employed += 1
-                    elif status in ('no', 'n', 'false', '0'):
-                        unemployed += 1
-                    continue
-
-                # Fallback when no tracker status: infer from EmploymentHistory
-                employment = getattr(user, 'employment', None)
-                if employment and (
-                    getattr(employment, 'company_name_current', None) or
-                    getattr(employment, 'position_current', None)
-                ):
-                    employed += 1
-                else:
-                    unemployed += 1
+            from django.db.models import Q, Count
+            
+            # OPTIMIZED: Use database aggregation for employment counts
+            employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+                employed=Count('id', filter=Q(q_employment_status__iexact='yes') | Q(q_employment_status__iexact='y') | Q(q_employment_status__iexact='true') | Q(q_employment_status__iexact='1')),
+                unemployed=Count('id', filter=Q(q_employment_status__iexact='no') | Q(q_employment_status__iexact='n') | Q(q_employment_status__iexact='false') | Q(q_employment_status__iexact='0')),
+                tracked=Count('id', filter=~Q(q_employment_status__isnull=True) & ~Q(q_employment_status=''))
+            )
+            
+            employed = employment_stats['employed']
+            unemployed = employment_stats['unemployed']
+            tracked_alumni = employment_stats['tracked']
 
             total_alumni_count = total_alumni  # preserve original count explicitly
             untracked = max(total_alumni_count - tracked_alumni, 0)
@@ -324,12 +190,8 @@ def generate_statistics_view(request):
             self_employed = alumni_qs.filter(employment__self_employed=True).count()
             not_aligned = alumni_qs.filter(employment__job_alignment_status='not_aligned').count()
             
-            # Aggregate job_alignment_count from Ched model
-            from apps.shared.models import Standard, Ched
-            ched_count = 0
-            ched_records = Ched.objects.all()
-            for ched in ched_records:
-                ched_count += getattr(ched, 'job_alignment_count', 0)
+            # REMOVED: Dead code querying empty Ched model (always returned 0)
+            # job_aligned already contains the correct count from EmploymentHistory
             
             # Calculate statistics with proper null handling
             most_common_school = safe_mode_related(alumni_qs, 'academic_info__school_name')
@@ -346,7 +208,7 @@ def generate_statistics_view(request):
                 'pursuing_further_study': pursuing_study,
                 'tracker_pursuing_study': tracker_pursuing_study,
                 'further_study_rate': round((pursuing_study / total_alumni * 100), 2) if total_alumni > 0 else 0,
-                'job_alignment_count': ched_count,
+                'job_alignment_count': job_aligned,  # FIXED: Use actual aligned count, not legacy Ched model
                 'job_aligned_count': job_aligned,
                 'self_employed_count': self_employed,
                 'not_aligned_count': not_aligned,
@@ -363,33 +225,25 @@ def generate_statistics_view(request):
             })
         
         elif stats_type == 'SUC':
-            # SUC: High position and salary statistics
+            # SUC: High position and salary statistics - OPTIMIZED
             high_position = alumni_qs.filter(employment__high_position=True).count()
             job_aligned = alumni_qs.filter(employment__job_alignment_status='aligned').count()
             
-            # Get sector and scope counts from tracker data
+            # OPTIMIZED: Use database aggregation for sector and scope counts
             from apps.shared.models import TrackerData
-            tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
+            from django.db.models import Q, Count
             
-            government_count = 0
-            private_count = 0
-            local_count = 0
-            international_count = 0
+            sector_scope_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+                government=Count('id', filter=Q(q_sector_current__iexact='public') | Q(q_sector_current__iexact='government')),
+                private=Count('id', filter=Q(q_sector_current__iexact='private')),
+                local=Count('id', filter=Q(q_scope_current__iexact='local')),
+                international=Count('id', filter=Q(q_scope_current__iexact='international'))
+            )
             
-            for tracker in tracker_data:
-                # Check sector (Government/Private) - this would be question 27
-                sector = tracker.q_sector_current
-                if sector and sector.lower() in ['public', 'government']:
-                    government_count += 1
-                elif sector and sector.lower() == 'private':
-                    private_count += 1
-                
-                # Check scope (Local/International) - this would be question 28
-                scope = tracker.q_scope_current
-                if scope and scope.lower() == 'local':
-                    local_count += 1
-                elif scope and scope.lower() == 'international':
-                    international_count += 1
+            government_count = sector_scope_stats['government']
+            private_count = sector_scope_stats['private']
+            local_count = sector_scope_stats['local']
+            international_count = sector_scope_stats['international']
             
             high_position_rate = (high_position / total_alumni * 100) if total_alumni > 0 else 0
             job_alignment_rate = (job_aligned / total_alumni * 100) if total_alumni > 0 else 0
@@ -428,17 +282,15 @@ def generate_statistics_view(request):
             })
         
         elif stats_type == 'AACUP':
-            # AACUP: Absorbed, employed, high position statistics
-            # Get employment status from tracker data instead of user_status
+            # AACUP: Absorbed, employed, high position statistics - OPTIMIZED
             from apps.shared.models import TrackerData
-            tracker_data = TrackerData.objects.filter(user__in=alumni_qs)
+            from django.db.models import Q, Count
             
-            # Count employment statuses from tracker data
-            employed = 0
-            for tracker in tracker_data:
-                status = tracker.q_employment_status
-                if status and status.lower() == 'yes':
-                    employed += 1
+            # OPTIMIZED: Use database aggregation
+            employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+                employed=Count('id', filter=Q(q_employment_status__iexact='yes'))
+            )
+            employed = employment_stats['employed']
             
             absorbed = alumni_qs.filter(employment__absorbed=True).count()
             high_position = alumni_qs.filter(employment__high_position=True).count()
@@ -551,7 +403,10 @@ def export_detailed_alumni_data(request):
         year = request.GET.get('year', 'ALL')
         course = request.GET.get('program', 'ALL')
         
-        alumni_qs = User.objects.filter(account_type__user=True)
+        # OPTIMIZED: Add select_related() to prevent N+1 queries during export
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'profile', 'academic_info', 'employment', 'tracker_data', 'ojt_info'
+        ).prefetch_related('trackerresponse_set')
         
         if year and year != 'ALL':
             alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)

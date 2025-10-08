@@ -60,6 +60,7 @@ def get_csrf_token(request):
     return JsonResponse({'success': True, 'message': 'CSRF cookie set'})
 
 from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
 
 # Utility: build profile_pic URL with cache-busting when possible
@@ -295,7 +296,9 @@ def change_password_view(request):
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 
 @api_view(["POST"])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
+@csrf_exempt
 def import_alumni_view(request):
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
@@ -309,7 +312,7 @@ def import_alumni_view(request):
             return JsonResponse({'success': False, 'message': 'No file uploaded'}, status=400)
         file = request.FILES['file']
         batch_year = request.POST.get('batch_year', '')
-        course = request.POST.get('course', '')
+        course = request.POST.get('course', '') or request.POST.get('program', '')
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
         if not batch_year or not course:
@@ -452,13 +455,15 @@ def import_alumni_view(request):
                         print(f"DEBUG: Error parsing birthdate for {ctu_id}: {e}")
                 
                 try:
-                    from apps.shared.models import UserProfile, AcademicInfo
+                    from apps.shared.models import UserProfile, AcademicInfo, TrackerData
                     UserProfile.objects.create(**profile_kwargs)
                     AcademicInfo.objects.create(
                         user=user,
                         year_graduated=int(batch_year) if batch_year.isdigit() else None,
-                        course=course,
+                        program=course,  # Use 'program' field, not 'course'
                     )
+                    # Note: Don't create TrackerData records automatically
+                    # Alumni should remain "untracked" until they fill out tracker forms
                 except Exception as e:
                     print(f"DEBUG: Error creating profile/academic info for {ctu_id}: {e}")
                 
