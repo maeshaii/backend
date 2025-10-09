@@ -35,8 +35,9 @@ from collections import Counter
 from apps.shared.models import Question
 from django.core.mail import send_mail
 from django.utils import timezone
-from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework import status

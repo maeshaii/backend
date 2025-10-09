@@ -28,3 +28,5 @@ users_4t = User.objects.filter(
 print(f'\nUsers in section 4-T: {users_4t.count()}')
 for user in users_4t:
     print(f'{user.acc_username}: {user.f_name} {user.l_name}')
+
+
