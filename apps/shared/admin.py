@@ -38,8 +38,7 @@ from django.db.models import Count
 
 @admin.register(SimpleCompTechJob)
 class SimpleCompTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
+    list_display = ['job_title', 'usage_count']
     search_fields = ['job_title']
     ordering = ['job_title']
     
@@ -54,8 +53,7 @@ class SimpleCompTechJobAdmin(admin.ModelAdmin):
 
 @admin.register(SimpleInfoTechJob)
 class SimpleInfoTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
+    list_display = ['job_title', 'usage_count']
     search_fields = ['job_title']
     ordering = ['job_title']
     
@@ -70,8 +68,7 @@ class SimpleInfoTechJobAdmin(admin.ModelAdmin):
 
 @admin.register(SimpleInfoSystemJob)
 class SimpleInfoSystemJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
+    list_display = ['job_title', 'usage_count']
     search_fields = ['job_title']
     ordering = ['job_title']
     
