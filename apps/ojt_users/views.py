@@ -169,6 +169,10 @@ def update_ojt_status(request, user_id):
                 'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'
             }, status=400)
         
+        # Allow coordinators to set status to "Completed" before sending to admin
+        if new_status == 'Completed':
+            print(f"🔍 DEBUG: User {user.acc_username} setting status to Completed - allowing this change")
+        
         # Update OJTInfo status
         ojtinfo, _ = OJTInfo.objects.get_or_create(user=user)
         ojtinfo.ojtstatus = new_status

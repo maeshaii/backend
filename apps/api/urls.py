@@ -42,6 +42,7 @@ urlpatterns = [
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
+    path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
@@ -81,6 +82,7 @@ urlpatterns = [
     path('alumni/profile/delete/', delete_alumni_profile_pic, name='delete_alumni_profile_pic'),
     path('search/', search_alumni, name='search_alumni'),
     path('alumni/search/', views.search_alumni, name='search_alumni'),
+    path('search/recent/', views.recent_searches_view, name='recent_searches'),
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
     
     # Used by Mobile: Posts API endpoints
@@ -129,4 +131,3 @@ urlpatterns = [
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     
 ]
-

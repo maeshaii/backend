@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0083_add_missing_repost_fields'),
+        ('shared', '0082_fix_repost_constraint'),
     ]
 
     operations = [

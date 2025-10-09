@@ -319,6 +319,19 @@ class Repost(models.Model):
         ]
 
 
+class RecentSearch(models.Model):
+    """Per-user recent search entries for user discovery.
+    One row per searched user, deduped by (owner, searched_user).
+    """
+    id = models.AutoField(primary_key=True)
+    owner = models.ForeignKey('User', on_delete=models.CASCADE, related_name='recent_searches')
+    searched_user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='appears_in_recent_searches')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('owner', 'searched_user')
+        ordering = ['-created_at']
+
 # REMOVED: Standard and Suc models (deleted in migration 0091)
 # These were part of an overly complex statistics hierarchy that was never implemented
 
@@ -538,6 +551,10 @@ class EmploymentHistory(models.Model):
     salary_current = models.CharField(max_length=100, null=True, blank=True)
     date_started = models.DateField(null=True, blank=True)
     company_address = models.TextField(null=True, blank=True)
+    company_email = models.EmailField(null=True, blank=True)
+    company_contact = models.CharField(max_length=20, null=True, blank=True)
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    position = models.CharField(max_length=255, null=True, blank=True)
     
     # Employment status and alignment
     job_alignment_status = models.CharField(max_length=50, null=True, blank=True, default='not_aligned')
@@ -899,6 +916,8 @@ class OJTInfo(models.Model):
     ojt_end_date = models.DateField(null=True, blank=True)
     job_code = models.CharField(max_length=20, null=True, blank=True)
     ojtstatus = models.CharField(max_length=50, null=True, blank=True)
+    is_sent_to_admin = models.BooleanField(default=False)  # Track if sent to admin for approval
+    sent_to_admin_date = models.DateTimeField(null=True, blank=True)  # When it was sent
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -1152,6 +1171,7 @@ class OJTImport(models.Model):
     coordinator = models.CharField(max_length=100)  # Coordinator who imported
     batch_year = models.IntegerField()
     course = models.CharField(max_length=100)
+    section = models.CharField(max_length=50, blank=True, null=True)  # Section like 4-1, 4-A (optional)
     import_date = models.DateTimeField(auto_now_add=True)
     file_name = models.CharField(max_length=255)
     records_imported = models.IntegerField(default=0)
