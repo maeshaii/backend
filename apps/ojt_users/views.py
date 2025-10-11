@@ -219,7 +219,7 @@ def update_ojt_user(request, user_id):
                 updated_fields.append(f'profile.{field}')
 
         # Academic fields
-        for field in ['course', 'section', 'program', 'school_name', 'year_graduated']:
+        for field in ['section', 'program', 'school_name', 'year_graduated']:
             if field in data:
                 setattr(academic, field, data[field])
                 updated_fields.append(f'academic.{field}')

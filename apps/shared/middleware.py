@@ -312,3 +312,5 @@ class SecurityEnhancementMiddleware(MiddlewareMixin):
     def _add_security_headers(self, request):
         """Add security headers to request context"""
         request._security_headers_added = True
+
+

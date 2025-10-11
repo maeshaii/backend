@@ -4,30 +4,25 @@ from .models import *
 
 # Register your models here.
 admin.site.register(AccountType)
-# REMOVED: Legacy statistics models (unused, will be deleted)
-# admin.site.register(Aacup)
-# admin.site.register(Ched)
-# admin.site.register(Qpro)
-# admin.site.register(Standard)
-# admin.site.register(Suc)
-# REMOVED: Old circular FK job models (replaced by Simple* models)
-# admin.site.register(CompTechJob)
-# admin.site.register(InfoTechJob)
-# admin.site.register(InfoSystemJob)
-# REMOVED: Other unused models
-# admin.site.register(ExportedFile)
-# admin.site.register(Feed)
-# admin.site.register(HighPosition)
-# admin.site.register(Import)
-
-# Active models
+# admin.site.register(Aacup)  # Model not found
+# admin.site.register(Ched)  # Model not found
 admin.site.register(Comment)
+# admin.site.register(CompTechJob)  # Model not found
+# admin.site.register(ExportedFile)  # Model not found
+# admin.site.register(Feed)  # Model not found
 admin.site.register(Forum)
+# admin.site.register(HighPosition)  # Model not found
+# admin.site.register(Import)  # Model not found
+# admin.site.register(InfoTechJob)  # Model not found
+# admin.site.register(InfoSystemJob)  # Model not found
 admin.site.register(Like)
 admin.site.register(Notification)
 admin.site.register(Post)
+# admin.site.register(Qpro)  # Model not found
 admin.site.register(Repost)
-admin.site.register(TrackerForm)
+# admin.site.register(Standard)  # Model not found
+# admin.site.register(Suc)  # Model not found
+# admin.site.register(TrackerForm)  # Model not found
 admin.site.register(User)
 admin.site.register(QuestionCategory)
 admin.site.register(Question)

@@ -216,3 +216,5 @@ class Command(BaseCommand):
                 
                 for sample in samples:
                     self.stdout.write(f"  User: {sample.user.full_name} - Position: {sample.user.employment.position_current}")
+
+

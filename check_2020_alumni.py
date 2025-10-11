@@ -64,3 +64,7 @@ def check_2020_alumni():
 
 if __name__ == "__main__":
     check_2020_alumni()
+
+
+
+

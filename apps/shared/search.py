@@ -329,3 +329,5 @@ def get_search_filters():
 def get_search_analytics():
     """Get search analytics"""
     return search_engine.get_search_analytics()
+
+

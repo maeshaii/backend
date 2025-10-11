@@ -20,3 +20,5 @@ class Migration(migrations.Migration):
             field=models.CharField(blank=True, help_text='Original program of the graduate', max_length=50, null=True),
         ),
     ]
+
+
