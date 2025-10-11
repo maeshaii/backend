@@ -264,10 +264,10 @@ def change_password_view(request):
     # Enforce strong password via Django validators and custom rules
     try:
         validate_password(new_password)
-        # Additional custom rules (at least 10 chars, one upper, one lower, one digit, one symbol)
+        # Additional custom rules (at least 16 chars, one upper, one lower, one digit, one symbol)
         import re
-        if len(new_password) < 10:
-            raise DjangoValidationError('Password must be at least 10 characters long.')
+        if len(new_password) < 16:
+            raise DjangoValidationError('Password must be at least 16 characters long.')
         if not re.search(r"[A-Z]", new_password):
             raise DjangoValidationError('Password must contain an uppercase letter.')
         if not re.search(r"[a-z]", new_password):
@@ -275,7 +275,7 @@ def change_password_view(request):
         if not re.search(r"\d", new_password):
             raise DjangoValidationError('Password must contain a number.')
         if not re.search(r"[^A-Za-z0-9]", new_password):
-            raise DjangoValidationError('Password must contain a symbol.')
+            raise DjangoValidationError('Password must contain a special character.')
     except DjangoValidationError as e:
         message = '; '.join([str(m) for m in (e.messages if hasattr(e, 'messages') else [str(e)])])
         return JsonResponse({'success': False, 'message': message}, status=400)

@@ -301,7 +301,8 @@ def submit_tracker_response_view(request):
             return JsonResponse({'success': False, 'message': 'You have already submitted the tracker form'}, status=400)
         
         # Create the tracker response
-        tr = TrackerResponse.objects.create(user=user, answers=answers, submitted_at=timezone.now())
+        tr = TrackerResponse(user=user, answers=answers, submitted_at=timezone.now())
+        tr.save()  # This will trigger update_user_fields()
         
         # Handle file uploads
         uploaded_files = []

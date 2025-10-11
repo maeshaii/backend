@@ -9,8 +9,4 @@ urlpatterns = [
     
     # Job autocomplete endpoint
     path('job-autocomplete/', views.get_job_autocomplete_suggestions, name='get_job_autocomplete_suggestions'),
-    
-    # Phase 4: Advanced system endpoints
-    path('system-dashboard/', views.get_system_dashboard, name='get_system_dashboard'),
-    path('performance-analytics/', views.get_performance_analytics, name='get_performance_analytics'),
 ]

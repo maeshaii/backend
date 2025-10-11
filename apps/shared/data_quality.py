@@ -450,3 +450,5 @@ def run_data_quality_check():
 def get_data_quality_status():
     """Get current data quality status"""
     return data_quality_monitor.get_quality_dashboard()
+
+

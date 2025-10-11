@@ -4,113 +4,34 @@ from .models import *
 
 # Register your models here.
 admin.site.register(AccountType)
-# REMOVED: Legacy statistics models (unused, will be deleted)
-# admin.site.register(Aacup)
-# admin.site.register(Ched)
-# admin.site.register(Qpro)
-# admin.site.register(Standard)
-# admin.site.register(Suc)
-# REMOVED: Old circular FK job models (replaced by Simple* models)
-# admin.site.register(CompTechJob)
-# admin.site.register(InfoTechJob)
-# admin.site.register(InfoSystemJob)
-# REMOVED: Other unused models
-# admin.site.register(ExportedFile)
-# admin.site.register(Feed)
-# admin.site.register(HighPosition)
-# admin.site.register(Import)
-
-# Active models
+# admin.site.register(Aacup)  # Model not found
+# admin.site.register(Ched)  # Model not found
 admin.site.register(Comment)
+# admin.site.register(CompTechJob)  # Model not found
+# admin.site.register(ExportedFile)  # Model not found
+# admin.site.register(Feed)  # Model not found
 admin.site.register(Forum)
+# admin.site.register(HighPosition)  # Model not found
+# admin.site.register(Import)  # Model not found
+# admin.site.register(InfoTechJob)  # Model not found
+# admin.site.register(InfoSystemJob)  # Model not found
 admin.site.register(Like)
 admin.site.register(Notification)
 admin.site.register(Post)
+# admin.site.register(Qpro)  # Model not found
 admin.site.register(Repost)
-admin.site.register(TrackerForm)
+# admin.site.register(Standard)  # Model not found
+# admin.site.register(Suc)  # Model not found
+# admin.site.register(TrackerForm)  # Model not found
 admin.site.register(User)
 admin.site.register(QuestionCategory)
 admin.site.register(Question)
 admin.site.register(TrackerResponse)
 
-# PHASE 3: Enhanced admin interface for job title management
-from django.db.models import Count
-
-@admin.register(SimpleCompTechJob)
-class SimpleCompTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='comp_tech'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-@admin.register(SimpleInfoTechJob)
-class SimpleInfoTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='info_tech'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-@admin.register(SimpleInfoSystemJob)
-class SimpleInfoSystemJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count', 'created_at']
-    list_filter = ['created_at']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='info_system'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-# Enhanced EmploymentHistory admin with job alignment info
-@admin.register(EmploymentHistory)
-class EmploymentHistoryAdmin(admin.ModelAdmin):
-    list_display = ['user_name', 'position_current', 'job_alignment_status', 'job_alignment_title', 'company_name_current']
-    list_filter = ['job_alignment_status', 'job_alignment_category', 'absorbed']
-    search_fields = ['user__f_name', 'user__l_name', 'position_current', 'company_name_current']
-    readonly_fields = ['job_alignment_status', 'job_alignment_category', 'job_alignment_title']
-    
-    def user_name(self, obj):
-        return f"{obj.user.f_name} {obj.user.l_name}"
-    user_name.short_description = 'Alumni Name'
-    
-    actions = ['recalculate_job_alignment']
-    
-    def recalculate_job_alignment(self, request, queryset):
-        """Recalculate job alignment for selected employment records"""
-        updated_count = 0
-        for employment in queryset:
-            employment.update_job_alignment()
-            employment.save()
-            updated_count += 1
-        
-        self.message_user(
-            request,
-            f'Successfully recalculated job alignment for {updated_count} employment records.'
-        )
-    recalculate_job_alignment.short_description = 'Recalculate job alignment'
+# Register simple job models for easy viewing
+admin.site.register(SimpleInfoSystemJob)
+admin.site.register(SimpleInfoTechJob)
+admin.site.register(SimpleCompTechJob)
 
 # Custom filter for question types
 class QuestionTypeFilter(admin.SimpleListFilter):

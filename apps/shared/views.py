@@ -14,7 +14,7 @@ logger = logging.getLogger('apps.shared.views')
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([])  # No authentication required for job alignment confirmation
 def confirm_job_alignment(request):
     """
     Confirm or reject cross-program job alignment suggestion.
@@ -28,17 +28,23 @@ def confirm_job_alignment(request):
     try:
         employment_id = request.data.get('employment_id')
         confirmed = request.data.get('confirmed', False)
+        user_id = request.data.get('user_id')
         
         if employment_id is None:
             return Response({
                 'error': 'employment_id is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        if user_id is None:
+            return Response({
+                'error': 'user_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         # Get employment record
         employment = get_object_or_404(EmploymentHistory, id=employment_id)
         
         # Verify user owns this employment record
-        if employment.user != request.user:
+        if employment.user.user_id != user_id:
             return Response({
                 'error': 'Permission denied'
             }, status=status.HTTP_403_FORBIDDEN)
@@ -102,7 +108,7 @@ def get_job_alignment_suggestions(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([])  # No authentication required for job alignment check
 def check_job_alignment(request):
     """
     AUTOCOMPLETE-FIRST SYSTEM: Check job alignment after user input.
@@ -126,19 +132,23 @@ def check_job_alignment(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Get user
-        user = get_object_or_404(User, id=user_id)
+        user = get_object_or_404(User, user_id=user_id)
         
-        # Get user's employment record
-        employment = getattr(user, 'employment', None)
-        if not employment:
-            return Response({
-                'error': 'No employment record found'
-            }, status=status.HTTP_404_NOT_FOUND)
+        # Get or create user's employment record for job alignment checking
+        employment, created = EmploymentHistory.objects.get_or_create(user=user)
+        if created:
+            logger.info(f"Created temporary employment record for job alignment check (user {user_id})")
         
-        # Update position and check alignment
+        # Temporarily update position for alignment checking (don't save yet)
         employment.position_current = position
-        employment.update_job_alignment()
-        employment.save()
+        
+        # Get user's program for alignment checking
+        program = None
+        if hasattr(user, 'academic_info') and user.academic_info:
+            program = user.academic_info.program
+        
+        # Perform job alignment check without saving
+        alignment_result = employment._check_job_alignment_for_position(position, program)
         
         # Check if alignment needs confirmation
         needs_confirmation = employment.job_alignment_status == 'pending_user_confirmation'
@@ -192,7 +202,7 @@ def export_initial_passwords(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([])  # No authentication required for job suggestions
 def get_job_autocomplete_suggestions(request):
     """
     Get job title suggestions for autocomplete dropdown.
