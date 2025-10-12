@@ -56,6 +56,52 @@ class Comment(models.Model):
             )
         ]
 
+class Reply(models.Model):
+    """User replies to comments on posts, forums, donations, and reposts"""
+    reply_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='replies')
+    comment = models.ForeignKey('Comment', on_delete=models.CASCADE, related_name='replies')
+    reply_content = models.TextField()
+    date_created = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['date_created']
+        db_table = 'shared_reply'
+        indexes = [
+            models.Index(fields=['comment', 'date_created']),
+            models.Index(fields=['user', 'date_created']),
+        ]
+    
+    def __str__(self):
+        return f"Reply by {self.user.full_name} to comment {self.comment.comment_id}"
+
+class ContentImage(models.Model):
+    """Unified image model for posts, forums, and donations"""
+    CONTENT_TYPE_CHOICES = [
+        ('post', 'Post'),
+        ('forum', 'Forum'),
+        ('donation', 'Donation'),
+    ]
+    
+    image_id = models.AutoField(primary_key=True)
+    content_type = models.CharField(max_length=20, choices=CONTENT_TYPE_CHOICES)
+    content_id = models.PositiveIntegerField()  # ID of the post, forum, or donation
+    image = models.ImageField(upload_to='content_images/')
+    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['order', 'created_at']
+        db_table = 'shared_contentimage'
+        indexes = [
+            models.Index(fields=['content_type', 'content_id']),
+            models.Index(fields=['content_type', 'content_id', 'order']),
+        ]
+        unique_together = [['content_type', 'content_id', 'order']]
+    
+    def __str__(self):
+        return f"Image {self.image_id} for {self.content_type} {self.content_id}"
+
 # REMOVED: Old job models with circular FK relationships (deleted in migration 0091)
 # Replaced by SimpleCompTechJob, SimpleInfoTechJob, SimpleInfoSystemJob
 # - CompTechJob
@@ -71,13 +117,27 @@ class Forum(models.Model):
     """Forum posts stored separately from shared_post (identical structure).
 
     Used by Mobile: CRUD/like/comment/repost via /api/forum/... endpoints.
+    Images are handled by ContentImage model.
     """
     forum_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
-    image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
     content = models.TextField(null=True, blank=True)
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
+    
+    @property
+    def images(self):
+        """Get all images for this forum post"""
+        return ContentImage.objects.filter(content_type='forum', content_id=self.forum_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this forum post"""
+        return ContentImage.objects.create(
+            content_type='forum',
+            content_id=self.forum_id,
+            image=image_file,
+            order=order
+        )
 
 # REMOVED: Legacy models deleted in migration 0091
 # - HighPosition (functionality moved to EmploymentHistory.high_position boolean)
@@ -240,26 +300,27 @@ class PostImageDisabled(models.Model):
 class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
-    post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # Used by Mobile: feed list/create/edit/delete/like/comment/repost
+    # Images are handled by ContentImage model
+    
+    @property
+    def images(self):
+        """Get all images for this post"""
+        return ContentImage.objects.filter(content_type='post', content_id=self.post_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this post"""
+        return ContentImage.objects.create(
+            content_type='post',
+            content_id=self.post_id,
+            image=image_file,
+            order=order
+        )
 
-class PostImage(models.Model):
-    """Multiple images for posts"""
-    image_id = models.AutoField(primary_key=True)
-    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='post_images/')
-    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        ordering = ['order', 'created_at']
-        db_table = 'shared_postimage'
-    
-    def __str__(self):
-        return f"Image {self.image_id} for Post {self.post.post_id}"
+# PostImage model removed - replaced by ContentImage
 
 # REMOVED: Qpro model (deleted in migration 0091)
 
@@ -280,23 +341,24 @@ class DonationRequest(models.Model):
         ordering = ['-created_at']
         db_table = 'shared_donationrequest'
     
+    @property
+    def images(self):
+        """Get all images for this donation request"""
+        return ContentImage.objects.filter(content_type='donation', content_id=self.donation_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this donation request"""
+        return ContentImage.objects.create(
+            content_type='donation',
+            content_id=self.donation_id,
+            image=image_file,
+            order=order
+        )
+    
     def __str__(self):
         return f"Donation Request {self.donation_id} by {self.user.f_name} {self.user.l_name}"
 
-class DonationImage(models.Model):
-    """Multiple images for donation requests"""
-    image_id = models.AutoField(primary_key=True)
-    donation_request = models.ForeignKey(DonationRequest, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='donation_images/')
-    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        ordering = ['order', 'created_at']
-        db_table = 'shared_donationimage'
-    
-    def __str__(self):
-        return f"Image {self.image_id} for Donation Request {self.donation_request.donation_id}"
+# DonationImage model removed - replaced by ContentImage
 
 class Repost(models.Model):
     repost_id = models.AutoField(primary_key=True)

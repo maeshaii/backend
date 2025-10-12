@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0094_merge_20251009_1745'),
+        ('shared', '0094_add_question_required_field'),
     ]
 
     operations = [

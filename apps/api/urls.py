@@ -82,8 +82,9 @@ urlpatterns = [
     path('alumni/profile/delete/', delete_alumni_profile_pic, name='delete_alumni_profile_pic'),
     path('search/', search_alumni, name='search_alumni'),
     path('alumni/search/', views.search_alumni, name='search_alumni'),
-    path('search/recent/', views.recent_searches_view, name='recent_searches'),
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
+    path('following/mentions/', views.get_following_for_mentions, name='get_following_for_mentions'),
+    path('comments/<int:comment_id>/post/', views.get_post_from_comment, name='get_post_from_comment'),
     
     # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),
@@ -91,6 +92,12 @@ urlpatterns = [
     path('posts/<int:post_id>/like/', views.post_like_view, name='post_like'),
     path('posts/<int:post_id>/comments/', views.post_comments_view, name='post_comments'),
     path('posts/<int:post_id>/comments/<int:comment_id>/', views.comment_edit_view, name='comment_edit'),
+    # Reply API endpoints - Handle comment replies
+    path('comments/<int:comment_id>/replies/', views.comment_replies_view, name='comment_replies'),
+    path('comments/<int:comment_id>/replies/<int:reply_id>/', views.reply_edit_view, name='reply_edit'),
+    # Recent Search API endpoints
+    path('recent-searches/', views.recent_searches_view, name='recent_searches'),
+    path('recent-searches/<int:search_id>/', views.recent_search_delete_view, name='recent_search_delete'),
     path('posts/<int:post_id>/likes/', views.post_likes_view, name='post_likes'),
     # Used by Mobile: Repost interactions
     path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),

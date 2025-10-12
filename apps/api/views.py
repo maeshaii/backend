@@ -15,7 +15,8 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage, RecentSearch
+from django.db.models import *
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -61,6 +62,55 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
 
 # Utility: build profile_pic URL with cache-busting when possible
+def create_mention_notifications(content, commenter_user, post_id=None, comment_id=None, reply_id=None):
+    """Create notifications for users mentioned in content"""
+    import re
+    from apps.shared.models import Notification
+    
+    # Find all @mentions in the content
+    mention_pattern = r'@([^@\s]+)'
+    mentions = re.findall(mention_pattern, content)
+    
+    for mention in mentions:
+        try:
+            # Try to find the user by name
+            # Split the mention into parts (could be "John Doe" or "John")
+            mention_parts = mention.split()
+            
+            if len(mention_parts) == 1:
+                # Single name - search by first name or last name
+                user = User.objects.filter(
+                    Q(f_name__icontains=mention_parts[0]) | Q(l_name__icontains=mention_parts[0])
+                ).first()
+            else:
+                # Multiple names - search by first and last name
+                user = User.objects.filter(
+                    Q(f_name__icontains=mention_parts[0]) & Q(l_name__icontains=mention_parts[-1])
+                ).first()
+            
+            if user and user.user_id != commenter_user.user_id:
+                # Create notification for the mentioned user
+                notification_content = f"{commenter_user.full_name} mentioned you in a comment"
+                
+                # Add post/comment/reply ID for redirection
+                if reply_id:
+                    notification_content += f"<!--REPLY_ID:{reply_id}-->"
+                elif comment_id:
+                    notification_content += f"<!--COMMENT_ID:{comment_id}-->"
+                elif post_id:
+                    notification_content += f"<!--POST_ID:{post_id}-->"
+                
+                Notification.objects.create(
+                    user=user,
+                    notif_type='mention',
+                    subject='You were mentioned',
+                    notifi_content=notification_content,
+                    notif_date=timezone.now()
+                )
+        except Exception as e:
+            # Skip if user not found or other error
+            continue
+
 def build_profile_pic_url(user):
     try:
         # Use refactored profile model
@@ -77,7 +127,8 @@ def build_profile_pic_url(user):
             return url
     except Exception:
         pass
-    return None
+    # Return empty string instead of None for consistency
+    return ""
 
 # Utility: extract current user from Authorization header (Bearer/JWT) robustly
 def get_current_user_from_request(request):
@@ -458,7 +509,6 @@ def import_alumni_view(request):
                         user=user,
                         year_graduated=int(batch_year) if batch_year.isdigit() else None,
                         program=course,  # Use 'program' field, not 'course'
-                        section=section,  # Add section from form parameter
                     )
                     # Note: Don't create TrackerData records automatically
                     # Alumni should remain "untracked" until they fill out tracker forms
@@ -731,7 +781,7 @@ def users_list_view(request):
                     'id': u.user_id,
                     'name': f"{u.f_name} {u.m_name or ''} {u.l_name}".strip(),
                     'profile_pic': build_profile_pic_url(u),
-                    'batch': getattr(u.academic_info, 'year_graduated', None),
+                    'batch': getattr(u.academic_info, 'year_graduated', None) if u.academic_info else None,
                     'account_type': {
                         'admin': u.account_type.admin,
                         'peso': u.account_type.peso,
@@ -791,9 +841,9 @@ def import_ojt_view(request):
 
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
-
-        if not batch_year or not course or not coordinator_username or not section:
-            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, course: {bool(course)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
+#shaira
+        if not batch_year or not coordinator_username or not section:
+            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
 
         # Read Excel file
         try:
@@ -843,7 +893,7 @@ def import_ojt_view(request):
         import_record = OJTImport.objects.create(
             coordinator=coordinator_username,
             batch_year=normalized_year,
-            course=course,
+            course=course or 'Unknown',  # Provide default if empty
             section=section or '',  # Use section from form, or empty string if not provided
             file_name=file.name
         )
@@ -1800,7 +1850,7 @@ def approve_coordinator_request_view(request):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
-@api_view(["POST"])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_coordinator_sections_view(request):
     """Get sections that a coordinator has previously imported"""
@@ -2231,15 +2281,80 @@ def alumni_profile_view(request, user_id):
 
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_following_for_mentions(request):
+    """Get list of users that current user follows for @mentions"""
+    try:
+        current_user = get_current_user_from_request(request)
+        if not current_user:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+        
+        from apps.shared.models import Follow
+        following = Follow.objects.filter(follower=current_user).select_related('following')
+        
+        following_data = []
+        for follow_obj in following:
+            followed_user = follow_obj.following
+            following_data.append({
+                'user_id': followed_user.user_id,
+                'name': f"{followed_user.f_name} {followed_user.m_name or ''} {followed_user.l_name}".strip(),
+                'f_name': followed_user.f_name,
+                'm_name': followed_user.m_name,
+                'l_name': followed_user.l_name,
+                'profile_pic': build_profile_pic_url(followed_user),
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'following': following_data
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_post_from_comment(request, comment_id):
+    """Get the post ID from a comment ID for notification redirects"""
+    try:
+        comment = Comment.objects.select_related('post').get(comment_id=comment_id)
+        return JsonResponse({
+            'success': True,
+            'post_id': comment.post.post_id,
+            'post_type': 'post' if hasattr(comment, 'post') else 'repost' if hasattr(comment, 'repost') else 'forum'
+        })
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['GET'])
 def search_alumni(request):
     query = request.GET.get('q', '').strip()
     if not query:
         return JsonResponse({'results': []})
-    # Search by first, middle, or last name (case-insensitive)
-    users = User.objects.filter(
+    
+    # Split query into individual words for better matching
+    query_words = query.split()
+    
+    # Build Q objects for each word
+    q_objects = Q()
+    for word in query_words:
+        q_objects |= (
+            Q(f_name__icontains=word) |
+            Q(m_name__icontains=word) |
+            Q(l_name__icontains=word)
+        )
+    
+    # Also search for the full query as a single string
+    q_objects |= (
         Q(f_name__icontains=query) |
         Q(m_name__icontains=query) |
-        Q(l_name__icontains=query),
+        Q(l_name__icontains=query)
+    )
+    
+    # Search by first, middle, or last name (case-insensitive)
+    users = User.objects.filter(
+        q_objects,
         Q(account_type__user=True) | Q(account_type__admin=True) | Q(account_type__peso=True)
     )[:10]
     results = [
@@ -2361,13 +2476,15 @@ def post_detail_view(request, post_id):
 
             # Get multiple images for the post
             post_images = []
-            if hasattr(post, 'images'):
-                for img in post.images.all():
-                    post_images.append({
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    })
+            #shaira
+            # Use the new ContentImage model
+            content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+            for img in content_images:
+                post_images.append({
+                    'image_id': img.image_id,
+                    'image_url': img.image.url,
+                    'order': img.order
+                })
 
             post_data = {
                 'post_id': post.post_id,
@@ -2445,8 +2562,8 @@ def repost_detail_view(request, repost_id):
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
 
-    likes = []  # RepostLike model doesn't exist
-    comments = []  # RepostComment model doesn't exist
+    likes = Like.objects.filter(repost=repost).select_related('user')
+    comments = []  # Comments will be loaded separately
     data = {
         'repost_id': repost.repost_id,
         'caption': repost.caption,
@@ -2508,9 +2625,33 @@ def repost_like_view(request, repost_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
-
-    # RepostLike model doesn't exist, so like functionality is disabled
-    return JsonResponse({'success': False, 'message': 'Like functionality not available'})
+#shaira
+    user = request.user
+    
+    if request.method == "POST":
+        # Like the repost
+        like, created = Like.objects.get_or_create(user=user, repost=repost)
+        if created:
+            # Create notification for repost owner (only if the liker is not the repost owner)
+            if user.user_id != repost.user.user_id:
+                Notification.objects.create(
+                    user=repost.user,
+                    notif_type='like',
+                    subject='Repost Liked',
+                    notifi_content=f"{user.full_name} liked your repost<!--REPOST_ID:{repost.repost_id}-->",
+                    notif_date=timezone.now()
+                )
+            return JsonResponse({'success': True, 'message': 'Repost liked'})
+        else:
+            return JsonResponse({'success': False, 'message': 'Repost already liked'})
+    elif request.method == "DELETE":
+        # Unlike the repost
+        try:
+            like = Like.objects.get(user=user, repost=repost)
+            like.delete()
+            return JsonResponse({'success': True, 'message': 'Repost unliked'})
+        except Like.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'Repost not liked'})
 
 
 @api_view(["GET"]) 
@@ -2520,8 +2661,23 @@ def repost_likes_list_view(request, repost_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
-    # RepostLike model doesn't exist, so return empty likes list
-    return JsonResponse({'likes': []})
+#shaira    
+    # Get likes for this repost
+    likes = Like.objects.filter(repost=repost).select_related('user')
+    likes_data = []
+    for like in likes:
+        likes_data.append({
+            'like_id': like.like_id,
+            'user': {
+                'user_id': like.user.user_id,
+                'f_name': like.user.f_name,
+                'm_name': like.user.m_name,
+                'l_name': like.user.l_name,
+                'profile_pic': build_profile_pic_url(like.user),
+            },
+            'date_created': like.date_created.isoformat() if like.date_created else None
+        })
+    return JsonResponse({'likes': likes_data})
 
 
 @api_view(["GET", "POST"]) 
@@ -2531,17 +2687,58 @@ def repost_comments_view(request, repost_id):
         repost = Repost.objects.get(repost_id=repost_id)
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
+ #shaira   
     if request.method == 'GET':
-        # RepostComment model doesn't exist, so return empty comments list
-        return JsonResponse({'comments': []})
+        # Get comments for this repost
+        comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+        comments_data = []
+        for comment in comments:
+            comments_data.append({
+                'comment_id': comment.comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'm_name': comment.user.m_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': build_profile_pic_url(comment.user),
+                }
+            })
+        return JsonResponse({'comments': comments_data})
     else:
         try:
             payload = json.loads(request.body or '{}')
             content = (payload.get('comment_content') or '').strip()
             if not content:
                 return JsonResponse({'error': 'content required'}, status=400)
-            # RepostComment model doesn't exist, so comment creation is disabled
-            return JsonResponse({'error': 'Comment functionality not available'}, status=400)
+            
+            # Create comment
+            comment = Comment.objects.create(
+                repost=repost,
+                user=request.user,
+                comment_content=content,
+                date_created=timezone.now()
+            )
+            
+            # Create mention notifications
+            create_mention_notifications(
+                content,
+                request.user,
+                comment_id=comment.comment_id
+            )
+            
+            # Create notification for repost owner
+            if request.user.user_id != repost.user.user_id:
+                Notification.objects.create(
+                    user=repost.user,
+                    notif_type='comment',
+                    subject='Repost Commented',
+                    notifi_content=f"{request.user.full_name} commented on your repost<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notif_date=timezone.now()
+                )
+            
+            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
 
@@ -2634,17 +2831,12 @@ def post_edit_view(request, post_id):
 
         elif request.method == "DELETE":
             try:
-                # Delete main post image if it exists
-                if getattr(post, 'post_image', None):
-                    post.post_image.delete(save=False)
-
-                # Delete related images if they exist
-                images_rel = getattr(post, 'images', None)
-                if images_rel is not None:
-                    for img in list(images_rel.all()):
-                        if getattr(img, 'image', None):
-                            img.image.delete(save=False)
-                    images_rel.all().delete()
+                # Delete related images using ContentImage
+                content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+                for img in content_images:
+                    if getattr(img, 'image', None):
+                        img.image.delete(save=False)
+                content_images.delete()
 
                 # Finally delete the post itself
                 post.delete()
@@ -2711,10 +2903,14 @@ def post_comments_view(request, post_id):
             comments_data = []
 
             for comment in comments:
+                # Get reply count for this comment
+                reply_count = Reply.objects.filter(comment=comment).count()
+                
                 comments_data.append({
                     'comment_id': comment.comment_id,
                     'comment_content': comment.comment_content,
                     'date_created': comment.date_created.isoformat(),
+                    'replies_count': reply_count,
                     'user': {
                         'user_id': comment.user.user_id,
                         'f_name': comment.user.f_name,
@@ -2737,6 +2933,14 @@ def post_comments_view(request, post_id):
                 date_created=timezone.now()
             )
 
+            # Create mention notifications
+            create_mention_notifications(
+                data.get('comment_content', ''),
+                user,
+                post_id=post.post_id,
+                comment_id=comment.comment_id
+            )
+
             # Create notification for post owner
             if user.user_id != post.user.user_id:
                 Notification.objects.create(
@@ -2754,6 +2958,247 @@ def post_comments_view(request, post_id):
             })
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+# Reply API Views - Handle comment replies
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def comment_replies_view(request, comment_id):
+    """Handle replies to comments"""
+    try:
+        comment = Comment.objects.get(comment_id=comment_id)
+        
+        if request.method == "GET":
+            # Get replies for the comment
+            replies = Reply.objects.filter(comment=comment).select_related('user').order_by('date_created')
+            replies_data = []
+            
+            for reply in replies:
+                replies_data.append({
+                    'reply_id': reply.reply_id,
+                    'reply_content': reply.reply_content,
+                    'date_created': reply.date_created.isoformat(),
+                    'user': {
+                        'user_id': reply.user.user_id,
+                        'f_name': reply.user.f_name,
+                        'm_name': reply.user.m_name,
+                        'l_name': reply.user.l_name,
+                        'profile_pic': build_profile_pic_url(reply.user),
+                    }
+                })
+            
+            return JsonResponse({
+                'success': True,
+                'replies': replies_data
+            })
+            
+        elif request.method == "POST":
+            data = json.loads(request.body)
+            user = request.user
+            
+            # Create reply
+            reply = Reply.objects.create(
+                user=user,
+                comment=comment,
+                reply_content=data.get('reply_content', ''),
+                date_created=timezone.now()
+            )
+            
+            # Create mention notifications
+            create_mention_notifications(
+                data.get('reply_content', ''),
+                user,
+                post_id=comment.post.post_id if comment.post else None,
+                comment_id=comment.comment_id,
+                reply_id=reply.reply_id
+            )
+            
+            # Create notification for comment owner
+            if user.user_id != comment.user.user_id:
+                Notification.objects.create(
+                    user=comment.user,
+                    notif_type='reply',
+                    subject='Comment Replied',
+                    notifi_content=f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}-->",
+                    notif_date=timezone.now()
+                )
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Reply added',
+                'reply': {
+                    'reply_id': reply.reply_id,
+                    'reply_content': reply.reply_content,
+                    'date_created': reply.date_created.isoformat(),
+                    'user': {
+                        'user_id': reply.user.user_id,
+                        'f_name': reply.user.f_name,
+                        'm_name': reply.user.m_name,
+                        'l_name': reply.user.l_name,
+                        'profile_pic': build_profile_pic_url(reply.user),
+                    }
+                }
+            })
+            
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def reply_edit_view(request, comment_id, reply_id):
+    """Handle editing and deleting replies"""
+    try:
+        comment = Comment.objects.get(comment_id=comment_id)
+        reply = Reply.objects.get(reply_id=reply_id, comment=comment)
+        user = request.user
+        
+        # Check if user owns the reply
+        if reply.user.user_id != user.user_id:
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+        
+        if request.method == "PUT":
+            data = json.loads(request.body)
+            reply.reply_content = data.get('reply_content', reply.reply_content)
+            reply.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Reply updated',
+                'reply': {
+                    'reply_id': reply.reply_id,
+                    'reply_content': reply.reply_content,
+                    'date_created': reply.date_created.isoformat(),
+                    'user': {
+                        'user_id': reply.user.user_id,
+                        'f_name': reply.user.f_name,
+                        'm_name': reply.user.m_name,
+                        'l_name': reply.user.l_name,
+                        'profile_pic': build_profile_pic_url(reply.user),
+                    }
+                }
+            })
+            
+        elif request.method == "DELETE":
+            reply.delete()
+            return JsonResponse({
+                'success': True,
+                'message': 'Reply deleted'
+            })
+            
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Reply.DoesNotExist:
+        return JsonResponse({'error': 'Reply not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+# Recent Search API Views
+@api_view(['GET', 'POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def recent_searches_view(request):
+    """Handle recent searches with mobile optimization and enhanced error handling"""
+    try:
+        logger.info("recent_searches_view %s by user=%s", request.method, getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None))
+        user = request.user
+        
+        if request.method == "GET":
+            # Mobile-optimized: Fixed limit of 10 for better performance
+            recent_searches = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')[:10]
+            
+            searches_data = []
+            for search in recent_searches:
+                searched_user = search.searched_user
+                searches_data.append({
+                    'id': search.id,
+                    'searched_user': {
+                        'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                        'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                        'm_name': getattr(searched_user, 'm_name', ''),
+                        'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                        'profile_pic': build_profile_pic_url(searched_user),
+                    },
+                    'created_at': search.created_at.isoformat()
+                })
+            
+            logger.info("recent_searches_view GET returning %s rows", len(searches_data))
+            return JsonResponse({
+                'success': True,
+                'recent_searches': searches_data,
+                'count': len(searches_data)
+            })
+            
+        elif request.method == "POST":
+            try:
+                data = json.loads(request.body or '{}')
+            except json.JSONDecodeError:
+                return JsonResponse({'success': False, 'error': 'Invalid JSON'}, status=400)
+                
+            searched_user_id = data.get('searched_user_id')
+            
+            # Enhanced input validation
+            if not isinstance(searched_user_id, int):
+                return JsonResponse({'success': False, 'error': 'searched_user_id must be an integer'}, status=400)
+            
+            # Handle self-search edge case (mobile-friendly)
+            current_user_id = getattr(user, 'user_id', getattr(user, 'id', None))
+            if searched_user_id == current_user_id:
+                return JsonResponse({'success': True, 'message': 'Self-search ignored'})
+            
+            try:
+                searched_user = User.objects.get(user_id=searched_user_id)
+            except User.DoesNotExist:
+                return JsonResponse({'success': False, 'error': 'User not found'}, status=404)
+            
+            # Mobile optimization: Delete existing entry first to maintain order
+            RecentSearch.objects.filter(owner=user, searched_user=searched_user).delete()
+            RecentSearch.objects.create(owner=user, searched_user=searched_user)
+            
+            logger.info("recent_searches_view POST created owner=%s searched_user=%s", 
+                       getattr(user, 'user_id', None) or getattr(user, 'id', None), 
+                       getattr(searched_user, 'user_id', None) or getattr(searched_user, 'id', None))
+            
+            # Mobile-friendly: Limit total searches to prevent bloat
+            total_searches = RecentSearch.objects.filter(owner=user).count()
+            if total_searches > 10:
+                # Keep only the 10 most recent
+                old_searches = RecentSearch.objects.filter(owner=user).order_by('-created_at')[10:]
+                RecentSearch.objects.filter(id__in=[s.id for s in old_searches]).delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Recent search saved'
+            })
+            
+        elif request.method == "DELETE":
+            # Clear all recent searches (mobile-friendly)
+            RecentSearch.objects.filter(owner=user).delete()
+            logger.info("recent_searches_view DELETE cleared all searches for user=%s", 
+                       getattr(user, 'user_id', None) or getattr(user, 'id', None))
+            return JsonResponse({'success': True, 'message': 'All recent searches cleared'})
+            
+    except Exception as e:
+        logger.error(f"recent_searches_view error: {e}")
+        return JsonResponse({'success': False, 'error': 'Server error'}, status=500)
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def recent_search_delete_view(request, search_id):
+    """Delete a specific recent search"""
+    try:
+        user = request.user
+        recent_search = RecentSearch.objects.get(id=search_id, owner=user)
+        recent_search.delete()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Recent search deleted'
+        })
+        
+    except RecentSearch.DoesNotExist:
+        return JsonResponse({'error': 'Recent search not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
@@ -3396,17 +3841,23 @@ def forum_comments_view(request, forum_id):
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'GET':
             comments = Comment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
-            data = [{
-                'comment_id': c.comment_id,
-                'comment_content': c.comment_content,
-                'date_created': c.date_created.isoformat() if c.date_created else None,
-                'user': {
-                    'user_id': c.user.user_id,
-                    'f_name': c.user.f_name,
-                    'l_name': c.user.l_name,
-                    'profile_pic': build_profile_pic_url(c.user),
-                }
-            } for c in comments]
+            #shaira
+            data = []
+            for c in comments:
+                # Get reply count for this comment
+                reply_count = Reply.objects.filter(comment=c).count()
+                data.append({
+                    'comment_id': c.comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat() if c.date_created else None,
+                    'replies_count': reply_count,
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                })
             return JsonResponse({'comments': data})
         else:
             payload = json.loads(request.body or "{}")
@@ -3417,6 +3868,14 @@ def forum_comments_view(request, forum_id):
                 comment_content=content,
                 date_created=timezone.now()
             )
+            
+            # Create mention notifications
+            create_mention_notifications(
+                content,
+                request.user,
+                comment_id=comment.comment_id
+            )
+            
             if request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
                     user=forum.user,
@@ -3727,7 +4186,6 @@ def posts_view(request):
 
             # --- HANDLE MULTIPLE IMAGES ---
             import sys
-            from apps.shared.models import PostImage
             
             try:
                 # Handle single image (backward compatibility)
@@ -3740,8 +4198,15 @@ def posts_view(request):
                             ext = format.split('/')[-1]
                             img_data = base64.b64decode(imgstr)
                             file_name = f"{uuid.uuid4()}.{ext}"
-                            new_post.post_image.save(file_name, ContentFile(img_data), save=True)
-                            print(f'Saved single image: {new_post.post_image.url}', file=sys.stderr)
+                            
+                            # Create ContentImage instance for post
+                            post_image = ContentImage.objects.create(
+                                content_type='post',
+                                content_id=new_post.post_id,
+                                order=0
+                            )
+                            post_image.image.save(file_name, ContentFile(img_data), save=True)
+                            print(f'Saved single image: {post_image.image.url}', file=sys.stderr)
                         except Exception as img_exc:
                             print(f'Error saving single image: {img_exc}', file=sys.stderr)
                 
@@ -3757,9 +4222,10 @@ def posts_view(request):
                                 img_data = base64.b64decode(imgstr)
                                 file_name = f"{uuid.uuid4()}.{ext}"
                                 
-                                # Create PostImage instance
-                                post_image = PostImage.objects.create(
-                                    post=new_post,
+                                # Create ContentImage instance for post
+                                post_image = ContentImage.objects.create(
+                                    content_type='post',
+                                    content_id=new_post.post_id,
                                     order=index
                                 )
                                 post_image.image.save(file_name, ContentFile(img_data), save=True)
@@ -3775,13 +4241,14 @@ def posts_view(request):
 
             # Get multiple images for response
             post_images = []
-            if hasattr(new_post, 'images'):
-                for img in new_post.images.all():
-                    post_images.append({
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    })
+            # Use the new ContentImage model
+            content_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id)
+            for img in content_images:
+                post_images.append({
+                    'image_id': img.image_id,
+                    'image_url': img.image.url,
+                    'order': img.order
+                })
             
             return JsonResponse({
                 'success': True,
@@ -3896,14 +4363,16 @@ def posts_view(request):
                 # Add each repost as a separate feed item
                 reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
-                    # Get repost likes count and data (RepostLike model doesn't exist)
-                    repost_likes_count = 0
+                    # Get repost likes count and data
+                    repost_likes = Like.objects.filter(repost=repost)
+                    repost_likes_count = repost_likes.count()
                     repost_likes_data = []
 
-                    # Get repost comments count and data (RepostComment model doesn't exist)
-                    repost_comments_count = 0
+                    # Get repost comments count and data
+                    repost_comments = Comment.objects.filter(repost=repost)
+                    repost_comments_count = repost_comments.count()
                     repost_comments_data = []
-                    # RepostComment model doesn't exist, so no comments to process
+                    # Comments will be loaded separately
 
                     feed_items.append({
                         'repost_id': repost.repost_id,
@@ -4273,8 +4742,8 @@ def donation_requests_view(request):
     """Handle donation request listing and creation"""
     if request.method == 'GET':
         try:
-            # Get all donation requests with user info and images
-            donations = DonationRequest.objects.select_related('user').prefetch_related('images').all()
+            # Get all donation requests with user info
+            donations = DonationRequest.objects.select_related('user').all()
             logger.info(f"Found {donations.count()} donation requests in database")
             
             donation_data = []
@@ -4306,7 +4775,7 @@ def donation_requests_view(request):
                             'image_id': img.image_id,
                             'image_url': img.image.url,
                             'order': img.order
-                        } for img in donation.images.all()
+                        } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
                     ],
                     'likes_count': likes.count(),
                     'comments_count': comments.count(),
@@ -4429,8 +4898,9 @@ def donation_requests_view(request):
                             filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
                             
                             # Save the image
-                            donation_image = DonationImage.objects.create(
-                                donation_request=donation,
+                            donation_image = ContentImage.objects.create(
+                                content_type='donation',
+                                content_id=donation.donation_id,
                                 order=index
                             )
                             donation_image.image.save(filename, ContentFile(imgdata), save=True)
@@ -4466,7 +4936,7 @@ def donation_requests_view(request):
                         'image_id': img.image_id,
                         'image_url': img.image.url,
                         'order': img.order
-                    } for img in donation.images.all()
+                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
                 ],
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
@@ -4538,11 +5008,15 @@ def donation_comments_view(request, donation_id):
             # Get all comments for this donation
             comments = Comment.objects.filter(donation_request=donation).select_related('user')
             
-            comments_data = [
-                {
+            comments_data = []
+            for comment in comments:
+                # Get reply count for this comment
+                reply_count = Reply.objects.filter(comment=comment).count()
+                comments_data.append({
                     'comment_id': comment.comment_id,
                     'comment_content': comment.comment_content,
                     'date_created': comment.date_created.isoformat(),
+                    'replies_count': reply_count,
                     'user': {
                         'user_id': comment.user.user_id,
                         'f_name': comment.user.f_name,
@@ -4550,8 +5024,7 @@ def donation_comments_view(request, donation_id):
                         'l_name': comment.user.l_name,
                         'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
                     }
-                } for comment in comments
-            ]
+                })
             
             return JsonResponse({
                 'success': True,
@@ -4571,6 +5044,13 @@ def donation_comments_view(request, donation_id):
                 user=request.user,
                 comment_content=comment_content,
                 date_created=timezone.now()
+            )
+            
+            # Create mention notifications
+            create_mention_notifications(
+                comment_content,
+                request.user,
+                comment_id=comment.comment_id
             )
             
             # Return the full comment data
@@ -4714,7 +5194,7 @@ def donation_detail_edit_view(request, donation_id):
                         'image_id': img.image_id,
                         'image_url': img.image.url,
                         'order': img.order
-                    } for img in donation.images.all()
+                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
                 ],
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
@@ -4826,71 +5306,3 @@ def donation_detail_edit_view(request, donation_id):
         logger.error(f"Error in donation detail/edit/delete: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
 
-@api_view(['GET', 'POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def recent_searches_view(request):
-    """Manage per-user recent searches.
-    GET: list up to ?limit=10
-    POST: { searched_user_id }
-    DELETE: clear all
-    """
-    try:
-        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
-        if request.method == 'GET':
-            limit = int(request.GET.get('limit', '10'))
-            qs = (RecentSearch.objects
-                  .filter(owner=request.user)
-                  .select_related('searched_user')
-                  .order_by('-created_at')[:max(1, min(limit, 50))])
-            logger.info("recent_searches_view GET returning %s rows", qs.count())
-            results = []
-            for rs in qs:
-                u = rs.searched_user
-                results.append({
-                    'user_id': getattr(u, 'id', getattr(u, 'user_id', None)),
-                    'f_name': getattr(u, 'f_name', '') or getattr(u, 'first_name', ''),
-                    'l_name': getattr(u, 'l_name', '') or getattr(u, 'last_name', ''),
-                    'profile_pic': getattr(u, 'profile_pic', None),
-                    'created_at': rs.created_at.isoformat(),
-                })
-            return JsonResponse({ 'recent': results })
-
-        if request.method == 'POST':
-            try:
-                body = json.loads(request.body or '{}')
-            except Exception:
-                body = {}
-            target_id = body.get('searched_user_id')
-            if not isinstance(target_id, int):
-                return JsonResponse({ 'success': False, 'message': 'searched_user_id is required' }, status=400)
-            if target_id == getattr(request.user, 'id', getattr(request.user, 'user_id', None)):
-                return JsonResponse({ 'success': True })
-            # Use primary key lookup; our User model uses user_id as PK
-            logger.info("recent_searches_view POST target_id=%s", target_id)
-            target = get_object_or_404(User, pk=target_id)
-            RecentSearch.objects.filter(owner=request.user, searched_user=target).delete()
-            RecentSearch.objects.create(owner=request.user, searched_user=target)
-            logger.info("recent_searches_view POST created owner=%s searched_user=%s", getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None), getattr(target, 'user_id', None) or getattr(target, 'id', None))
-
-            # Diagnostics: log DB connection and counts to ensure we're writing to the expected database
-            try:
-                from django.db import connection
-                settings_dict = getattr(connection, 'settings_dict', {})
-                db_name = settings_dict.get('NAME')
-                db_host = settings_dict.get('HOST')
-                db_port = settings_dict.get('PORT')
-                owner_count = RecentSearch.objects.filter(owner=request.user).count()
-                logger.info("recent_searches_view DB: name=%s host=%s port=%s owner_recent_count=%s", db_name, db_host, db_port, owner_count)
-            except Exception as diag_e:
-                logger.warning("recent_searches_view diagnostics failed: %s", diag_e)
-            return JsonResponse({ 'success': True })
-
-        if request.method == 'DELETE':
-            RecentSearch.objects.filter(owner=request.user).delete()
-            return JsonResponse({ 'success': True })
-
-        return JsonResponse({ 'success': False, 'message': 'Method not allowed' }, status=405)
-    except Exception as e:
-        logger.error(f"recent_searches_view error: {e}")
-        return JsonResponse({ 'success': False, 'message': 'Server error' }, status=500)
