@@ -85,6 +85,7 @@ urlpatterns = [
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
     path('following/mentions/', views.get_following_for_mentions, name='get_following_for_mentions'),
     path('comments/<int:comment_id>/post/', views.get_post_from_comment, name='get_post_from_comment'),
+    path('replies/<int:reply_id>/comment/', views.get_comment_from_reply, name='get_comment_from_reply'),
     
     # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),

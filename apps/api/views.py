@@ -661,6 +661,7 @@ def notifications_view(request):
         )
     notif_list = []
     import re
+    print(f"🔔 DEBUG: Fetching notifications for user {user_id}, found {notifications.count()} notifications")
     for n in notifications:
         entry = {
             'id': n.notification_id,
@@ -670,6 +671,7 @@ def notifications_view(request):
             'date': n.notif_date.strftime('%Y-%m-%d %H:%M:%S'),
             'is_read': getattr(n, 'is_read', False),
         }
+        print(f"🔔 DEBUG: Notification {n.notification_id}: {n.notif_type} - {n.notifi_content}")
         # Extract follower profile link if present (e.g., /alumni/profile/<id>)
         try:
             match = re.search(r"/alumni/profile/(\d+)", n.notifi_content or '')
@@ -2316,14 +2318,55 @@ def get_following_for_mentions(request):
 def get_post_from_comment(request, comment_id):
     """Get the post ID from a comment ID for notification redirects"""
     try:
-        comment = Comment.objects.select_related('post').get(comment_id=comment_id)
-        return JsonResponse({
-            'success': True,
-            'post_id': comment.post.post_id,
-            'post_type': 'post' if hasattr(comment, 'post') else 'repost' if hasattr(comment, 'repost') else 'forum'
-        })
+        comment = Comment.objects.select_related('post', 'forum', 'repost', 'donation_request').get(comment_id=comment_id)
+        
+        # Determine the type of content and get the appropriate ID
+        if comment.post:
+            return JsonResponse({
+                'success': True,
+                'post_id': comment.post.post_id,
+                'post_type': 'post'
+            })
+        elif comment.forum:
+            return JsonResponse({
+                'success': True,
+                'post_id': comment.forum.forum_id,
+                'post_type': 'forum'
+            })
+        elif comment.repost:
+            return JsonResponse({
+                'success': True,
+                'post_id': comment.repost.repost_id,
+                'post_type': 'repost'
+            })
+        elif comment.donation_request:
+            return JsonResponse({
+                'success': True,
+                'post_id': comment.donation_request.donation_id,
+                'post_type': 'donation'
+            })
+        else:
+            return JsonResponse({'error': 'Comment has no associated content'}, status=400)
+            
     except Comment.DoesNotExist:
         return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_comment_from_reply(request, reply_id):
+    """Get the comment ID from a reply ID for notification redirects"""
+    try:
+        reply = Reply.objects.select_related('comment').get(reply_id=reply_id)
+        
+        return JsonResponse({
+            'success': True,
+            'comment_id': reply.comment.comment_id
+        })
+            
+    except Reply.DoesNotExist:
+        return JsonResponse({'error': 'Reply not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
@@ -2421,9 +2464,48 @@ def post_detail_view(request, post_id):
             reposts = Repost.objects.filter(post=post).select_related('user')
             repost_data = []
             for repost in reposts:
+                # Get repost likes count and data
+                repost_likes = Like.objects.filter(repost=repost).select_related('user')
+                repost_likes_count = repost_likes.count()
+                repost_likes_data = []
+                for like in repost_likes:
+                    repost_likes_data.append({
+                        'like_id': like.like_id,
+                        'user': {
+                            'user_id': like.user.user_id,
+                            'f_name': like.user.f_name,
+                            'm_name': like.user.m_name,
+                            'l_name': like.user.l_name,
+                            'profile_pic': build_profile_pic_url(like.user),
+                        }
+                    })
+
+                # Get repost comments count and data
+                repost_comments = Comment.objects.filter(repost=repost).select_related('user').order_by('-date_created')
+                repost_comments_count = repost_comments.count()
+                repost_comments_data = []
+                for comment in repost_comments:
+                    repost_comments_data.append({
+                        'comment_id': comment.comment_id,
+                        'comment_content': comment.comment_content,
+                        'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                        'user': {
+                            'user_id': comment.user.user_id,
+                            'f_name': comment.user.f_name,
+                            'm_name': comment.user.m_name,
+                            'l_name': comment.user.l_name,
+                            'profile_pic': build_profile_pic_url(comment.user),
+                        }
+                    })
+
                 repost_data.append({
                     'repost_id': repost.repost_id,
                     'repost_date': repost.repost_date.isoformat(),
+                    'repost_caption': repost.caption,
+                    'likes_count': repost_likes_count,
+                    'comments_count': repost_comments_count,
+                    'likes': repost_likes_data,
+                    'comments': repost_comments_data,
                     'user': {
                         'user_id': repost.user.user_id,
                         'f_name': repost.user.f_name,
@@ -2556,14 +2638,84 @@ def post_likes_view(request, post_id):
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def repost_detail_view(request, repost_id):
-    """Used by Mobile – return repost with its own likes/comments and original post summary."""
+    """Used by Mobile – return repost with its own likes/comments and original content summary."""
+    print(f"🔍 DEBUG: repost_detail_view called with repost_id={repost_id}")
     try:
-        repost = Repost.objects.select_related('post', 'user', 'post__user').get(repost_id=repost_id)
+        repost = Repost.objects.select_related('post', 'user', 'post__user', 'forum', 'donation_request').get(repost_id=repost_id)
+        print(f"🔍 DEBUG: Found repost {repost_id}: user={repost.user.user_id}, post={repost.post.post_id if repost.post else None}, donation={repost.donation_request.donation_id if repost.donation_request else None}")
     except Repost.DoesNotExist:
+        print(f"❌ DEBUG: Repost {repost_id} not found")
         return JsonResponse({'error': 'Repost not found'}, status=404)
+    except Exception as e:
+        print(f"❌ DEBUG: Error fetching repost {repost_id}: {str(e)}")
+        return JsonResponse({'error': f'Error fetching repost: {str(e)}'}, status=500)
 
     likes = Like.objects.filter(repost=repost).select_related('user')
-    comments = []  # Comments will be loaded separately
+    comments = Comment.objects.filter(repost=repost).select_related('user')
+    
+    # Build original content data based on repost type
+    original_data = None
+    if repost.post:
+        # Post repost
+        original_data = {
+            'type': 'post',
+            'post_id': repost.post.post_id,
+            'user': {
+                'user_id': repost.post.user.user_id,
+                'f_name': repost.post.user.f_name,
+                'l_name': repost.post.user.l_name,
+                'profile_pic': build_profile_pic_url(repost.post.user),
+            },
+            'content': repost.post.post_content,
+            'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
+            'post_images': [{
+                'image_id': img.image_id,
+                'image_url': img.image_url,
+                'order': img.order
+            } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
+            'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
+        }
+    elif repost.forum:
+        # Forum repost
+        original_data = {
+            'type': 'forum',
+            'forum_id': repost.forum.forum_id,
+            'user': {
+                'user_id': repost.forum.user.user_id,
+                'f_name': repost.forum.user.f_name,
+                'l_name': repost.forum.user.l_name,
+                'profile_pic': build_profile_pic_url(repost.forum.user),
+            },
+            'content': repost.forum.content,
+            'forum_type': repost.forum.type,
+            'images': [{
+                'image_id': img.image_id,
+                'image_url': img.image_url,
+                'order': img.order
+            } for img in repost.forum.images.all()],
+            'created_at': repost.forum.created_at.isoformat() if hasattr(repost.forum, 'created_at') else None,
+        }
+    elif repost.donation_request:
+        # Donation repost
+        original_data = {
+            'type': 'donation',
+            'donation_id': repost.donation_request.donation_id,
+            'user': {
+                'user_id': repost.donation_request.user.user_id,
+                'f_name': repost.donation_request.user.f_name,
+                'l_name': repost.donation_request.user.l_name,
+                'profile_pic': build_profile_pic_url(repost.donation_request.user),
+            },
+            'content': repost.donation_request.description,
+            'status': repost.donation_request.status,
+            'images': [{
+                'image_id': img.image_id,
+                'image_url': img.image_url,
+                'order': img.order
+            } for img in repost.donation_request.images.all()],
+            'created_at': repost.donation_request.created_at.isoformat() if hasattr(repost.donation_request, 'created_at') else None,
+        }
+    
     data = {
         'repost_id': repost.repost_id,
         'caption': repost.caption,
@@ -2597,23 +2749,7 @@ def repost_detail_view(request, repost_id):
                 'profile_pic': build_profile_pic_url(c.user),
             }
         } for c in comments],
-        'original': {
-            'post_id': repost.post.post_id,
-            'user': {
-                'user_id': repost.post.user.user_id,
-                'f_name': repost.post.user.f_name,
-                'l_name': repost.post.user.l_name,
-                'profile_pic': build_profile_pic_url(repost.post.user),
-            },
-            'post_content': repost.post.post_content,
-            'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
-            'post_images': [{
-                'image_id': img.image_id,
-                'image_url': img.image_url,
-                'order': img.order
-            } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
-            'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
-        }
+        'original': original_data
     }
     return JsonResponse(data)
 
@@ -2622,28 +2758,75 @@ def repost_detail_view(request, repost_id):
 @permission_classes([IsAuthenticated])
 def repost_like_view(request, repost_id):
     try:
-        repost = Repost.objects.get(repost_id=repost_id)
+        repost = Repost.objects.select_related('user', 'post', 'donation_request', 'forum').get(repost_id=repost_id)
+        print(f"🔍 DEBUG: Found repost {repost_id}: user={repost.user.user_id}, post={repost.post.post_id if repost.post else None}, donation={repost.donation_request.donation_id if repost.donation_request else None}")
     except Repost.DoesNotExist:
+        print(f"❌ DEBUG: Repost {repost_id} not found")
         return JsonResponse({'error': 'Repost not found'}, status=404)
-#shaira
+    except Exception as e:
+        print(f"❌ DEBUG: Error fetching repost {repost_id}: {str(e)}")
+        return JsonResponse({'error': f'Error fetching repost: {str(e)}'}, status=500)
+    
     user = request.user
+    print(f"🔍 DEBUG: User {user.user_id} trying to like repost {repost_id}")
     
     if request.method == "POST":
-        # Like the repost
-        like, created = Like.objects.get_or_create(user=user, repost=repost)
-        if created:
-            # Create notification for repost owner (only if the liker is not the repost owner)
-            if user.user_id != repost.user.user_id:
-                Notification.objects.create(
-                    user=repost.user,
-                    notif_type='like',
-                    subject='Repost Liked',
-                    notifi_content=f"{user.full_name} liked your repost<!--REPOST_ID:{repost.repost_id}-->",
-                    notif_date=timezone.now()
-                )
-            return JsonResponse({'success': True, 'message': 'Repost liked'})
-        else:
-            return JsonResponse({'success': False, 'message': 'Repost already liked'})
+        try:
+            # Like the repost
+            like, created = Like.objects.get_or_create(
+                user=user, 
+                repost=repost,
+                defaults={
+                    'post': None,
+                    'forum': None,
+                    'donation_request': None
+                }
+            )
+            print(f"🔍 DEBUG: Like created={created}, like_id={like.like_id if like else None}")
+            
+            if created:
+                # Create notification for repost owner (only if the liker is not the repost owner)
+                if user.user_id != repost.user.user_id:
+                    # Determine repost type
+                    if repost.donation_request:
+                        repost_type = "donation repost"
+                    elif repost.forum:
+                        repost_type = "forum repost"
+                    else:
+                        repost_type = "repost"
+                    
+                    print(f"🔍 DEBUG: Creating notification for user {repost.user.user_id}, repost_type={repost_type}")
+                    
+                    # Build notification content with appropriate ID based on repost type
+                    if repost.post:
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                    elif repost.forum:
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                    elif repost.donation_request:
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                    else:
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--REPOST_ID:{repost.repost_id}-->"
+                    
+                    notification = Notification.objects.create(
+                        user=repost.user,
+                        notif_type='like',
+                        subject='Repost Liked',
+                        notifi_content=notif_content,
+                        notif_date=timezone.now()
+                    )
+                    print(f"🔔 DEBUG: Created repost like notification for user {repost.user.user_id}: {notification.notifi_content}")
+                else:
+                    print(f"🔍 DEBUG: User {user.user_id} is the repost owner, no notification created")
+                    
+                return JsonResponse({'success': True, 'message': 'Repost liked'})
+            else:
+                print(f"🔍 DEBUG: Repost {repost_id} already liked by user {user.user_id}")
+                return JsonResponse({'success': False, 'message': 'Repost already liked'})
+        except Exception as e:
+            print(f"❌ DEBUG: Error in repost like creation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return JsonResponse({'error': f'Error liking repost: {str(e)}'}, status=500)
     elif request.method == "DELETE":
         # Unlike the repost
         try:
@@ -2674,8 +2857,7 @@ def repost_likes_list_view(request, repost_id):
                 'm_name': like.user.m_name,
                 'l_name': like.user.l_name,
                 'profile_pic': build_profile_pic_url(like.user),
-            },
-            'date_created': like.date_created.isoformat() if like.date_created else None
+            }
         })
     return JsonResponse({'likes': likes_data})
 
@@ -2730,11 +2912,29 @@ def repost_comments_view(request, repost_id):
             
             # Create notification for repost owner
             if request.user.user_id != repost.user.user_id:
+                # Determine repost type
+                if repost.donation_request:
+                    repost_type = "donation repost"
+                elif repost.forum:
+                    repost_type = "forum repost"
+                else:
+                    repost_type = "repost"
+                
+                # Build notification content with appropriate ID based on repost type
+                if repost.post:
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                elif repost.forum:
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                elif repost.donation_request:
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                else:
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                
                 Notification.objects.create(
                     user=repost.user,
                     notif_type='comment',
                     subject='Repost Commented',
-                    notifi_content=f"{request.user.full_name} commented on your repost<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notifi_content=notif_content,
                     notif_date=timezone.now()
                 )
             
@@ -2778,7 +2978,15 @@ def post_like_view(request, post_id):
 
         if request.method == "POST":
             # Like the post
-            like, created = Like.objects.get_or_create(user=user, post=post)
+            like, created = Like.objects.get_or_create(
+                user=user, 
+                post=post,
+                defaults={
+                    'forum': None,
+                    'repost': None,
+                    'donation_request': None
+                }
+            )
             if created:
                 # Create notification for post owner (only if the liker is not the post owner)
                 if user.user_id != post.user.user_id:
@@ -3800,7 +4008,15 @@ def forum_like_view(request, forum_id):
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         if request.method == 'POST':
-            like, created = Like.objects.get_or_create(forum=forum, user=request.user)
+            like, created = Like.objects.get_or_create(
+                forum=forum, 
+                user=request.user,
+                defaults={
+                    'post': None,
+                    'repost': None,
+                    'donation_request': None
+                }
+            )
             if created and request.user.user_id != forum.user.user_id:
                 Notification.objects.create(
                     user=forum.user,
@@ -4972,10 +5188,24 @@ def donation_like_view(request, donation_id):
             # Like the donation
             like, created = Like.objects.get_or_create(
                 donation_request=donation,
-                user=request.user
+                user=request.user,
+                defaults={
+                    'post': None,
+                    'forum': None,
+                    'repost': None
+                }
             )
             
             if created:
+                # Create notification for donation owner
+                if request.user.user_id != donation.user.user_id:
+                    Notification.objects.create(
+                        user=donation.user,
+                        notif_type='like',
+                        subject='Donation Liked',
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
+                        notif_date=timezone.now()
+                    )
                 return JsonResponse({'success': True, 'message': 'Donation liked'})
             else:
                 return JsonResponse({'success': False, 'message': 'Already liked'})
@@ -5052,6 +5282,16 @@ def donation_comments_view(request, donation_id):
                 request.user,
                 comment_id=comment.comment_id
             )
+            
+            # Create notification for donation owner
+            if request.user.user_id != donation.user.user_id:
+                Notification.objects.create(
+                    user=donation.user,
+                    notif_type='comment',
+                    subject='Donation Commented',
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notif_date=timezone.now()
+                )
             
             # Return the full comment data
             comment_data = {
