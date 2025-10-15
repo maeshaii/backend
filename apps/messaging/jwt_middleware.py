@@ -30,24 +30,31 @@ class JWTAuthMiddleware:
         # Ensure we have a user on scope by default
         scope.setdefault('user', _LazyUser())
 
+        # Debug logging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"JWT Middleware: Processing WebSocket connection")
+
+        # Try JWT token authentication first
         token = self._extract_token_from_scope(scope)
+        logger.info(f"JWT Middleware: Extracted token: {token is not None}")
+        
         if token:
             user = await self._authenticate_token(token)
+            logger.info(f"JWT Middleware: JWT authentication result: {user is not None}")
+            if user is not None:
+                scope['user'] = user
+        else:
+            # Fallback to session-based authentication
+            user = await self._authenticate_session(scope)
+            logger.info(f"JWT Middleware: Session authentication result: {user is not None}")
             if user is not None:
                 scope['user'] = user
 
         return await self.inner(scope, receive, send)
 
     def _extract_token_from_scope(self, scope) -> typing.Optional[str]:
-        # Query string first: ws://.../path?token=JWT
-        try:
-            raw_qs = scope.get('query_string', b'').decode('utf-8')
-            params = parse_qs(raw_qs)
-            if 'token' in params and params['token']:
-                return params['token'][0]
-        except Exception:
-            pass
-
+        # Prioritize headers over URL for security
         # Headers: Authorization: Bearer <JWT>
         try:
             headers = dict(scope.get('headers') or [])
@@ -59,6 +66,22 @@ class JWTAuthMiddleware:
         except Exception:
             pass
 
+        # Fallback to query string (less secure, but for backward compatibility)
+        try:
+            raw_qs = scope.get('query_string', b'').decode('utf-8')
+            params = parse_qs(raw_qs)
+            if 'token' in params and params['token']:
+                token = params['token'][0]
+                # Debug logging
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"JWT Middleware: Found token in URL query string: {token[:20]}...")
+                return token
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"JWT Middleware: Error extracting token from query string: {e}")
+
         return None
 
     @database_sync_to_async
@@ -67,6 +90,43 @@ class JWTAuthMiddleware:
             validated = self.jwt_auth.get_validated_token(token)
             user = self.jwt_auth.get_user(validated)
             return user
+        except Exception:
+            return None
+
+    @database_sync_to_async
+    def _authenticate_session(self, scope):
+        """Authenticate using Django session"""
+        try:
+            from django.contrib.sessions.models import Session
+            from django.contrib.auth import get_user_model
+            
+            # Get session key from cookies
+            cookies = dict(scope.get('cookies') or [])
+            session_key = cookies.get(b'sessionid')
+            
+            if not session_key:
+                return None
+            
+            # Decode session key if it's bytes
+            if isinstance(session_key, bytes):
+                session_key = session_key.decode('utf-8')
+            
+            # Get session
+            try:
+                session = Session.objects.get(session_key=session_key)
+            except Session.DoesNotExist:
+                return None
+            
+            # Get user from session
+            session_data = session.get_decoded()
+            user_id = session_data.get('_auth_user_id')
+            
+            if not user_id:
+                return None
+            
+            User = get_user_model()
+            return User.objects.get(pk=user_id)
+            
         except Exception:
             return None
 

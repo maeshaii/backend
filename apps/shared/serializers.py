@@ -7,6 +7,7 @@ from .models import (
     User, UserProfile, AcademicInfo, EmploymentHistory, 
     TrackerData, OJTInfo, AccountType, Conversation, Message, MessageAttachment
 )
+from .security import ContentSanitizer
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -380,21 +381,18 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         fields = ['content', 'message_type', 'attachment_id']
     
     def validate_message_type(self, value):
-        """Validate message type"""
-        valid_types = ['text', 'image', 'file', 'system']
-        if value not in valid_types:
-            raise serializers.ValidationError(f"Invalid message type. Must be one of: {', '.join(valid_types)}")
-        return value
+        """Validate and sanitize message type"""
+        try:
+            return ContentSanitizer.validate_message_type(value)
+        except Exception as e:
+            raise serializers.ValidationError(str(e))
     
     def validate_content(self, value):
-        """Validate message content"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("Message content cannot be empty.")
-        
-        if len(value.strip()) > 1000:
-            raise serializers.ValidationError("Message content cannot exceed 1000 characters.")
-        
-        return value.strip()
+        """Validate and sanitize message content"""
+        try:
+            return ContentSanitizer.sanitize_message_content(value)
+        except Exception as e:
+            raise serializers.ValidationError(str(e))
 
     def create(self, validated_data):
         attachment_id = validated_data.pop('attachment_id', None)

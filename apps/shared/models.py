@@ -193,13 +193,29 @@ class Message(models.Model):
 
 
 class MessageAttachment(models.Model):
+    STORAGE_CHOICES = [
+        ('local', 'Local Storage'),
+        ('s3', 'AWS S3'),
+        ('gcs', 'Google Cloud Storage'),
+    ]
+    
     attachment_id = models.AutoField(primary_key=True)
     message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments', null=True, blank=True)
-    file = models.FileField(upload_to='message_attachments/%Y/%m/%d/')
+    file = models.FileField(upload_to='message_attachments/%Y/%m/%d/', blank=True, null=True, help_text='Local file storage (deprecated, use file_key instead)')
     file_name = models.CharField(max_length=255)
     file_type = models.CharField(max_length=255)
     file_size = models.IntegerField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    
+    # Cloud storage fields
+    file_key = models.CharField(max_length=500, blank=True, null=True, help_text='S3 object key or local file path')
+    file_url = models.URLField(blank=True, null=True, help_text='Public URL for the file')
+    storage_type = models.CharField(
+        max_length=20, 
+        default='local',
+        choices=STORAGE_CHOICES,
+        help_text='Storage backend used for this file'
+    )
     
     class Meta:
         db_table = 'shared_messageattachment'
@@ -214,6 +230,29 @@ class MessageAttachment(models.Model):
     def file_size_mb(self):
         """Return file size in MB"""
         return round(self.file_size / (1024 * 1024), 2)
+    
+    @property
+    def get_file_url(self):
+        """Get file URL with fallback to local storage"""
+        if self.file_url:
+            return self.file_url
+        elif self.file:
+            return self.file.url
+        else:
+            return None
+    
+    def delete_file_from_storage(self):
+        """Delete file from storage backend"""
+        from apps.messaging.cloud_storage import cloud_storage
+        
+        if self.storage_type == 's3' and self.file_key:
+            return cloud_storage.delete_file(self.file_key)
+        elif self.file:
+            try:
+                return self.file.delete(save=False)
+            except Exception:
+                return False
+        return False
 
 class Notification(models.Model):
     notification_id = models.AutoField(primary_key=True)
@@ -1164,12 +1203,12 @@ class TrackerResponse(models.Model):
                     tracker.q_sector_current = str(answer) if answer else tracker.q_sector_current
                     if answer:
                         employment.sector_current = str(answer)
-                elif question_id == 28:  # How long have you been employed?
+                elif question_id == 39:  # Employment Sector (Local/International)
+                    tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
+                elif question_id == 29:  # How long have you been employed?
                     tracker.q_employment_duration = str(answer) if answer else tracker.q_employment_duration
                     if answer:
                         employment.employment_duration_current = str(answer)
-                elif question_id == 38:  # Employment Sector (Local/International)
-                    tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
                 elif question_id == 30:  # Current Salary range (was 29)
                     tracker.q_salary_range = str(answer) if answer else tracker.q_salary_range
                     if answer:

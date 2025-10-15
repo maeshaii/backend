@@ -28,10 +28,10 @@ def check_and_fix_2020():
         has_tracker = TrackerData.objects.filter(user=alumni).exists()
         
         year = alumni.academic_info.year_graduated if has_academic else 'No Year'
-        course = alumni.academic_info.course if has_academic else 'No Course'
+        course = alumni.academic_info.course if has_academic else 'No Program'
         
         print(f"  {alumni.f_name} {alumni.l_name} (CTU: {alumni.acc_username})")
-        print(f"    Year: {year}, Course: {course}")
+        print(f"    Year: {year}, Program: {course}")
         print(f"    Has AcademicInfo: {has_academic}, Has TrackerData: {has_tracker}")
         
         if not has_academic:
@@ -87,6 +87,11 @@ def check_and_fix_2020():
 
 if __name__ == "__main__":
     check_and_fix_2020()
+
+
+
+
+
 
 
 

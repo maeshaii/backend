@@ -308,17 +308,28 @@ def import_alumni_view(request):
         if 'file' not in request.FILES:
             return JsonResponse({'success': False, 'message': 'No file uploaded'}, status=400)
         file = request.FILES['file']
-        batch_year = request.POST.get('batch_year', '')
-        course = request.POST.get('course', '') or request.POST.get('program', '')
+        batch_year_param = request.POST.get('batch_year', '')
+        course_param = request.POST.get('course', '') or request.POST.get('program', '')
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
-        if not batch_year or not course:
-            return JsonResponse({'success': False, 'message': 'Batch year and course are required'}, status=400)
         
-        # Read Excel file
+        # Read Excel file first to check if it has Year_Graduated and Program columns
         try:
             df = pd.read_excel(file)
-            print('HEADERS:', list(df.columns))
+            print('HEADERS (before normalization):', list(df.columns))
+            
+            # Normalize column names by stripping whitespace FIRST
+            df.columns = df.columns.str.strip()
+            print('HEADERS (after normalization):', list(df.columns))
+            
+            # Check if Excel has Year_Graduated and Program columns (exported format)
+            has_year_column = 'Year_Graduated' in df.columns or 'Batch Graduated' in df.columns
+            has_program_column = 'Program' in df.columns
+            
+            # If Excel doesn't have these columns, require form parameters
+            if not has_year_column and not has_program_column:
+                if not batch_year_param or not course_param:
+                    return JsonResponse({'success': False, 'message': 'Batch year and course are required'}, status=400)
             
             # Check if Birthdate column exists before trying to access it
             if 'Birthdate' in df.columns:
@@ -342,6 +353,7 @@ def import_alumni_view(request):
         # Expected columns: keep Birthdate for profile; use Password for login
         required_columns = ['CTU_ID', 'First_Name', 'Last_Name', 'Gender']
         optional_columns = ['Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil Status', 'Social Media']
+        
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             return JsonResponse({
@@ -389,9 +401,43 @@ def import_alumni_view(request):
                 civil_status = str(row.get('Civil Status', '')).strip() if pd.notna(row.get('Civil Status', '')) else ''
                 social_media = str(row.get('Social Media', '')).strip() if pd.notna(row.get('Social Media', '')) else ''
                 
+                # Determine batch_year and course: use row values if available, else form parameters
+                if has_year_column:
+                    # Check for 'Year_Graduated' first, then 'Batch Graduated'
+                    if 'Year_Graduated' in df.columns and pd.notna(row.get('Year_Graduated')):
+                        batch_year = str(int(row['Year_Graduated'])) if isinstance(row['Year_Graduated'], (int, float)) else str(row['Year_Graduated']).strip()
+                    elif 'Batch Graduated' in df.columns and pd.notna(row.get('Batch Graduated')):
+                        batch_year = str(int(row['Batch Graduated'])) if isinstance(row['Batch Graduated'], (int, float)) else str(row['Batch Graduated']).strip()
+                    else:
+                        batch_year = batch_year_param
+                else:
+                    batch_year = batch_year_param
+                
+                if has_program_column:
+                    if 'Program' in df.columns and pd.notna(row.get('Program')):
+                        course = str(row['Program']).strip()
+                    # Legacy support for Course column (will be removed)
+                    elif 'Course' in df.columns and pd.notna(row.get('Course')):
+                        course = str(row['Course']).strip()
+                    else:
+                        course = course_param
+                else:
+                    course = course_param
+                
+                # Get section if available in Excel
+                section = str(row.get('Section', '')).strip() if 'Section' in df.columns and pd.notna(row.get('Section')) else ''
+                
                 # Validate required fields
                 if not ctu_id or not first_name or not last_name or not gender:
                     errors.append(f"Row {index + 2}: Missing required fields (CTU_ID, First_Name, Last_Name, Gender)")
+                    continue
+                
+                # Validate batch_year and course for this row
+                if not batch_year:
+                    errors.append(f"Row {index + 2}: Missing Year_Graduated/Batch Year")
+                    continue
+                if not course:
+                    errors.append(f"Row {index + 2}: Missing Program")
                     continue
                 
                 # Validate gender
@@ -424,10 +470,11 @@ def import_alumni_view(request):
                 user.save()
                 
                 # Store initial password (encrypted) for export/sharing
+                # Set is_active=False so users don't get forced to change password on first login
                 try:
                     up, _ = UserInitialPassword.objects.get_or_create(user=user)
                     up.set_plaintext(password_raw)
-                    up.is_active = True
+                    up.is_active = False  # Don't force password change for imported users
                     up.save()
                 except Exception as e:
                     print(f"DEBUG: Error saving initial password for {ctu_id}: {e}")
@@ -452,16 +499,190 @@ def import_alumni_view(request):
                         print(f"DEBUG: Error parsing birthdate for {ctu_id}: {e}")
                 
                 try:
-                    from apps.shared.models import UserProfile, AcademicInfo, TrackerData
+                    from apps.shared.models import UserProfile, AcademicInfo, TrackerData, EmploymentHistory
                     UserProfile.objects.create(**profile_kwargs)
-                    AcademicInfo.objects.create(
-                        user=user,
-                        year_graduated=int(batch_year) if batch_year.isdigit() else None,
-                        program=course,  # Use 'program' field, not 'course'
-                        section=section,  # Add section from form parameter
-                    )
-                    # Note: Don't create TrackerData records automatically
-                    # Alumni should remain "untracked" until they fill out tracker forms
+                    
+                    # Extract academic info from Excel columns
+                    academic_kwargs = {
+                        'user': user,
+                        'year_graduated': int(batch_year) if batch_year.isdigit() else None,
+                        'program': course,  # Use 'program' field, not 'course'
+                        'section': section,  # Add section from form parameter
+                    }
+                    
+                    # Post graduate degree and further study detection
+                    if 'Please specify post graduate/degree.' in df.columns and pd.notna(row.get('Please specify post graduate/degree.')):
+                        degree = str(row['Please specify post graduate/degree.']).strip()
+                        if degree and degree.lower() not in ['n/a', 'na', '']:
+                            academic_kwargs['q_post_graduate_degree'] = degree
+                            # If there's a post-graduate degree, they're pursuing further study
+                            academic_kwargs['pursue_further_study'] = 'yes'
+                            academic_kwargs['q_pursue_study'] = 'yes'
+                    
+                    AcademicInfo.objects.create(**academic_kwargs)
+                    # Extract all tracker data from Excel columns
+                    tracker_data_kwargs = {
+                        'user': user,
+                        'tracker_submitted_at': timezone.now()
+                    }
+                    
+                    # Employment status
+                    if 'Are you PRESENTLY employed?' in df.columns and pd.notna(row.get('Are you PRESENTLY employed?')):
+                        emp_response = str(row['Are you PRESENTLY employed?']).strip().lower()
+                        if emp_response in ['yes', 'y']:
+                            tracker_data_kwargs['q_employment_status'] = 'yes'
+                        elif emp_response in ['no', 'n']:
+                            tracker_data_kwargs['q_employment_status'] = 'no'
+                        else:
+                            tracker_data_kwargs['q_employment_status'] = 'pending'
+                    else:
+                        tracker_data_kwargs['q_employment_status'] = 'pending'
+                    
+                    # Company name
+                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
+                        company_name = str(row['Current Company Name']).strip()
+                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_company_name'] = company_name
+                    
+                    # Current position
+                    if 'Current Position' in df.columns and pd.notna(row.get('Current Position')):
+                        position = str(row['Current Position']).strip()
+                        if position and position.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_current_position'] = position
+                    
+                    # Job sector (Public/Private) - normalize for statistics
+                    if 'Current Sector of your Job' in df.columns and pd.notna(row.get('Current Sector of your Job')):
+                        sector = str(row['Current Sector of your Job']).strip()
+                        if sector and sector.lower() not in ['n/a', 'na', '']:
+                            # Normalize sector values for statistics queries
+                            sector_lower = sector.lower()
+                            if sector_lower in ['government', 'public']:
+                                tracker_data_kwargs['q_sector_current'] = 'government'
+                            elif sector_lower == 'private':
+                                tracker_data_kwargs['q_sector_current'] = 'private'
+                            else:
+                                tracker_data_kwargs['q_sector_current'] = sector
+                    
+                    # Salary range
+                    if 'Current Salary Range' in df.columns and pd.notna(row.get('Current Salary Range')):
+                        salary_range = str(row['Current Salary Range']).strip()
+                        if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_salary_range'] = salary_range
+                    
+                    # Employment type (for self-employment detection)
+                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
+                        company_name = str(row['Current Company Name']).strip()
+                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
+                            # Check if it's self-employment based on company name patterns
+                            company_lower = company_name.lower()
+                            if any(keyword in company_lower for keyword in ['self', 'freelance', 'independent', 'own', 'personal']):
+                                tracker_data_kwargs['q_employment_type'] = 'self-employed'
+                            else:
+                                tracker_data_kwargs['q_employment_type'] = 'employed by company'
+                    
+                    # Create TrackerData record with all extracted data
+                    TrackerData.objects.create(**tracker_data_kwargs)
+                    
+                    # Create EmploymentHistory record for statistics (CHED, SUC, AACUP)
+                    employment_kwargs = {
+                        'user': user,
+                        'job_alignment_status': 'not_aligned',  # Default
+                        'self_employed': False,  # Default
+                        'high_position': False,  # Default
+                        'absorbed': False,  # Default
+                    }
+                    
+                    # Map TrackerData fields to EmploymentHistory fields
+                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
+                        company_name = str(row['Current Company Name']).strip()
+                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['company_name_current'] = company_name
+                    
+                    if 'Current Position' in df.columns and pd.notna(row.get('Current Position')):
+                        position = str(row['Current Position']).strip()
+                        if position and position.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['position_current'] = position
+                    
+                    if 'Current Sector of your Job' in df.columns and pd.notna(row.get('Current Sector of your Job')):
+                        sector = str(row['Current Sector of your Job']).strip()
+                        if sector and sector.lower() not in ['n/a', 'na', '']:
+                            # Use the same normalization as TrackerData
+                            sector_lower = sector.lower()
+                            if sector_lower in ['government', 'public']:
+                                employment_kwargs['sector_current'] = 'government'
+                            elif sector_lower == 'private':
+                                employment_kwargs['sector_current'] = 'private'
+                            else:
+                                employment_kwargs['sector_current'] = sector
+                    
+                    if 'Current Salary Range' in df.columns and pd.notna(row.get('Current Salary Range')):
+                        salary_range = str(row['Current Salary Range']).strip()
+                        if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['salary_current'] = salary_range
+                    
+                    # Determine job alignment based on employment status and position
+                    if tracker_data_kwargs.get('q_employment_status') == 'yes':
+                        if employment_kwargs.get('position_current'):
+                            # Check for high position keywords
+                            position_lower = employment_kwargs['position_current'].lower()
+                            if any(keyword in position_lower for keyword in ['manager', 'supervisor', 'director', 'lead', 'senior']):
+                                employment_kwargs['high_position'] = True
+                            
+                            # Set self-employment status based on TrackerData
+                            if tracker_data_kwargs.get('q_employment_type') == 'self-employed':
+                                employment_kwargs['self_employed'] = True
+                            
+                            # Set absorbed status (typically first job after graduation)
+                            # For imported data, leave absorbed as False for now
+                            employment_kwargs['absorbed'] = False
+
+                            # Proper job alignment logic - compare position with program
+                            employment_record = EmploymentHistory(**employment_kwargs)
+                            employment_record.user = user
+
+                            # Try exact match first
+                            alignment_result = employment_record._check_job_alignment_for_position(
+                                employment_kwargs['position_current'], 
+                                course  # Program from Excel
+                            )
+
+                            # If no exact match, try fuzzy matching for common IT positions
+                            if employment_record.job_alignment_status == 'pending_user_confirmation':
+                                position_lower = employment_kwargs['position_current'].lower()
+                                course_lower = course.lower() if course else ''
+
+                                # Common IT position keywords for each program
+                                bsit_keywords = ['software', 'developer', 'programmer', 'web', 'mobile', 'app', 'system', 'network', 'database', 'tech', 'it']
+                                bsis_keywords = ['analyst', 'system', 'business', 'data', 'process', 'workflow', 'management', 'admin']
+                                bit_ct_keywords = ['hardware', 'technician', 'repair', 'maintenance', 'support', 'technical', 'engineering']
+
+                                is_aligned = False
+                                if 'bsit' in course_lower or 'information technology' in course_lower:
+                                    is_aligned = any(keyword in position_lower for keyword in bsit_keywords)
+                                    if is_aligned:
+                                        employment_record.job_alignment_status = 'aligned'
+                                        employment_record.job_alignment_category = 'BSIT'
+                                elif 'bsis' in course_lower or 'information system' in course_lower:
+                                    is_aligned = any(keyword in position_lower for keyword in bsis_keywords)
+                                    if is_aligned:
+                                        employment_record.job_alignment_status = 'aligned'
+                                        employment_record.job_alignment_category = 'BSIS'
+                                elif 'bit-ct' in course_lower or 'computer technology' in course_lower:
+                                    is_aligned = any(keyword in position_lower for keyword in bit_ct_keywords)
+                                    if is_aligned:
+                                        employment_record.job_alignment_status = 'aligned'
+                                        employment_record.job_alignment_category = 'BIT-CT'
+
+                            # Update kwargs from calculated alignment
+                            employment_kwargs['job_alignment_status'] = employment_record.job_alignment_status
+                            employment_kwargs['job_alignment_category'] = employment_record.job_alignment_category
+                            employment_kwargs['job_alignment_title'] = employment_record.job_alignment_title
+                    else:
+                        # For basic info imports (no employment data), they should be pending
+                        # Don't set absorbed=True for basic imports
+                        employment_kwargs['absorbed'] = False
+                    
+                    EmploymentHistory.objects.create(**employment_kwargs)
                 except Exception as e:
                     print(f"DEBUG: Error creating profile/academic info for {ctu_id}: {e}")
                 
@@ -477,6 +698,14 @@ def import_alumni_view(request):
                 errors.append(f"Row {index + 2}: Unexpected error: {str(e)}")
                 print(f"DEBUG: Error processing row {index + 2}: {e}")
                 continue
+        # Invalidate statistics cache after successful import
+        try:
+            from apps.alumni_stats.decorators import invalidate_statistics_cache
+            invalidate_statistics_cache()
+            print("DEBUG: Statistics cache invalidated after import")
+        except Exception as e:
+            print(f"DEBUG: Error invalidating cache: {e}")
+        
         # Export passwords to Excel after import
         if exported_passwords:
             df_export = pd.DataFrame(exported_passwords)
@@ -512,6 +741,22 @@ def alumni_statistics_view(request):
             {'year': year, 'count': count}
             for year, count in sorted(year_counts.items(), reverse=True)
         ]
+    })
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def graduation_years_view(request):
+    """Get all unique graduation years from alumni data for dropdowns"""
+    year_values = (
+        User.objects
+        .filter(account_type__user=True)
+        .values_list('academic_info__year_graduated', flat=True)
+        .distinct()
+    )
+    years = [str(year) for year in sorted(year_values, reverse=True) if year is not None]
+    return JsonResponse({
+        'success': True,
+        'years': years
     })
 
 @api_view(["GET"])
@@ -1087,10 +1332,11 @@ def import_ojt_view(request):
                 ojt_user.set_password(password_raw)
                 ojt_user.save()
                 # Store initial password (encrypted)
+                # Set is_active=False so users don't get forced to change password on first login
                 try:
                     up, _ = UserInitialPassword.objects.get_or_create(user=ojt_user)
                     up.set_plaintext(password_raw)
-                    up.is_active = True
+                    up.is_active = False  # Don't force password change for imported users
                     up.save()
                 except Exception:
                     pass
@@ -1687,7 +1933,7 @@ def coordinator_requests_list_view(request):
             all_imports = OJTImport.objects.all()
             print(f"🔍 DEBUG coordinator_requests_list_view: Total OJTImport records: {all_imports.count()}")
             for imp in all_imports:
-                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
+                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.course}")
             
             # Count actual unapproved students instead of using records_imported
             for imp in requested_imports:
@@ -1703,7 +1949,7 @@ def coordinator_requests_list_view(request):
                     account_type__user=True  # Exclude alumni (already approved)
                 ).count()
                 
-                print(f"🔍 DEBUG: Year {year}, Course {course} - Unapproved count: {unapproved_count}")
+                print(f"🔍 DEBUG: Year {year}, Program {course} - Unapproved count: {unapproved_count}")
                 
                 # Only include if there are actually unapproved students
                 if unapproved_count > 0:
@@ -1936,11 +2182,12 @@ def approve_ojt_to_alumni_view(request):
                         user.ojt_info.save()
 
                     # Store initial password for export
+                    # Set is_active=False so users don't get forced to change password on first login
                     UserInitialPassword.objects.update_or_create(
                         user=user,
                         defaults={
                                 'password_encrypted': password,
-                            'is_active': True
+                            'is_active': False  # Don't force password change for approved users
                         }
                     )
 
@@ -2048,11 +2295,12 @@ def approve_individual_ojt_to_alumni_view(request):
             user.save()
 
             # Store initial password for export
+            # Set is_active=False so users don't get forced to change password on first login
             UserInitialPassword.objects.update_or_create(
                 user=user,
                 defaults={
                     'password_encrypted': password,  # Store plaintext for now, will be encrypted
-                    'is_active': True
+                    'is_active': False  # Don't force password change for approved users
                 }
             )
 

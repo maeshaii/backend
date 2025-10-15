@@ -42,10 +42,10 @@ def check_2020_alumni():
         if hasattr(alumni, 'tracker_data') and alumni.tracker_data:
             tracker_status = alumni.tracker_data.q_employment_status or "Unknown"
         
-        course = alumni.academic_info.course if alumni.academic_info else "No Course"
+        course = alumni.academic_info.course if alumni.academic_info else "No Program"
         
         print(f"  - {alumni.f_name} {alumni.l_name} (CTU ID: {alumni.acc_username})")
-        print(f"    Course: {course}")
+        print(f"    Program: {course}")
         print(f"    Tracker Status: {tracker_status}")
         print()
     
@@ -64,6 +64,11 @@ def check_2020_alumni():
 
 if __name__ == "__main__":
     check_2020_alumni()
+
+
+
+
+
 
 
 

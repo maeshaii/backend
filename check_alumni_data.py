@@ -34,12 +34,17 @@ def check_alumni_data():
     recent_alumni = all_alumni.order_by('-user_id')[:10]
     for alumni in recent_alumni:
         year = alumni.academic_info.year_graduated if alumni.academic_info else 'No Year'
-        course = alumni.academic_info.course if alumni.academic_info else 'No Course'
+        course = alumni.academic_info.course if alumni.academic_info else 'No Program'
         has_tracker = TrackerData.objects.filter(user=alumni).exists()
-        print(f"  {alumni.f_name} {alumni.l_name} (CTU: {alumni.acc_username}) - Year: {year}, Course: {course}, Has TrackerData: {has_tracker}")
+        print(f"  {alumni.f_name} {alumni.l_name} (CTU: {alumni.acc_username}) - Year: {year}, Program: {course}, Has TrackerData: {has_tracker}")
 
 if __name__ == "__main__":
     check_alumni_data()
+
+
+
+
+
 
 
 

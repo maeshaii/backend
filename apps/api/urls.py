@@ -22,6 +22,7 @@ urlpatterns = [
     path('change-password/', views.change_password_view, name='change_password'),
     # Alumni import/export (keep single implementation)
     path('alumni/statistics/', views.alumni_statistics_view, name='alumni_statistics'),
+    path('alumni/graduation-years/', views.graduation_years_view, name='graduation_years'),
     path('alumni/list/', views.alumni_list_view, name='alumni_list'),
     path('alumni-list/', alumni_list_view, name='alumni_list_alias'),
     path('export-alumni/', export_detailed_alumni_data, name='export_alumni_excel'),
