@@ -309,11 +309,11 @@ def import_alumni_view(request):
             return JsonResponse({'success': False, 'message': 'No file uploaded'}, status=400)
         file = request.FILES['file']
         batch_year = request.POST.get('batch_year', '')
-        course = request.POST.get('course', '') or request.POST.get('program', '')
+        program = request.POST.get('program', '') or request.POST.get('program', '')
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
-        if not batch_year or not course:
-            return JsonResponse({'success': False, 'message': 'Batch year and course are required'}, status=400)
+        if not batch_year or not program:
+            return JsonResponse({'success': False, 'message': 'Batch year and program are required'}, status=400)
         
         # Read Excel file
         try:
@@ -457,8 +457,7 @@ def import_alumni_view(request):
                     AcademicInfo.objects.create(
                         user=user,
                         year_graduated=int(batch_year) if batch_year.isdigit() else None,
-                        program=course,  # Use 'program' field, not 'course'
-                        section=section,  # Add section from form parameter
+                        program=program,  # Use 'program' field
                     )
                     # Note: Don't create TrackerData records automatically
                     # Alumni should remain "untracked" until they fill out tracker forms
@@ -779,21 +778,21 @@ def import_ojt_view(request):
 
         file = request.FILES['file']
         batch_year = request.POST.get('batch_year', '')
-        course = request.POST.get('course', '')
+        program = request.POST.get('program', '')
         coordinator_username = request.POST.get('coordinator_username', '')
         section = request.POST.get('section', '')
 
         print(f"DEBUG - Form data received:")
         print(f"  batch_year: '{batch_year}'")
-        print(f"  course: '{course}'")
+        print(f"  program: '{program}'")
         print(f"  coordinator_username: '{coordinator_username}'")
         print(f"  section: '{section}'")
 
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
 
-        if not batch_year or not course or not coordinator_username or not section:
-            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, course: {bool(course)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
+        if not batch_year or not program or not coordinator_username or not section:
+            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, program: {bool(program)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
 
         # Read Excel file
         try:
@@ -816,8 +815,29 @@ def import_ojt_view(request):
                 'ojt_end_date': 'Ojt_End_Date',
                 'Civil Status': 'Civil_Status',
                 'Social Media': 'Social_Media',
+                # Fix malformed concatenated headers
+                'pany_Adompany_Empany_Conct_Person_t_Person_Position': 'Company_Address',
             }, inplace=True)
-        except Exception:
+            
+            # Handle the specific malformed header by splitting it into proper columns
+            if 'pany_Adompany_Empany_Conct_Person_t_Person_Position' in df.columns:
+                # This appears to be concatenated columns, let's try to split them
+                # Based on the data pattern, we'll create separate columns
+                malformed_col = df['pany_Adompany_Empany_Conct_Person_t_Person_Position']
+                
+                # Try to split the data into separate columns
+                # This is a workaround for the malformed Excel header
+                df['Company_Address'] = malformed_col.astype(str).str[:20]  # First part
+                df['Company_Email'] = malformed_col.astype(str).str[20:40]  # Second part
+                df['Company_Contact'] = malformed_col.astype(str).str[40:60]  # Third part
+                df['Contact_Person'] = malformed_col.astype(str).str[60:80]  # Fourth part
+                df['Position'] = malformed_col.astype(str).str[80:]  # Last part
+                
+                # Drop the malformed column
+                df.drop('pany_Adompany_Empany_Conct_Person_t_Person_Position', axis=1, inplace=True)
+                
+        except Exception as e:
+            print(f"Warning: Error normalizing headers: {e}")
             pass
 
         # OJT-specific required columns: keep Birthdate; Password is optional and can be generated
@@ -843,7 +863,7 @@ def import_ojt_view(request):
         import_record = OJTImport.objects.create(
             coordinator=coordinator_username,
             batch_year=normalized_year,
-            course=course,
+            course=program,  # Use 'course' field instead of 'program'
             section=section or '',  # Use section from form, or empty string if not provided
             file_name=file.name
         )
@@ -888,18 +908,22 @@ def import_ojt_view(request):
                 # --- Section Filtering ---
                 # Check if Excel file has a Section column and filter by selected section
                 excel_section = str(row.get('Section', '')).strip()
-                if excel_section and section:
+                print(f"Row {index+2} - Excel section: '{excel_section}', Selected section: '{section}'")
+                
                     # If Excel has section data, only process rows that match the selected section
+                if excel_section and section:
                     if excel_section.upper() != section.upper():
                         print(f"Row {index+2} - SKIPPING: Section '{excel_section}' doesn't match selected section '{section}'")
                         skipped_count += 1
                         continue
-                elif section:
-                    # If no section column in Excel but section is selected, SKIP the import
-                    # This prevents importing all students when only specific section should be imported
-                    print(f"Row {index+2} - SKIPPING: No section column in Excel but section '{section}' was selected. Cannot determine which students belong to this section.")
-                    skipped_count += 1
-                    continue
+                    else:
+                        print(f"Row {index+2} - MATCH: Processing section '{excel_section}'")
+                elif not excel_section and section:
+                    # If no section column in Excel but section is selected, process all rows
+                    # and assign them to the selected section
+                    print(f"Row {index+2} - No Excel section, assigning to selected section '{section}'")
+                else:
+                    print(f"Row {index+2} - Processing row (no section filtering)")
 
                 # --- Password Handling (no birthdate login) ---
                 password_raw = str(row.get('Password', '')).strip()
@@ -967,7 +991,7 @@ def import_ojt_view(request):
                     skipped_count += 1
                     continue
 
-                # If a user with this CTU_ID already exists, update academic year/course
+                # If a user with this CTU_ID already exists, update academic year/program
                 existing_user = User.objects.filter(acc_username=ctu_id).first()
                 if existing_user:
                     try:
@@ -980,7 +1004,8 @@ def import_ojt_view(request):
                             academic.section = section
                             academic.save()
                         ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
-                        employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
+                        from apps.shared.models import OJTCompanyProfile
+                        employment, _ = OJTCompanyProfile.objects.get_or_create(user=existing_user)
 
                         # Update names to match latest import where present
                         if first_name:
@@ -993,14 +1018,14 @@ def import_ojt_view(request):
                             existing_user.gender = gender
                         existing_user.save()
 
-                        # Update academic info from batch and course
+                        # Update academic info from batch and program
                         # Save normalized batch year
                         try:
                             academic.year_graduated = int(normalized_year)
                         except Exception:
                             pass
-                        if course:
-                            academic.program = course
+                        if program:
+                            academic.program = program
                         academic.save()
 
                         # Update profile birthdate if present
@@ -1020,14 +1045,14 @@ def import_ojt_view(request):
                             or row.get('Company name current')
                         )
                         if pd.notna(company_name) and str(company_name).strip():
-                            employment.company_name_current = str(company_name).strip()
+                            employment.company_name = str(company_name).strip()
                         
                         # Update company detail fields
                         company_address = row.get('Company_Address')
                         company_email = row.get('Company_Email')
                         company_contact = row.get('Company_Contact')
-                        contact_person = row.get('Contact_Person')
-                        position = row.get('Position')
+                        contact_person = row.get('Contact_Person_Name') or row.get('Contact_Person')
+                        position = row.get('Contact_Person_Position') or row.get('Position')
                         
                         print(f"Row {index+2} - Company details from Excel:")
                         print(f"  Company_Address: '{company_address}' (pd.notna: {pd.notna(company_address)})")
@@ -1053,7 +1078,7 @@ def import_ojt_view(request):
                             print(f"  -> Set position to: '{employment.position}'")
                         
                         if 'ojt_start_date' in locals() and ojt_start_date:
-                            employment.date_started = ojt_start_date
+                            employment.start_date = ojt_start_date
                         employment.save()
 
                         # Update OJT info (status, dates if parsed)
@@ -1073,6 +1098,12 @@ def import_ojt_view(request):
                     except Exception as _e:
                         # Fall through to try creating a new one if update fails
                         print(f"Row {index+2} - failed to update existing user {ctu_id}: {_e}")
+
+                # Check if user already exists before creating
+                if User.objects.filter(acc_username=ctu_id).exists():
+                    print(f"Row {index+2} - User {ctu_id} already exists, skipping creation")
+                    skipped_count += 1
+                    continue
 
                 # --- Create OJT user securely ---
                 ojt_user = User.objects.create(
@@ -1130,18 +1161,19 @@ def import_ojt_view(request):
                     or row.get('Company name current')
                 )
                 if pd.notna(company_name_new) and str(company_name_new).strip():
-                    employment_kwargs = {
+                    ojt_company_kwargs = {
                         'user': ojt_user,
-                        'company_name_current': str(company_name_new).strip(),
-                        'date_started': ojt_start_date if 'ojt_start_date' in locals() else None,
+                        'company_name': str(company_name_new).strip(),
+                        'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
+                        'end_date': ojt_end_date if 'ojt_end_date' in locals() else None,
                     }
                     
                     # Add company detail fields if present
                     company_address_new = row.get('Company_Address')
                     company_email_new = row.get('Company_Email')
                     company_contact_new = row.get('Company_Contact')
-                    contact_person_new = row.get('Contact_Person')
-                    position_new = row.get('Position')
+                    contact_person_new = row.get('Contact_Person_Name') or row.get('Contact_Person')
+                    position_new = row.get('Contact_Person_Position') or row.get('Position')
                     
                     print(f"Row {index+2} - NEW USER - Company details from Excel:")
                     print(f"  Company_Address: '{company_address_new}' (pd.notna: {pd.notna(company_address_new)})")
@@ -1151,26 +1183,27 @@ def import_ojt_view(request):
                     print(f"  Position: '{position_new}' (pd.notna: {pd.notna(position_new)})")
                     
                     if pd.notna(company_address_new) and str(company_address_new).strip():
-                        employment_kwargs['company_address'] = str(company_address_new).strip()
-                        print(f"  -> Adding company_address to kwargs: '{employment_kwargs['company_address']}'")
+                        ojt_company_kwargs['company_address'] = str(company_address_new).strip()
+                        print(f"  -> Adding company_address to kwargs: '{ojt_company_kwargs['company_address']}'")
                     if pd.notna(company_email_new) and str(company_email_new).strip():
-                        employment_kwargs['company_email'] = str(company_email_new).strip()
-                        print(f"  -> Adding company_email to kwargs: '{employment_kwargs['company_email']}'")
+                        ojt_company_kwargs['company_email'] = str(company_email_new).strip()
+                        print(f"  -> Adding company_email to kwargs: '{ojt_company_kwargs['company_email']}'")
                     if pd.notna(company_contact_new) and str(company_contact_new).strip():
-                        employment_kwargs['company_contact'] = str(company_contact_new).strip()
-                        print(f"  -> Adding company_contact to kwargs: '{employment_kwargs['company_contact']}'")
+                        ojt_company_kwargs['company_contact'] = str(company_contact_new).strip()
+                        print(f"  -> Adding company_contact to kwargs: '{ojt_company_kwargs['company_contact']}'")
                     if pd.notna(contact_person_new) and str(contact_person_new).strip():
-                        employment_kwargs['contact_person'] = str(contact_person_new).strip()
-                        print(f"  -> Adding contact_person to kwargs: '{employment_kwargs['contact_person']}'")
+                        ojt_company_kwargs['contact_person'] = str(contact_person_new).strip()
+                        print(f"  -> Adding contact_person to kwargs: '{ojt_company_kwargs['contact_person']}'")
                     if pd.notna(position_new) and str(position_new).strip():
-                        employment_kwargs['position'] = str(position_new).strip()
-                        print(f"  -> Adding position to kwargs: '{employment_kwargs['position']}'")
+                        ojt_company_kwargs['position'] = str(position_new).strip()
+                        print(f"  -> Adding position to kwargs: '{ojt_company_kwargs['position']}'")
                     
-                    EmploymentHistory.objects.create(**employment_kwargs)
+                    from apps.shared.models import OJTCompanyProfile
+                    OJTCompanyProfile.objects.create(**ojt_company_kwargs)
                 AcademicInfo.objects.create(
                     user=ojt_user,
                     year_graduated=int(normalized_year) if str(normalized_year).isdigit() else None,
-                    course=course,
+                    program=program,
                     section=section,  # Add section from form parameter
                 )
                 # Create OJT info
@@ -1207,6 +1240,10 @@ def import_ojt_view(request):
         import_record.save()
 
         # Export passwords to Excel after import
+        print(f"🔍 DEBUG: exported_passwords count: {len(exported_passwords)}")
+        print(f"🔍 DEBUG: created_count: {created_count}")
+        print(f"🔍 DEBUG: exported_passwords: {exported_passwords}")
+        
         if exported_passwords:
             # Ensure the import record reflects counts before any early return
             import_record.records_imported = created_count
@@ -1214,13 +1251,17 @@ def import_ojt_view(request):
                 import_record.status = 'Partial' if created_count > 0 else 'Failed'
             import_record.save()
 
+            print(f"🔍 DEBUG: Creating Excel file with {len(exported_passwords)} passwords")
             df_export = pd.DataFrame(exported_passwords)
             with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
                 df_export.to_excel(tmp.name, index=False)
                 tmp.seek(0)
                 response = FileResponse(open(tmp.name, 'rb'), as_attachment=True, filename='ojt_passwords.xlsx')
+                print(f"🔍 DEBUG: Returning FileResponse for password download")
                 # Add a comment: Only share this file securely with the intended users.
                 return response
+        else:
+            print(f"🔍 DEBUG: No passwords to export, returning JSON response")
 
         return JsonResponse({
             'success': True,
@@ -1267,10 +1308,13 @@ def ojt_statistics_view(request):
             
             print(f"🔍 DEBUG: Unique year+section combinations: {unique_year_sections.keys()}")
             
-            # Now count actual users for each year (all sections show same count since users don't have section field)
+            # Now count actual users for each year and section
             for (year, section) in unique_year_sections.keys():
-                # Count actual users in database for this year
-                user_count = User.objects.filter(academic_info__year_graduated=year).count()
+                # Count actual users in database for this year AND section
+                user_count = User.objects.filter(
+                    academic_info__year_graduated=year,
+                    academic_info__section=section
+                ).count()
                 year_section_counts[(year, section)] = max(user_count, 1)  # At least 1 to show card
                 print(f"🔍 DEBUG: Year {year}, Section {section}: {user_count} users")
             
@@ -1318,35 +1362,33 @@ def ojt_by_year_view(request):
         except Exception:
             return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
 
-        # Filter by section if provided
-        if section:
-            print(f"🔍 DEBUG: Filtering by section: {section}")
-            # For now, hardcode the section filtering based on known data
-            if section == '4-E':
-                # Only show Christine Lopez for section 4-E
+        # Fetch users for the year and section
+        print(f"🔍 DEBUG: Fetching OJT data for year: {year_int}, section: {section}")
+        
+        try:
+            if section:
+                # Filter by both year and section
                 ojt_data = (
                     User.objects
-                    .filter(academic_info__year_graduated=year_int, acc_username='1005')
-                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
+                    .filter(academic_info__year_graduated=year_int, academic_info__section=section)
+                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
                     .order_by('l_name', 'f_name')
                 )
+                print(f"🔍 DEBUG: Found {ojt_data.count()} users for year {year_int} and section {section}")
             else:
-                # For other sections, show all users (you can add more specific filtering later)
+                # Filter by year only
                 ojt_data = (
                     User.objects
                     .filter(academic_info__year_graduated=year_int)
-                    .exclude(acc_username='1005')  # Exclude Christine Lopez for other sections
-                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
+                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
                     .order_by('l_name', 'f_name')
                 )
-        else:
-            # No section filter - show all users for the year
-            ojt_data = (
-                User.objects
-                .filter(academic_info__year_graduated=year_int)
-                .select_related('profile', 'academic_info', 'ojt_info', 'employment')
-                .order_by('l_name', 'f_name')
-            )
+                print(f"🔍 DEBUG: Found {ojt_data.count()} users for year {year_int}")
+        except Exception as e:
+            print(f"🔍 DEBUG: Error fetching OJT data: {e}")
+            import traceback
+            traceback.print_exc()
+            ojt_data = User.objects.none()
 
         # Fallbacks to avoid empty UI and help coordinators verify recent imports
         if not ojt_data.exists():
@@ -1357,7 +1399,7 @@ def ojt_by_year_view(request):
                     User.objects
                     .filter(updated_at__gte=recent_since)
                     .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
+                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
                     .order_by('-updated_at', 'l_name', 'f_name')
                 )
             except Exception:
@@ -1371,7 +1413,7 @@ def ojt_by_year_view(request):
                     User.objects
                     .filter(account_type__ojt=True)
                     .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .select_related('profile', 'academic_info', 'ojt_info', 'employment')
+                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
                     .order_by('l_name', 'f_name')
                 )
 
@@ -1386,15 +1428,21 @@ def ojt_by_year_view(request):
             print(f"   Account Type: {ojt.account_type}")
             print(f"   Is Alumni (user=True): {getattr(ojt.account_type, 'user', False)}")
             
-            # Debug company details
-            employment = getattr(ojt, 'employment', None)
-            print(f"   Employment exists: {employment is not None}")
-            if employment:
-                print(f"   Company Address: {getattr(employment, 'company_address', None)}")
-                print(f"   Company Email: {getattr(employment, 'company_email', None)}")
-                print(f"   Company Contact: {getattr(employment, 'company_contact', None)}")
-                print(f"   Contact Person: {getattr(employment, 'contact_person', None)}")
-                print(f"   Position: {getattr(employment, 'position', None)}")
+            # Debug company details - get from OJTCompanyProfile
+            try:
+                from apps.shared.models import OJTCompanyProfile
+                current_employment = getattr(ojt, 'ojt_company_profile', None)
+            except Exception as e:
+                print(f"   Error fetching OJT company profile: {e}")
+                current_employment = None
+            
+            print(f"   Employment exists: {current_employment is not None}")
+            if current_employment:
+                print(f"   Company Address: {getattr(current_employment, 'company_address', None)}")
+                print(f"   Company Email: {getattr(current_employment, 'company_email', None)}")
+                print(f"   Company Contact: {getattr(current_employment, 'company_contact', None)}")
+                print(f"   Contact Person: {getattr(current_employment, 'contact_person', None)}")
+                print(f"   Position: {getattr(current_employment, 'position', None)}")
             
             user_data = {
                 'id': ojt.user_id,
@@ -1404,21 +1452,21 @@ def ojt_by_year_view(request):
                 'middle_name': ojt.m_name,
                 'last_name': ojt.l_name,
                 'gender': ojt.gender,
-                'birthdate': getattr(ojt.profile, 'birthdate', None),
+                'birthdate': str(getattr(ojt.profile, 'birthdate', None)) if getattr(ojt.profile, 'birthdate', None) else None,
                 'age': getattr(ojt.profile, 'calculated_age', None),
                 'phone_number': getattr(ojt.profile, 'phone_num', None),
                 'address': getattr(ojt.profile, 'address', None),
                 'civil_status': getattr(ojt.profile, 'civil_status', None),
                 'social_media': getattr(ojt.profile, 'social_media', None),
-                'course': getattr(ojt.academic_info, 'course', None),
-                'company': getattr(ojt.employment, 'company_name_current', None),
-                'company_address': getattr(ojt.employment, 'company_address', None),
-                'company_email': getattr(ojt.employment, 'company_email', None),
-                'company_contact': getattr(ojt.employment, 'company_contact', None),
-                'contact_person': getattr(ojt.employment, 'contact_person', None),
-                'position': getattr(ojt.employment, 'position', None),
-                'ojt_start_date': getattr(getattr(ojt, 'employment', None), 'date_started', None),
-                'ojt_end_date': getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None),
+                'program': getattr(ojt.academic_info, 'program', None),
+                'company': getattr(current_employment, 'company_name', None) if current_employment else None,
+                'company_address': getattr(current_employment, 'company_address', None) if current_employment else None,
+                'company_email': getattr(current_employment, 'company_email', None) if current_employment else None,
+                'company_contact': getattr(current_employment, 'company_contact', None) if current_employment else None,
+                'contact_person': getattr(current_employment, 'contact_person', None) if current_employment else None,
+                'position': getattr(current_employment, 'position', None) if current_employment else None,
+                'ojt_start_date': str(getattr(current_employment, 'start_date', None)) if current_employment and getattr(current_employment, 'start_date', None) else None,
+                'ojt_end_date': str(getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None)) if getattr(getattr(ojt, 'ojt_info', None), 'ojt_end_date', None) else None,
                 'ojt_status': getattr(getattr(ojt, 'ojt_info', None), 'ojtstatus', None) or 'Pending',
                 'is_sent_to_admin': is_sent_to_admin_val,
                 'is_alumni': getattr(ojt.account_type, 'user', False),  # Check if account_type is alumni (user=True)
@@ -1447,7 +1495,11 @@ def ojt_by_year_view(request):
         return JsonResponse(response_data)
 
     except Exception as e:
-        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"🔍 DEBUG: Error in ojt_by_year_view: {e}")
+        print(f"🔍 DEBUG: Full traceback: {error_details}")
+        return JsonResponse({'success': False, 'message': f'Error loading OJT data: {str(e)}'}, status=500)
 
 
 # Clear OJT data for a specific batch year
@@ -1674,9 +1726,9 @@ def coordinator_requests_list_view(request):
         all_imports = OJTImport.objects.all()
         print(f"DEBUG: Total OJTImport records: {all_imports.count()}")
         for imp in all_imports:
-            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.program}")
+            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.course}")
         
-        # Base: group Requested imports by year and course, take max count to avoid duplicates
+        # Base: group Requested imports by year and program, take max count to avoid duplicates
         try:
             from django.db.models import Max, Value as V
             from django.db.models.functions import Coalesce
@@ -1687,89 +1739,89 @@ def coordinator_requests_list_view(request):
             all_imports = OJTImport.objects.all()
             print(f"🔍 DEBUG coordinator_requests_list_view: Total OJTImport records: {all_imports.count()}")
             for imp in all_imports:
-                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
+                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.course}")
             
             # Count actual unapproved students instead of using records_imported
             for imp in requested_imports:
                 year = imp.batch_year
-                course = imp.course
+                program = imp.course
                 
-                # Count students who are completed but not yet alumni for this year/course
+                # Count students who are completed but not yet alumni for this year/program
                 unapproved_count = User.objects.filter(
                     academic_info__year_graduated=year,
-                    academic_info__course=course,
+                    academic_info__program=program,
                     ojt_info__ojtstatus='Completed'
                 ).exclude(
                     account_type__user=True  # Exclude alumni (already approved)
                 ).count()
                 
-                print(f"🔍 DEBUG: Year {year}, Course {course} - Unapproved count: {unapproved_count}")
+                print(f"🔍 DEBUG: Year {year}, Program {program} - Unapproved count: {unapproved_count}")
                 
                 # Only include if there are actually unapproved students
                 if unapproved_count > 0:
                     items.append({
                         'batch_year': year,
-                        'course': course,
+                        'program': program,
                         'count': unapproved_count
                     })
         except Exception as e:
             print(f"DEBUG: Exception in grouped query: {e}")
-            # Fallback: if aggregation not available, compute max per year and course in Python
-            by_year_course = {}
+            # Fallback: if aggregation not available, compute max per year and program in Python
+            by_year_program = {}
             for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
                 year = getattr(imp, 'batch_year', None)
-                course = getattr(imp, 'course', '')
+                program = getattr(imp, 'course', '')
                 count_val = getattr(imp, 'records_imported', 0) or 0
                 if year is None:
                     continue
-                key = (year, course)
-                by_year_course[key] = max(by_year_course.get(key, 0), count_val)
-            for (y, course), c in by_year_course.items():
-                items.append({'batch_year': y, 'course': course, 'count': c})
+                key = (year, program)
+                by_year_program[key] = max(by_year_program.get(key, 0), count_val)
+            for (y, program), c in by_year_program.items():
+                items.append({'batch_year': y, 'program': program, 'count': c})
 
         # Fallback: for any batch lacking a Requested import but has Completed users
         # BUT only if there's no Approved OJTImport for that batch
         try:
-            completed_years_courses = (
+            completed_years_programs = (
                 User.objects.filter(ojt_info__ojtstatus='Completed')
-                .values('academic_info__year_graduated', 'academic_info__course')
+                .values('academic_info__year_graduated', 'academic_info__program')
                 .annotate()
             )
-            existing_keys = {(it['batch_year'], it.get('course', '')) for it in items if it.get('batch_year') is not None}
+            existing_keys = {(it['batch_year'], it.get('program', '')) for it in items if it.get('batch_year') is not None}
             
             # Get all approved batches to exclude them from fallback
             approved_batches = set(OJTImport.objects.filter(status='Approved').values_list('batch_year', flat=True))
             print(f"DEBUG: Approved batches: {approved_batches}")
             print(f"DEBUG: Existing keys from main query: {existing_keys}")
             
-            for row in completed_years_courses:
+            for row in completed_years_programs:
                 y = row.get('academic_info__year_graduated')
-                course = row.get('academic_info__course', '')
-                print(f"DEBUG: Checking completed year {y}, course {course}")
-                if y and (y, course) not in existing_keys and y not in approved_batches:
+                program = row.get('academic_info__program', '')
+                print(f"DEBUG: Checking completed year {y}, program {program}")
+                if y and (y, program) not in existing_keys and y not in approved_batches:
                     count = User.objects.filter(
                         academic_info__year_graduated=y, 
-                        academic_info__course=course,
+                        academic_info__program=program,
                         ojt_info__ojtstatus='Completed'
                     ).count()
-                    print(f"DEBUG: Adding fallback item for year {y}, course {course}, count {count}")
-                    items.append({'batch_year': y, 'course': course, 'count': count})
+                    print(f"DEBUG: Adding fallback item for year {y}, program {program}, count {count}")
+                    items.append({'batch_year': y, 'program': program, 'count': count})
                 else:
-                    print(f"DEBUG: Skipping year {y}, course {course} - existing_keys: {(y, course) in existing_keys}, approved: {y in approved_batches}")
+                    print(f"DEBUG: Skipping year {y}, program {program} - existing_keys: {(y, program) in existing_keys}, approved: {y in approved_batches}")
         except Exception as e:
             print(f"DEBUG: Exception in fallback: {e}")
             pass
 
-        # Sort newest first and ensure unique year-course combinations
+        # Sort newest first and ensure unique year-program combinations
         dedup = {}
         for it in items:
             y = it.get('batch_year')
-            course = it.get('course', '')
+            program = it.get('program', '')
             if y is None:
                 continue
-            key = (y, course)
+            key = (y, program)
             dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
-        items = [{'batch_year': y, 'course': course, 'count': c} for (y, course), c in dedup.items()]
+        items = [{'batch_year': y, 'program': program, 'count': c} for (y, program), c in dedup.items()]
         items.sort(key=lambda x: int(x['batch_year']), reverse=True)
         return JsonResponse({'success': True, 'items': items})
     except Exception as e:
@@ -1800,7 +1852,7 @@ def approve_coordinator_request_view(request):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
-@api_view(["POST"])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_coordinator_sections_view(request):
     """Get sections that a coordinator has previously imported"""
@@ -4894,3 +4946,107 @@ def recent_searches_view(request):
     except Exception as e:
         logger.error(f"recent_searches_view error: {e}")
         return JsonResponse({ 'success': False, 'message': 'Server error' }, status=500)
+
+
+"""
+
+API endpoints for authentication, alumni, OJT, notifications, posts, and related features.
+
+Uses shared models and serializers for data representation. If this file continues to grow, consider splitting endpoints into submodules (e.g., auth_views.py, alumni_views.py, ojt_views.py, post_views.py).
+
+"""
+
+
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+
+from django.conf import settings
+
+from django.shortcuts import get_object_or_404
+
+from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
+
+from django.core.files.storage import default_storage
+
+from django.views.decorators.http import require_http_methods
+
+from django.http import JsonResponse
+
+from django.views.decorators.http import require_POST
+
+from django.utils.dateparse import parse_date
+
+from django.utils import timezone
+
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage
+from apps.shared.services import UserService
+
+from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
+
+import json
+
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+from rest_framework import serializers
+
+from datetime import datetime
+
+import secrets
+
+import string
+
+import base64
+
+from rest_framework_simplejwt.tokens import RefreshToken
+
+import pandas as pd
+
+import io
+
+import os
+
+from django.core.files.uploadedfile import InMemoryUploadedFile
+
+from collections import Counter
+
+from apps.shared.models import Question
+
+from django.core.mail import send_mail
+
+from django.utils import timezone
+
+from rest_framework.decorators import api_view, parser_classes, permission_classes
+
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+
+from rest_framework.parsers import MultiPartParser
+
+from rest_framework.response import Response
+
+from rest_framework import status
+
+from django.db.models import Value, CharField, Q
+
+from django.db import connection
+
+from django.db.utils import ProgrammingError
+
+from django.db.models.functions import Concat, Coalesce
+
+from rest_framework.decorators import api_view
+
+import tempfile
+
+from django.http import FileResponse
+
+from django.db import transaction
+
+
+
+# --- Helpers for Posts ---

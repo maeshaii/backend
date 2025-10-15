@@ -931,6 +931,32 @@ class OJTInfo(models.Model):
     def __str__(self):
         return f"OJT info for {self.user.full_name} - Status: {self.ojtstatus}"
 
+
+class OJTCompanyProfile(models.Model):
+    """OJT Company Profile - Stores company information for OJT students"""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='ojt_company_profile')
+    company_name = models.CharField(max_length=255, null=True, blank=True)
+    company_address = models.TextField(null=True, blank=True)
+    company_email = models.EmailField(null=True, blank=True)
+    company_contact = models.CharField(max_length=20, null=True, blank=True)
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    position = models.CharField(max_length=255, null=True, blank=True)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['company_name']),
+            models.Index(fields=['start_date']),
+            models.Index(fields=['end_date']),
+        ]
+    
+    def __str__(self):
+        return f"OJT Company Profile for {self.user.full_name} - {self.company_name}"
+
+
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
@@ -1191,4 +1217,3 @@ class TrackerFileUpload(models.Model):
 # Forum-specific relations (now use shared tables)
 # ==========================
 # ForumRepost has been merged into Repost table
-# Forum reposts now use the shared Repost model with a forum foreign key

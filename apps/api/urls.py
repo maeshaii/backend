@@ -126,7 +126,7 @@ urlpatterns = [
     path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
-    # # User Managem    ent API endpoints (Admin only)
+    # # User Management API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     
