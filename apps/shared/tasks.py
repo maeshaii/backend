@@ -337,3 +337,5 @@ def get_background_jobs_status():
     except Exception as e:
         logger.error(f"Failed to get background jobs status: {e}")
         return {'error': str(e)}
+
+

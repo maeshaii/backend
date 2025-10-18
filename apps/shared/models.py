@@ -56,6 +56,52 @@ class Comment(models.Model):
             )
         ]
 
+class Reply(models.Model):
+    """User replies to comments on posts, forums, donations, and reposts"""
+    reply_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='replies')
+    comment = models.ForeignKey('Comment', on_delete=models.CASCADE, related_name='replies')
+    reply_content = models.TextField()
+    date_created = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['date_created']
+        db_table = 'shared_reply'
+        indexes = [
+            models.Index(fields=['comment', 'date_created']),
+            models.Index(fields=['user', 'date_created']),
+        ]
+    
+    def __str__(self):
+        return f"Reply by {self.user.full_name} to comment {self.comment.comment_id}"
+
+class ContentImage(models.Model):
+    """Unified image model for posts, forums, and donations"""
+    CONTENT_TYPE_CHOICES = [
+        ('post', 'Post'),
+        ('forum', 'Forum'),
+        ('donation', 'Donation'),
+    ]
+    
+    image_id = models.AutoField(primary_key=True)
+    content_type = models.CharField(max_length=20, choices=CONTENT_TYPE_CHOICES)
+    content_id = models.PositiveIntegerField()  # ID of the post, forum, or donation
+    image = models.ImageField(upload_to='content_images/')
+    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['order', 'created_at']
+        db_table = 'shared_contentimage'
+        indexes = [
+            models.Index(fields=['content_type', 'content_id']),
+            models.Index(fields=['content_type', 'content_id', 'order']),
+        ]
+        unique_together = [['content_type', 'content_id', 'order']]
+    
+    def __str__(self):
+        return f"Image {self.image_id} for {self.content_type} {self.content_id}"
+
 # REMOVED: Old job models with circular FK relationships (deleted in migration 0091)
 # Replaced by SimpleCompTechJob, SimpleInfoTechJob, SimpleInfoSystemJob
 # - CompTechJob
@@ -71,13 +117,27 @@ class Forum(models.Model):
     """Forum posts stored separately from shared_post (identical structure).
 
     Used by Mobile: CRUD/like/comment/repost via /api/forum/... endpoints.
+    Images are handled by ContentImage model.
     """
     forum_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='forums')
-    image = models.ImageField(upload_to='forum_images/', null=True, blank=True)
     content = models.TextField(null=True, blank=True)
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_column='date_send')
+    
+    @property
+    def images(self):
+        """Get all images for this forum post"""
+        return ContentImage.objects.filter(content_type='forum', content_id=self.forum_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this forum post"""
+        return ContentImage.objects.create(
+            content_type='forum',
+            content_id=self.forum_id,
+            image=image_file,
+            order=order
+        )
 
 # REMOVED: Legacy models deleted in migration 0091
 # - HighPosition (functionality moved to EmploymentHistory.high_position boolean)
@@ -240,26 +300,27 @@ class PostImageDisabled(models.Model):
 class Post(models.Model):
     post_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='posts')
-    post_image = models.ImageField(upload_to='post_images/', null=True, blank=True)  # Keep for backward compatibility
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # Used by Mobile: feed list/create/edit/delete/like/comment/repost
+    # Images are handled by ContentImage model
+    
+    @property
+    def images(self):
+        """Get all images for this post"""
+        return ContentImage.objects.filter(content_type='post', content_id=self.post_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this post"""
+        return ContentImage.objects.create(
+            content_type='post',
+            content_id=self.post_id,
+            image=image_file,
+            order=order
+        )
 
-class PostImage(models.Model):
-    """Multiple images for posts"""
-    image_id = models.AutoField(primary_key=True)
-    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='post_images/')
-    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        ordering = ['order', 'created_at']
-        db_table = 'shared_postimage'
-    
-    def __str__(self):
-        return f"Image {self.image_id} for Post {self.post.post_id}"
+# PostImage model removed - replaced by ContentImage
 
 # REMOVED: Qpro model (deleted in migration 0091)
 
@@ -280,23 +341,24 @@ class DonationRequest(models.Model):
         ordering = ['-created_at']
         db_table = 'shared_donationrequest'
     
+    @property
+    def images(self):
+        """Get all images for this donation request"""
+        return ContentImage.objects.filter(content_type='donation', content_id=self.donation_id)
+    
+    def add_image(self, image_file, order=0):
+        """Add an image to this donation request"""
+        return ContentImage.objects.create(
+            content_type='donation',
+            content_id=self.donation_id,
+            image=image_file,
+            order=order
+        )
+    
     def __str__(self):
         return f"Donation Request {self.donation_id} by {self.user.f_name} {self.user.l_name}"
 
-class DonationImage(models.Model):
-    """Multiple images for donation requests"""
-    image_id = models.AutoField(primary_key=True)
-    donation_request = models.ForeignKey(DonationRequest, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='donation_images/')
-    order = models.PositiveIntegerField(default=0)  # For ordering multiple images
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        ordering = ['order', 'created_at']
-        db_table = 'shared_donationimage'
-    
-    def __str__(self):
-        return f"Image {self.image_id} for Donation Request {self.donation_request.donation_id}"
+# DonationImage model removed - replaced by ContentImage
 
 class Repost(models.Model):
     repost_id = models.AutoField(primary_key=True)
@@ -547,6 +609,7 @@ class EmploymentHistory(models.Model):
     company_name_current = models.CharField(max_length=255, null=True, blank=True)
     position_current = models.CharField(max_length=255, null=True, blank=True)
     sector_current = models.CharField(max_length=255, null=True, blank=True)
+    scope_current = models.CharField(max_length=255, null=True, blank=True)
     employment_duration_current = models.CharField(max_length=100, null=True, blank=True)
     salary_current = models.CharField(max_length=100, null=True, blank=True)
     date_started = models.DateField(null=True, blank=True)
@@ -588,6 +651,67 @@ class EmploymentHistory(models.Model):
             models.Index(fields=['self_employed', 'high_position']),
         ]
     
+    def _check_job_alignment_for_position(self, position, program):
+        """Check job alignment for a specific position without saving to database
+        Used during form completion for real-time alignment checking
+        """
+        if not position:
+            self.job_alignment_status = 'not_aligned'
+            self.job_alignment_category = None
+            self.job_alignment_title = None
+            return
+        
+        position_lower = position.lower().strip()
+        program_lower = (program or '').lower()
+        
+        # Check alignment against job tables
+        alignment_found = False
+        
+        # Check SimpleInfoTechJob (BSIT)
+        if 'bsit' in program_lower or 'information technology' in program_lower:
+            if SimpleInfoTechJob.objects.filter(job_title__iexact=position).exists():
+                self.job_alignment_status = 'aligned'
+                self.job_alignment_category = 'BSIT'
+                self.job_alignment_title = position
+                alignment_found = True
+        
+        # Check SimpleInfoSystemJob (BSIS)
+        if not alignment_found and ('bsis' in program_lower or 'information system' in program_lower):
+            if SimpleInfoSystemJob.objects.filter(job_title__iexact=position).exists():
+                self.job_alignment_status = 'aligned'
+                self.job_alignment_category = 'BSIS'
+                self.job_alignment_title = position
+                alignment_found = True
+        
+        # Check SimpleCompTechJob (BIT-CT)
+        if not alignment_found and ('bit-ct' in program_lower or 'computer technology' in program_lower):
+            if SimpleCompTechJob.objects.filter(job_title__iexact=position).exists():
+                self.job_alignment_status = 'aligned'
+                self.job_alignment_category = 'BIT-CT'
+                self.job_alignment_title = position
+                alignment_found = True
+        
+        # Check cross-program alignment
+        if not alignment_found:
+            cross_program_match = self._find_cross_program_match(position_lower, program_lower)
+            if cross_program_match:
+                self.job_alignment_status = 'pending_user_confirmation'
+                self.job_alignment_category = cross_program_match['category']
+                self.job_alignment_title = cross_program_match['title']
+                self.job_alignment_suggested_program = cross_program_match['program']
+                self.job_alignment_original_program = program
+                alignment_found = True
+        
+        # If no alignment found, mark as pending confirmation
+        if not alignment_found:
+            self.job_alignment_status = 'pending_user_confirmation'
+            self.job_alignment_category = None
+            self.job_alignment_title = position
+            self.job_alignment_original_program = program
+        
+        return self.job_alignment_status
+
+
     def update_job_alignment(self):
         """Update job alignment fields based on position_current and program
         This connects tracker answers to statistics types (CHED, SUC, AACUP)
@@ -812,12 +936,15 @@ class EmploymentHistory(models.Model):
                     
                     logger.info(f"Cross-program job added to database: '{self.position_current}' added to {self.job_alignment_original_program} table")
                 else:
-                    # Not found in any program - just mark as aligned (new job type)
+                    # Not found in any program - add as new job type to user's program table
                     self.job_alignment_status = 'aligned'
                     self.job_alignment_category = self._get_category_for_program(self.job_alignment_original_program)
                     self.job_alignment_title = self.position_current
                     
-                    logger.info(f"New job type aligned: '{self.position_current}' (not found in any program table)")
+                    # Add the new job to the user's program table
+                    self._add_new_job_to_program_table(self.position_current, self.job_alignment_original_program)
+                    
+                    logger.info(f"New job type aligned: '{self.position_current}' added to {self.job_alignment_original_program} table")
             else:
                 # User said NO - mark as not aligned
                 self.job_alignment_status = 'not_aligned'
@@ -864,6 +991,37 @@ class EmploymentHistory(models.Model):
             
         except Exception as e:
             logger.error(f"Failed to add job to user program table: {e}")
+            # Don't let this break the main flow
+    
+    def _add_new_job_to_program_table(self, job_title, user_program):
+        """
+        SENIOR DEV: Add new job to user's program table for future use.
+        """
+        import logging
+        logger = logging.getLogger('apps.shared.models')
+        
+        try:
+            # Add to appropriate table based on user's program
+            if 'bit-ct' in user_program.lower() or 'computer technology' in user_program.lower():
+                # Check if already exists
+                if not SimpleCompTechJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleCompTechJob.objects.create(job_title=job_title)
+                    logger.info(f"Added new job '{job_title}' to BIT-CT job table")
+            
+            elif 'bsit' in user_program.lower() or 'information technology' in user_program.lower():
+                # Check if already exists
+                if not SimpleInfoTechJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleInfoTechJob.objects.create(job_title=job_title)
+                    logger.info(f"Added new job '{job_title}' to BSIT job table")
+            
+            elif 'bsis' in user_program.lower() or 'information system' in user_program.lower():
+                # Check if already exists
+                if not SimpleInfoSystemJob.objects.filter(job_title__iexact=job_title).exists():
+                    SimpleInfoSystemJob.objects.create(job_title=job_title)
+                    logger.info(f"Added new job '{job_title}' to BSIS job table")
+            
+        except Exception as e:
+            logger.error(f"Failed to add new job to program table: {e}")
             # Don't let this break the main flow
     
     def __str__(self):
@@ -1021,7 +1179,7 @@ class TrackerResponse(models.Model):
                 # Part 1: Personal Information
                 if question_id == 1:  # Year Graduated
                     academic.year_graduated = int(answer) if str(answer).isdigit() else academic.year_graduated
-                elif question_id == 2:  # Course Graduated
+                elif question_id == 2:  # Program Graduated
                     academic.program = str(answer) if answer else academic.program
                 elif question_id == 3:  # Email
                     profile.email = str(answer) if answer else profile.email
@@ -1129,6 +1287,19 @@ class TrackerResponse(models.Model):
             except Exception:
                 continue
 
+        # Save all models
+        user.save()
+        profile.save()
+        academic.save()
+        # Update job alignment and related derived employment fields
+        employment.update_job_alignment()
+        employment.save()
+        tracker.tracker_submitted_at = self.submitted_at
+        tracker.save()
+        
+        # PHASE 3: Invalidate statistics cache after tracker submission
+        self._invalidate_statistics_cache()
+
     def _invalidate_statistics_cache(self):
         """PHASE 3: Invalidate statistics cache when tracker data changes"""
         try:
@@ -1167,19 +1338,6 @@ class TrackerResponse(models.Model):
             import logging
             logger = logging.getLogger('apps.shared.models')
             logger.warning(f"Failed to invalidate statistics cache: {e}")
-
-        # Save all models
-        user.save()
-        profile.save()
-        academic.save()
-        # Update job alignment and related derived employment fields
-        employment.update_job_alignment()
-        employment.save()
-        tracker.tracker_submitted_at = self.submitted_at
-        tracker.save()
-        
-        # PHASE 3: Invalidate statistics cache after tracker submission
-        self._invalidate_statistics_cache()
 
 # OJT-specific models
 class Follow(models.Model):

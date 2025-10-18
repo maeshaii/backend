@@ -154,3 +154,5 @@ class Command(BaseCommand):
         self.stdout.write(f"Alignment coverage: {aligned}/{total_alumni} alumni ({aligned/total_alumni*100:.1f}%)" if total_alumni > 0 else "Alignment coverage: 0%")
         self.stdout.write("=" * 70)
 
+
+

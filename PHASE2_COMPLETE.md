@@ -571,3 +571,5 @@ python manage.py showmigrations shared
 
 **Recommendation**: Deploy to production during low-traffic window. Monitor for 24 hours. Consider Redis caching if traffic increases.
 
+
+

@@ -80,7 +80,7 @@ def get_field_from_question_map(user, question_text_map, field, *question_labels
         return ''
     
     # Handle fields that are in the AcademicInfo model
-    academic_fields = ['course', 'year_graduated', 'program']
+    academic_fields = ['year_graduated', 'program']
     if field in academic_fields:
         if hasattr(user, 'academic_info') and user.academic_info:
             val = getattr(user.academic_info, field, None)
@@ -113,7 +113,7 @@ def alumni_detail_view(request, user_id):
     from apps.shared.models import TrackerResponse, Question
     try:
         # Always pull related data to avoid extra queries and ensure academic_info is available
-        user = User.objects.select_related('profile', 'academic_info').get(user_id=user_id)
+        user = User.objects.select_related('profile', 'academic_info', 'employment').get(user_id=user_id)
         tracker_responses = TrackerResponse.objects.filter(user=user).order_by('-submitted_at')
         latest_tracker = tracker_responses.first() if tracker_responses.exists() else None
         tracker_answers = latest_tracker.answers if latest_tracker and latest_tracker.answers else {}
@@ -127,6 +127,7 @@ def alumni_detail_view(request, user_id):
             return get_field_from_question_map(user, question_text_map, field, *question_labels)
 
         academic_info = getattr(user, 'academic_info', None)
+        employment_info = getattr(user, 'employment', None)
         batch_year = getattr(academic_info, 'year_graduated', None)
 
         # Get follower and following counts
@@ -157,6 +158,13 @@ def alumni_detail_view(request, user_id):
             'social_media': get_field('social_media', 'social media'),
             'school_name': getattr(academic_info, 'school_name', None) if academic_info else get_field('school_name', 'school name'),
             'profile_pic': _build_profile_pic_url(user),
+            # Employment data
+            'position_current': getattr(employment_info, 'position_current', None) if employment_info else get_field('position_current', 'current position'),
+            'company_name_current': getattr(employment_info, 'company_name_current', None) if employment_info else get_field('company_name_current', 'current company'),
+            'sector_current': getattr(employment_info, 'sector_current', None) if employment_info else get_field('sector_current', 'employment sector'),
+            'scope_current': getattr(employment_info, 'scope_current', None) if employment_info else get_field('scope_current', 'current scope'),
+            'salary_current': getattr(employment_info, 'salary_current', None) if employment_info else get_field('salary_current', 'salary'),
+            'self_employed': getattr(employment_info, 'self_employed', False) if employment_info else False,
             'followers_count': followers_count,
             'following_count': following_count,
             'account_type': {

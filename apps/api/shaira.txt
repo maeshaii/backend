@@ -1,0 +1,85 @@
+shaira
+
+
+# Recent Search API Views
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def recent_searches_view(request):
+    """Handle recent searches"""
+    try:
+        user = request.user
+        
+        if request.method == "GET":
+            # Get recent searches for the current user
+            recent_searches = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')[:10]
+            
+            searches_data = []
+            for search in recent_searches:
+                searches_data.append({
+                    'id': search.id,
+                    'searched_user': {
+                        'user_id': search.searched_user.user_id,
+                        'f_name': search.searched_user.f_name,
+                        'm_name': search.searched_user.m_name,
+                        'l_name': search.searched_user.l_name,
+                        'profile_pic': build_profile_pic_url(search.searched_user),
+                    },
+                    'created_at': search.created_at.isoformat()
+                })
+            
+            return JsonResponse({
+                'success': True,
+                'recent_searches': searches_data
+            })
+            
+        elif request.method == "POST":
+            data = json.loads(request.body)
+            searched_user_id = data.get('searched_user_id')
+            
+            if not searched_user_id:
+                return JsonResponse({'error': 'searched_user_id is required'}, status=400)
+            
+            try:
+                searched_user = User.objects.get(user_id=searched_user_id)
+            except User.DoesNotExist:
+                return JsonResponse({'error': 'User not found'}, status=404)
+            
+            # Create or update recent search (unique constraint handles duplicates)
+            recent_search, created = RecentSearch.objects.get_or_create(
+                owner=user,
+                searched_user=searched_user,
+                defaults={'created_at': timezone.now()}
+            )
+            
+            # If it already exists, update the timestamp
+            if not created:
+                recent_search.created_at = timezone.now()
+                recent_search.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Recent search saved',
+                'created': created
+            })
+            
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def recent_search_delete_view(request, search_id):
+    """Delete a specific recent search"""
+    try:
+        user = request.user
+        recent_search = RecentSearch.objects.get(id=search_id, owner=user)
+        recent_search.delete()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Recent search deleted'
+        })
+        
+    except RecentSearch.DoesNotExist:
+        return JsonResponse({'error': 'Recent search not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
