@@ -44,6 +44,7 @@ urlpatterns = [
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
     path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
+    path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
@@ -127,7 +128,7 @@ urlpatterns = [
     path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
-    # # User Managem    ent API endpoints (Admin only)
+    # # User Management API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     
