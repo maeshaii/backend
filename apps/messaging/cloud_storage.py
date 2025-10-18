@@ -110,6 +110,10 @@ class S3StorageManager:
             # Generate public URL
             file_url = self._generate_file_url(file_key)
             
+            # Ensure URL is properly formatted
+            if file_url and not file_url.startswith('http'):
+                logger.warning(f"Generated non-HTTP URL: {file_url}")
+            
             logger.info(f"File uploaded to S3: {file_key}")
             
             return {
@@ -257,7 +261,7 @@ class S3StorageManager:
             file_obj = ContentFile(file_content, name=unique_filename)
             saved_path = default_storage.save(unique_filename, file_obj)
             
-            # Generate URL
+            # Generate relative URL (will be made absolute by serializer)
             file_url = default_storage.url(saved_path)
             
             logger.info(f"File uploaded to local storage: {saved_path}")
@@ -265,7 +269,7 @@ class S3StorageManager:
             return {
                 'success': True,
                 'file_key': saved_path,
-                'file_url': file_url,
+                'file_url': file_url,  # Relative URL, will be made absolute by serializer
                 'file_name': file_name,
                 'content_type': content_type,
                 'size': len(file_content),
@@ -376,5 +380,8 @@ class CloudStorageManager:
 
 # Global instance
 cloud_storage = CloudStorageManager()
+
+
+
 
 

@@ -167,10 +167,14 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
     acc_password = serializers.CharField()
 
     def validate(self, attrs):
-        acc_username = attrs.get('acc_username')
-        acc_password = attrs.get('acc_password')
-        if acc_password is None:
+        acc_username = attrs.get('acc_username', '').strip()
+        acc_password = attrs.get('acc_password', '').strip()
+        
+        if not acc_username:
+            raise serializers.ValidationError('Username is required')
+        if not acc_password:
             raise serializers.ValidationError('Password is required')
+            
         try:
             user = User.objects.get(acc_username=acc_username)
         except User.DoesNotExist:

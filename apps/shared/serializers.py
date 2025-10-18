@@ -229,10 +229,31 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['attachment_id', 'uploaded_at']
     
     def get_file_url(self, obj):
+        """Get file URL with proper cloud storage support"""
+        # Prioritize cloud storage URL (already absolute)
+        if obj.file_url:
+            # Check if it's already absolute
+            if obj.file_url.startswith('http'):
+                return obj.file_url
+            # If relative, make it absolute
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.file_url)
+            else:
+                from django.conf import settings
+                return f"http://localhost:8000{obj.file_url}"
+        
+        # Fallback to local storage - ensure absolute URL
         if obj.file:
             request = self.context.get('request')
             if request:
                 return request.build_absolute_uri(obj.file.url)
+            else:
+                # If no request context, construct URL manually
+                from django.conf import settings
+                return f"http://localhost:8000{obj.file.url}"
+        
+        # If neither field has a URL, return None
         return None
     
     def get_file_category(self, obj):

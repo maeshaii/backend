@@ -711,3 +711,6 @@ class MessageOrderingRaceConditionTestCase(TestCase):
             self.assertIn('microsecond_timestamp', metadata)
 
 
+
+
+

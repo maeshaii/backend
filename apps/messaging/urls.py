@@ -19,4 +19,7 @@ urlpatterns = [
     
     # Attachments
     path('attachments/', views.AttachmentUploadView.as_view(), name='attachment-upload'),
+    
+    # File serving with ngrok bypass
+    path('files/<path:file_path>', views.serve_file_with_ngrok_bypass, name='serve-file-ngrok-bypass'),
 ]

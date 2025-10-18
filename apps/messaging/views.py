@@ -9,9 +9,12 @@ from django.db.models import Q
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.http import HttpResponse, Http404
+from django.conf import settings
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import logging
+import os
 from apps.shared.models import Conversation, Message, MessageAttachment, User
 from apps.shared.serializers import (
 	ConversationSerializer,
@@ -219,8 +222,14 @@ class MessageListView(generics.ListCreateAPIView):
             attachment_info = None
             if hasattr(message, 'attachments') and message.attachments.exists():
                 attachment = message.attachments.first()
-                if attachment and attachment.file:
-                    attachment_url = attachment.file.url
+                if attachment:
+                    # Use cloud storage URL first, fallback to local storage with absolute URL
+                    if attachment.file_url:
+                        attachment_url = attachment.file_url
+                    elif attachment.file:
+                        # Build absolute URL for local storage
+                        attachment_url = request.build_absolute_uri(attachment.file.url)
+                    
                     # Include attachment info for frontend
                     attachment_info = {
                         'file_name': attachment.file_name,
@@ -243,6 +252,13 @@ class MessageListView(generics.ListCreateAPIView):
                     'timestamp': timezone.now().isoformat(),
                     'attachment_url': attachment_url,
                     'attachment_info': attachment_info,
+                    'attachments': [{
+                        'file_url': attachment_url,
+                        'file_name': attachment_info.get('file_name') if attachment_info else None,
+                        'file_type': attachment_info.get('file_type') if attachment_info else None,
+                        'file_category': attachment_info.get('file_category') if attachment_info else None,
+                        'file_size': attachment_info.get('file_size') if attachment_info else None,
+                    }] if attachment_url and attachment_info else [],
                 },
             )
         except Exception as e:
@@ -258,7 +274,7 @@ class MessageListView(generics.ListCreateAPIView):
             'content': message.content,
             'message_type': message.message_type,
             'sender_id': message.sender.user_id,
-            'sender_name': message.sender.name,
+            'sender_name': message.sender.full_name,
             'created_at': message.created_at.isoformat(),
             'is_read': message.is_read,
             'attachment_url': attachment_url,
@@ -561,8 +577,20 @@ class AttachmentUploadView(APIView):
                 storage_type=upload_result['storage_type'],  # 's3' or 'local'
             )
             
+            # For local storage, also populate the legacy file field
+            if upload_result['storage_type'] == 'local':
+                # Save file to legacy FileField for compatibility
+                file.seek(0)  # Reset file pointer
+                attachment.file.save(sanitized_filename, file, save=True)
+            
             # Determine file category for frontend display
             file_category = get_file_category(file.content_type)
+            
+            # Ensure proper URL construction
+            file_url = attachment.file_url
+            if not file_url and attachment.file:
+                # Build absolute URL for local storage
+                file_url = request.build_absolute_uri(attachment.file.url)
             
             return Response({
                 'attachment_id': attachment.attachment_id,
@@ -570,7 +598,7 @@ class AttachmentUploadView(APIView):
                 'file_type': attachment.file_type,
                 'file_category': file_category,
                 'file_size': attachment.file_size,
-                'file_url': attachment.file.url if attachment.file else None,
+                'file_url': file_url,
                 'uploaded_at': attachment.uploaded_at.isoformat(),
             }, status=status.HTTP_201_CREATED)
 
@@ -578,3 +606,52 @@ class AttachmentUploadView(APIView):
             logger.exception("Attachment upload failed")
             return Response({'error': 'Upload failed', 'detail': str(e), 'type': e.__class__.__name__}, 
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def serve_file_with_ngrok_bypass(request, file_path):
+    """
+    Serve files with ngrok-skip-browser-warning header to bypass ngrok warning page
+    """
+    try:
+        # Construct the full file path
+        full_path = os.path.join(settings.MEDIA_ROOT, file_path)
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            raise Http404("File not found")
+        
+        # Read the file
+        with open(full_path, 'rb') as f:
+            file_content = f.read()
+        
+        # Determine content type
+        import mimetypes
+        content_type, _ = mimetypes.guess_type(full_path)
+        if not content_type:
+            content_type = 'application/octet-stream'
+        
+        # Create response with ngrok bypass header
+        response = HttpResponse(file_content, content_type=content_type)
+        response['ngrok-skip-browser-warning'] = 'true'
+        
+        # Check for mobile download parameters
+        download_param = request.GET.get('download')
+        bypass_param = request.GET.get('bypass')
+        ua_param = request.GET.get('ua')
+        
+        if download_param == '1' or bypass_param == '1' or ua_param == 'mobile':
+            # Force download for mobile devices
+            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+        else:
+            # Default behavior
+            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
+        
+        return response
+        
+    except Exception as e:
+        logger.exception(f"Error serving file {file_path}")
+        raise Http404("File not found")

@@ -596,3 +596,6 @@ class WebSocketConsumerTestCase(TransactionTestCase):
                             await communicator.disconnect()
 
 
+
+
+

@@ -11,6 +11,7 @@ from .message_ordering import message_sequencer
 from .rate_limiter import rate_limiter, connection_pool
 from .monitoring import messaging_monitor, track_performance, PerformanceTracker
 from .performance_metrics import performance_metrics, PerformanceTracker as PerfTracker
+from .views import get_file_category
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
 		
 		message_stages['sequencing_complete'] = time.time()
 		
+		# Get attachment details if exists
+		attachment_url = None
+		attachment_info = None
+		if hasattr(message, 'attachments') and message.attachments.exists():
+			attachment = message.attachments.first()
+			if attachment:
+				# Use cloud storage URL first, fallback to local storage
+				if attachment.file_url:
+					attachment_url = attachment.file_url
+				elif attachment.file:
+					# For WebSocket, we need to construct absolute URL
+					# This is a simplified version - in production, use proper domain
+					attachment_url = f"http://localhost:8000{attachment.file.url}"
+				
+				attachment_info = {
+					'file_name': attachment.file_name,
+					'file_type': attachment.file_type,
+					'file_category': get_file_category(attachment.file_type),
+					'file_size': attachment.file_size,
+				}
+
 		# Broadcast to all users in the conversation with sequencing info
 		await self.channel_layer.group_send(
 			f"chat_{self.conversation_id}",
@@ -253,6 +275,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
 				'created_at': message.created_at.isoformat(),
 				'timestamp': timezone.now().isoformat(),
 				'microsecond_timestamp': message_metadata.get('microsecond_timestamp'),
+				'attachment_url': attachment_url,
+				'attachment_info': attachment_info,
+				'attachments': [{
+					'file_url': attachment_url,
+					'file_name': attachment_info.get('file_name') if attachment_info else None,
+					'file_type': attachment_info.get('file_type') if attachment_info else None,
+					'file_category': attachment_info.get('file_category') if attachment_info else None,
+					'file_size': attachment_info.get('file_size') if attachment_info else None,
+				}] if attachment_url and attachment_info else [],
 			}
 		)
 		

@@ -1,3 +1,4 @@
+import logging
 import typing
 from urllib.parse import parse_qs
 
@@ -7,6 +8,8 @@ from django.contrib.auth.models import AnonymousUser
 from django.utils.functional import LazyObject
 
 from rest_framework_simplejwt.authentication import JWTAuthentication
+
+logger = logging.getLogger(__name__)
 
 
 class _LazyUser(LazyObject):
@@ -73,13 +76,11 @@ class JWTAuthMiddleware:
             if 'token' in params and params['token']:
                 token = params['token'][0]
                 # Debug logging
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.info(f"JWT Middleware: Found token in URL query string: {token[:20]}...")
                 return token
+            else:
+                logger.info("JWT Middleware: No token found in query string")
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"JWT Middleware: Error extracting token from query string: {e}")
 
         return None
