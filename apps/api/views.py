@@ -15,7 +15,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage, RecentSearch
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, DonationImage, RecentSearch, SendDate
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -1365,25 +1365,34 @@ def ojt_by_year_view(request):
         # Fetch users for the year and section
         print(f"🔍 DEBUG: Fetching OJT data for year: {year_int}, section: {section}")
         
+        # Check if request is from admin user
+        is_admin_request = request.user.account_type.admin if hasattr(request.user, 'account_type') else False
+        
         try:
             if section:
                 # Filter by both year and section
-                ojt_data = (
-                    User.objects
-                    .filter(academic_info__year_graduated=year_int, academic_info__section=section)
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
-                    .order_by('l_name', 'f_name')
-                )
-                print(f"🔍 DEBUG: Found {ojt_data.count()} users for year {year_int} and section {section}")
+                base_filter = User.objects.filter(academic_info__year_graduated=year_int, academic_info__section=section)
             else:
                 # Filter by year only
+                base_filter = User.objects.filter(academic_info__year_graduated=year_int)
+            
+            # If admin request, only show students sent to admin
+            if is_admin_request:
                 ojt_data = (
-                    User.objects
-                    .filter(academic_info__year_graduated=year_int)
+                    base_filter
+                    .filter(ojt_info__is_sent_to_admin=True)
                     .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
                     .order_by('l_name', 'f_name')
                 )
-                print(f"🔍 DEBUG: Found {ojt_data.count()} users for year {year_int}")
+                print(f"🔍 DEBUG: Admin request - Found {ojt_data.count()} students sent to admin for year {year_int}")
+            else:
+                # Coordinator request - show all students
+                ojt_data = (
+                    base_filter
+                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile')
+                    .order_by('l_name', 'f_name')
+                )
+                print(f"🔍 DEBUG: Coordinator request - Found {ojt_data.count()} users for year {year_int}")
         except Exception as e:
             print(f"🔍 DEBUG: Error fetching OJT data: {e}")
             import traceback
@@ -1646,30 +1655,49 @@ def send_completed_to_admin_view(request):
         try:
             from apps.shared.models import OJTImport
             coord_name = getattr(getattr(request, 'user', None), 'acc_username', None) or getattr(getattr(request, 'user', None), 'username', '') or ''
+            print(f"🔍 DEBUG send_completed_to_admin_view: coord_name={coord_name}, year_int={year_int}")
+            
             # Upsert by batch_year; status becomes 'Requested'
             # Fallback: if year_int is None, attempt to infer from first matching user
             if year_int is None:
                 first_user = users_qs.first()
                 if first_user and getattr(first_user, 'academic_info', None):
                     year_int = getattr(first_user.academic_info, 'year_graduated', None)
+                    print(f"🔍 DEBUG: Inferred year_int from first user: {year_int}")
             if year_int is None:
                 # As a last resort, avoid creating invalid rows
+                print(f"🔍 DEBUG: No batch year provided, returning early")
                 return JsonResponse({'success': True, 'completed_count': sent_users_count, 'note': 'No batch year provided'}, status=200)
 
-            obj, created = OJTImport.objects.get_or_create(batch_year=year_int, defaults={
-                'coordinator': coord_name,
-                'course': '',
-                'file_name': 'send_to_admin',
-                'records_imported': sent_users_count,
-                'status': 'Requested',
-            })
-            if not created:
-                obj.coordinator = coord_name or obj.coordinator
-                obj.status = 'Requested'
-                obj.records_imported = sent_users_count
-                obj.save()
+            print(f"🔍 DEBUG: Creating/updating OJTImport for year {year_int}, coordinator {coord_name}")
+            
+            # Always create a new 'Requested' record when sending to admin
+            # This ensures admin dashboard will see the request
+            print(f"🔍 DEBUG: Creating new OJTImport record with status 'Requested'")
+            
+            # Get section and program from the first user being sent to admin
+            section = ''
+            program = ''
+            first_user = users_qs.filter(ojt_info__ojtstatus='Completed').first()
+            if first_user and getattr(first_user, 'academic_info', None):
+                section = getattr(first_user.academic_info, 'section', '') or ''
+                program = getattr(first_user.academic_info, 'program', '') or ''
+            
+            obj = OJTImport.objects.create(
+                batch_year=year_int,
+                coordinator=coord_name,
+                course=program,
+                section=section,
+                file_name='send_to_admin',
+                records_imported=sent_users_count,
+                status='Requested',
+            )
+            
+            print(f"🔍 DEBUG: Final OJTImport - Year: {obj.batch_year}, Status: {obj.status}, Coordinator: {obj.coordinator}")
         except Exception as e:
-            print(f"Error creating/updating OJTImport: {e}")
+            print(f"🔍 DEBUG: Error creating/updating OJTImport: {e}")
+            import traceback
+            traceback.print_exc()
 
         return JsonResponse({'success': True, 'completed_count': sent_users_count})
     except Exception as e:
@@ -1683,34 +1711,48 @@ def coordinator_requests_count_view(request):
     try:
         year = request.GET.get('year')
         # Count distinct batches requested by coordinators
-        from apps.shared.models import OJTImport
+        from apps.shared.models import OJTImport, User
+        
+        print(f"🔍 DEBUG coordinator_requests_count_view: year={year}")
+        
         qs = OJTImport.objects.filter(status='Requested')
+        print(f"🔍 DEBUG: Found {qs.count()} OJTImport records with status='Requested'")
+        
         if year is not None and str(year).strip() != '':
             try:
                 import re
                 match = re.search(r"(20\d{2})", str(year))
                 year_int = int(match.group(1)) if match else int(str(year).strip())
                 qs = qs.filter(batch_year=year_int)
+                print(f"🔍 DEBUG: After year filter ({year_int}): {qs.count()} records")
+            except Exception as e:
+                print(f"🔍 DEBUG: Year filter error: {e}")
+                pass
+        
+        # Count students with completed OJT status that are pending admin approval
+        # These are the actual items that need approval, not just the import requests
+        pending_approval_count = User.objects.filter(
+            ojt_info__ojtstatus='Completed',
+            ojt_info__is_sent_to_admin=True  # Only students sent to admin for approval
+        ).count()
+        
+        if year is not None and str(year).strip() != '':
+            try:
+                pending_approval_count = User.objects.filter(
+                    ojt_info__ojtstatus='Completed',
+                    ojt_info__is_sent_to_admin=True,
+                    academic_info__year_graduated=year_int
+                ).count()
             except Exception:
                 pass
-        requested_years = set(qs.values_list('batch_year', flat=True).distinct())
-
-        # Fallback: also include any batches that currently have at least one Completed student
-        try:
-            users_qs = User.objects.filter(ojt_info__ojtstatus='Completed').select_related('academic_info')
-            if year is not None and str(year).strip() != '':
-                try:
-                    users_qs = users_qs.filter(academic_info__year_graduated=year_int)
-                except Exception:
-                    pass
-            completed_years = set(users_qs.values_list('academic_info__year_graduated', flat=True).distinct())
-            requested_years = requested_years.union({y for y in completed_years if y is not None})
-        except Exception:
-            pass
-
-        count_val = len({y for y in requested_years if y is not None})
+        
+        print(f"🔍 DEBUG: Pending approval students count: {pending_approval_count}")
+        
+        count_val = pending_approval_count
+        
         return JsonResponse({'success': True, 'count': count_val})
     except Exception as e:
+        print(f"🔍 DEBUG: Error in coordinator_requests_count_view: {e}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
@@ -1726,7 +1768,7 @@ def coordinator_requests_list_view(request):
         all_imports = OJTImport.objects.all()
         print(f"DEBUG: Total OJTImport records: {all_imports.count()}")
         for imp in all_imports:
-            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.course}")
+            print(f"DEBUG: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
         
         # Base: group Requested imports by year and program, take max count to avoid duplicates
         try:
@@ -1739,43 +1781,32 @@ def coordinator_requests_list_view(request):
             all_imports = OJTImport.objects.all()
             print(f"🔍 DEBUG coordinator_requests_list_view: Total OJTImport records: {all_imports.count()}")
             for imp in all_imports:
-                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Program: {imp.course}")
+                print(f"🔍 DEBUG coordinator_requests_list_view: Year: {imp.batch_year}, Status: {imp.status}, Course: {imp.course}")
             
-            # Count actual unapproved students instead of using records_imported
+            # Group by year and program, count coordinator requests (not students)
             for imp in requested_imports:
                 year = imp.batch_year
                 program = imp.course
                 
-                # Count students who are completed but not yet alumni for this year/program
-                unapproved_count = User.objects.filter(
-                    academic_info__year_graduated=year,
-                    academic_info__program=program,
-                    ojt_info__ojtstatus='Completed'
-                ).exclude(
-                    account_type__user=True  # Exclude alumni (already approved)
-                ).count()
+                print(f"🔍 DEBUG: Year {year}, Program {program} - Coordinator request")
                 
-                print(f"🔍 DEBUG: Year {year}, Program {program} - Unapproved count: {unapproved_count}")
-                
-                # Only include if there are actually unapproved students
-                if unapproved_count > 0:
-                    items.append({
-                        'batch_year': year,
-                        'program': program,
-                        'count': unapproved_count
-                    })
+                # Each coordinator request counts as 1
+                items.append({
+                    'batch_year': year,
+                    'program': program,
+                    'count': 1  # Each request counts as 1, not number of students
+                })
         except Exception as e:
             print(f"DEBUG: Exception in grouped query: {e}")
-            # Fallback: if aggregation not available, compute max per year and program in Python
+            # Fallback: if aggregation not available, count coordinator requests
             by_year_program = {}
             for imp in OJTImport.objects.filter(status='Requested').order_by('-batch_year'):
                 year = getattr(imp, 'batch_year', None)
                 program = getattr(imp, 'course', '')
-                count_val = getattr(imp, 'records_imported', 0) or 0
                 if year is None:
                     continue
                 key = (year, program)
-                by_year_program[key] = max(by_year_program.get(key, 0), count_val)
+                by_year_program[key] = 1  # Each request counts as 1
             for (y, program), c in by_year_program.items():
                 items.append({'batch_year': y, 'program': program, 'count': c})
 
@@ -1812,7 +1843,7 @@ def coordinator_requests_list_view(request):
             print(f"DEBUG: Exception in fallback: {e}")
             pass
 
-        # Sort newest first and ensure unique year-program combinations
+        # Group by year and program, but sum the counts to get total pending items
         dedup = {}
         for it in items:
             y = it.get('batch_year')
@@ -1820,7 +1851,8 @@ def coordinator_requests_list_view(request):
             if y is None:
                 continue
             key = (y, program)
-            dedup[key] = max(dedup.get(key, 0), int(it.get('count') or 0))
+            # Sum the counts instead of taking max
+            dedup[key] = dedup.get(key, 0) + int(it.get('count') or 0)
         items = [{'batch_year': y, 'program': program, 'count': c} for (y, program), c in dedup.items()]
         items.sort(key=lambda x: int(x['batch_year']), reverse=True)
         return JsonResponse({'success': True, 'items': items})
@@ -1926,10 +1958,11 @@ def approve_ojt_to_alumni_view(request):
         except Exception:
             alumni_type = AccountType.objects.filter(user=True).first() or AccountType.objects.create(user=True, admin=False, peso=False, coordinator=False, ojt=False)
 
-        # Find completed OJT students for this year (use AcademicInfo.year_graduated)
+        # Find completed OJT students for this year who were sent to admin
         completed_ojt_users = User.objects.filter(
             account_type__ojt=True,
             ojt_info__ojtstatus='Completed',
+            ojt_info__is_sent_to_admin=True,
             academic_info__year_graduated=year_int
         ).select_related('ojt_info', 'academic_info')
 
@@ -5050,3 +5083,60 @@ from django.db import transaction
 
 
 # --- Helpers for Posts ---
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def set_send_date_view(request):
+    """Set send date for OJT students"""
+    try:
+        data = request.data
+        coordinator = data.get('coordinator')
+        batch_year = data.get('batch_year')
+        section = data.get('section')
+        send_date = data.get('send_date')
+        
+        if not all([coordinator, batch_year, send_date]):
+            return JsonResponse({
+                'success': False,
+                'message': 'Missing required fields: coordinator, batch_year, send_date'
+            }, status=400)
+        
+        # Validate date format
+        try:
+            from datetime import datetime
+            send_date_obj = datetime.strptime(send_date, '%Y-%m-%d').date()
+        except ValueError:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid date format. Use YYYY-MM-DD'
+            }, status=400)
+        
+        # Create or update SendDate record for the entire batch (section=None for batch-wide)
+        send_date_record, created = SendDate.objects.get_or_create(
+            coordinator=coordinator,
+            batch_year=batch_year,
+            section=None,  # None means entire batch
+            defaults={
+                'send_date': send_date_obj,
+                'is_processed': False
+            }
+        )
+        
+        if not created:
+            send_date_record.send_date = send_date_obj
+            send_date_record.is_processed = False
+            send_date_record.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Send date set successfully for entire batch {batch_year}. On this date, all completed OJT students will be automatically sent to admin.',
+            'send_date': send_date,
+            'batch_year': batch_year,
+            'scope': 'entire_batch'
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'message': f'Error setting send date: {str(e)}'
+        }, status=500)

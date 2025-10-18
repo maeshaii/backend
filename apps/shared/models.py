@@ -1202,6 +1202,23 @@ class OJTImport(models.Model):
     file_name = models.CharField(max_length=255)
     records_imported = models.IntegerField(default=0)
     status = models.CharField(max_length=50, default='Completed')  # Completed, Failed, Partial
+
+class SendDate(models.Model):
+    """Model to store scheduled send dates for OJT students"""
+    coordinator = models.CharField(max_length=100)  # Coordinator who set the date
+    batch_year = models.IntegerField()
+    section = models.CharField(max_length=50, blank=True, null=True)
+    send_date = models.DateField()  # The scheduled date
+    is_processed = models.BooleanField(default=False)  # Whether it has been processed
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        unique_together = ['coordinator', 'batch_year', 'section']
+    
+    def __str__(self):
+        return f"{self.coordinator} - {self.batch_year} {self.section or 'All'} - {self.send_date}"
+
 class TrackerFileUpload(models.Model):
     response = models.ForeignKey(TrackerResponse, on_delete=models.CASCADE, related_name='files')
     question_id = models.IntegerField()  # ID of the question this file answers
