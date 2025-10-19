@@ -2282,6 +2282,137 @@ def alumni_profile_view(request, user_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def alumni_employment_view(request, user_id):
+    """Get and update alumni employment data."""
+    try:
+        from apps.shared.models import User, EmploymentHistory
+        from apps.shared.services import UserService
+        
+        user = User.objects.get(user_id=user_id)
+        
+        if request.method == 'GET':
+            # Get employment data
+            employment_data = UserService.get_user_with_related_data(user_id)
+            employment = employment_data.get('employment')
+            
+            if employment:
+                return JsonResponse({
+                    # Basic employment info - correctly mapped to model fields
+                    'organization_name': employment.company_name_current or '',
+                    'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
+                    'position': employment.position_current or '',
+                    'employment_status': employment.employment_duration_current or '',
+                    'company_address': employment.company_address or '',
+                    'sector': employment.sector_current or '',
+                    
+                    # Additional employment details
+                    'employment_duration_current': employment.employment_duration_current or '',
+                    'salary_current': employment.salary_current or '',
+                    'scope_current': employment.scope_current or '',
+                    'company_email': employment.company_email or '',
+                    'company_contact': employment.company_contact or '',
+                    'contact_person': employment.contact_person or '',
+                    'position_alt': employment.position or '',
+                    
+                    # Job alignment info
+                    'job_alignment_status': employment.job_alignment_status or '',
+                    'job_alignment_category': employment.job_alignment_category or '',
+                    'job_alignment_title': employment.job_alignment_title or '',
+                    'job_alignment_suggested_program': employment.job_alignment_suggested_program or '',
+                    'job_alignment_original_program': employment.job_alignment_original_program or '',
+                    
+                    # Status flags
+                    'self_employed': employment.self_employed,
+                    'high_position': employment.high_position,
+                    'absorbed': employment.absorbed,
+                    
+                    # Awards and recognition
+                    'awards_recognition_current': employment.awards_recognition_current or '',
+                    'supporting_document_current': employment.supporting_document_current or '',
+                    'supporting_document_awards_recognition': employment.supporting_document_awards_recognition or '',
+                    
+                    # Unemployment
+                    'unemployment_reason': employment.unemployment_reason or '',
+                    
+                    # Timestamps
+                    'created_at': employment.created_at.strftime('%Y-%m-%d %H:%M:%S') if employment.created_at else '',
+                    'updated_at': employment.updated_at.strftime('%Y-%m-%d %H:%M:%S') if employment.updated_at else ''
+                })
+            else:
+                return JsonResponse({
+                    'organization_name': '',
+                    'date_hired': '',
+                    'position': '',
+                    'employment_status': '',
+                    'company_address': '',
+                    'sector': '',
+                    'employment_duration_current': '',
+                    'salary_current': '',
+                    'scope_current': '',
+                    'company_email': '',
+                    'company_contact': '',
+                    'contact_person': '',
+                    'position_alt': '',
+                    'job_alignment_status': '',
+                    'job_alignment_category': '',
+                    'job_alignment_title': '',
+                    'job_alignment_suggested_program': '',
+                    'job_alignment_original_program': '',
+                    'self_employed': False,
+                    'high_position': False,
+                    'absorbed': False,
+                    'awards_recognition_current': '',
+                    'supporting_document_current': '',
+                    'supporting_document_awards_recognition': '',
+                    'unemployment_reason': '',
+                    'created_at': '',
+                    'updated_at': ''
+                })
+                
+        elif request.method == 'PUT':
+            data = json.loads(request.body)
+            
+            # Handle date parsing
+            date_started = None
+            if data.get('date_hired'):
+                try:
+                    from datetime import datetime
+                    date_started = datetime.strptime(data.get('date_hired'), '%Y-%m-%d').date()
+                except (ValueError, TypeError):
+                    # If date parsing fails, set to None
+                    date_started = None
+            
+            # Map frontend fields to backend model fields
+            employment_data = {
+                'company_name_current': data.get('organization_name', ''),
+                'date_started': date_started,
+                'position_current': data.get('position', ''),
+                'employment_duration_current': data.get('employment_status', ''),
+                'company_address': data.get('company_address', ''),
+                'sector_current': data.get('sector', '')
+            }
+            
+            # Update employment using service
+            try:
+                employment = UserService.update_employment_status(user, employment_data)
+                return JsonResponse({'message': 'Employment details updated successfully'})
+            except Exception as service_error:
+                print(f"Error in UserService.update_employment_status: {service_error}")
+                import traceback
+                print(f"Service error traceback: {traceback.format_exc()}")
+                return JsonResponse({'error': f'Service error: {str(service_error)}'}, status=500)
+            
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'User not found'}, status=404)
+    except Exception as e:
+        import traceback
+        print(f"Error in alumni_employment_view: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return JsonResponse({'error': str(e)}, status=500)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_following_for_mentions(request):
@@ -2799,13 +2930,13 @@ def repost_like_view(request, repost_id):
                     
                     # Build notification content with appropriate ID based on repost type
                     if repost.post:
-                        notif_content = f"{user.full_name} liked your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
                     elif repost.forum:
-                        notif_content = f"{user.full_name} liked your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
                     elif repost.donation_request:
-                        notif_content = f"{user.full_name} liked your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}-->"
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
                     else:
-                        notif_content = f"{user.full_name} liked your {repost_type}<!--REPOST_ID:{repost.repost_id}-->"
+                        notif_content = f"{user.full_name} liked your {repost_type}<!--REPOST_ID:{repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
                     
                     notification = Notification.objects.create(
                         user=repost.user,
@@ -2994,7 +3125,7 @@ def post_like_view(request, post_id):
                         user=post.user,
                         notif_type='like',
                         subject='Post Liked',
-                        notifi_content=f"{user.full_name} liked your post<!--POST_ID:{post.post_id}-->",
+                        notifi_content=f"{user.full_name} liked your post<!--POST_ID:{post.post_id}--><!--ACTOR_ID:{user.user_id}-->",
                         notif_date=timezone.now()
                     )
                 return JsonResponse({'success': True, 'message': 'Post liked'})
@@ -4197,11 +4328,29 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        exists = Repost.objects.filter(forum=forum, user=request.user).first()
-        if exists:
+        
+        # Check if user already reposted this forum post
+        existing_repost = Repost.objects.filter(forum=forum, user=request.user).first()
+        if existing_repost:
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
-        r = Repost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
-        if request.method == "POST" and request.user.user_id != forum.user.user_id:
+        
+        # Create repost with optional caption
+        payload = {}
+        try:
+            payload = json.loads(request.body or "{}")
+        except Exception:
+            payload = {}
+        caption = (payload.get('caption') or '').strip() or None
+        
+        r = Repost.objects.create(
+            forum=forum, 
+            user=request.user, 
+            repost_date=timezone.now(),
+            caption=caption
+        )
+        
+        # Create notification for forum owner (only if the reposter is not the forum owner)
+        if request.user.user_id != forum.user.user_id:
             Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
@@ -4393,7 +4542,7 @@ from django.core.files.base import ContentFile
 
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
-@parser_classes([MultiPartParser])
+@parser_classes([MultiPartParser, JSONParser])
 def posts_view(request):
     """Used by Mobile – GET list posts, POST create post."""
     try:
@@ -4447,8 +4596,31 @@ def posts_view(request):
             import sys
             
             try:
+                # Handle multiple images (base64) - check this first for JSON requests
+                if 'post_images' in data and data['post_images']:
+                    print(f'Received {len(data["post_images"])} images in data')
+                    
+                    for index, post_image_data in enumerate(data['post_images']):
+                        if post_image_data and post_image_data.startswith('data:image'):
+                            try:
+                                format, imgstr = post_image_data.split(';base64,')
+                                ext = format.split('/')[-1]
+                                img_data = base64.b64decode(imgstr)
+                                file_name = f"{uuid.uuid4()}.{ext}"
+                                
+                                # Create ContentImage instance for post
+                                post_image = ContentImage.objects.create(
+                                    content_type='post',
+                                    content_id=new_post.post_id,
+                                    order=index
+                                )
+                                post_image.image.save(file_name, ContentFile(img_data), save=True)
+                                print(f'Saved multiple image {index}: {post_image.image.url}')
+                            except Exception as img_exc:
+                                print(f'Error saving multiple image {index}: {img_exc}')
+                
                 # Handle FormData file uploads (mobile app)
-                if request.FILES:
+                elif request.FILES:
                     print(f'Received {len(request.FILES)} files via FormData')
                     for index, (key, file) in enumerate(request.FILES.items()):
                         if key.startswith('images') and file:
@@ -4485,29 +4657,6 @@ def posts_view(request):
                             print(f'Saved single image: {post_image.image.url}')
                         except Exception as img_exc:
                             print(f'Error saving single image: {img_exc}')
-                
-                # Handle multiple images (base64)
-                elif 'post_images' in data and data['post_images']:
-                    print(f'Received {len(data["post_images"])} images in data')
-                    
-                    for index, post_image_data in enumerate(data['post_images']):
-                        if post_image_data and post_image_data.startswith('data:image'):
-                            try:
-                                format, imgstr = post_image_data.split(';base64,')
-                                ext = format.split('/')[-1]
-                                img_data = base64.b64decode(imgstr)
-                                file_name = f"{uuid.uuid4()}.{ext}"
-                                
-                                # Create ContentImage instance for post
-                                post_image = ContentImage.objects.create(
-                                    content_type='post',
-                                    content_id=new_post.post_id,
-                                    order=index
-                                )
-                                post_image.image.save(file_name, ContentFile(img_data), save=True)
-                                print(f'Saved multiple image {index}: {post_image.image.url}')
-                            except Exception as img_exc:
-                                print(f'Error saving multiple image {index}: {img_exc}')
                 
                 if not request.FILES and 'post_image' not in data and 'post_images' not in data:
                     print('No images in data')
@@ -5069,7 +5218,7 @@ def forgot_password_view(request):
 @api_view(['GET', 'POST'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
-@parser_classes([MultiPartParser])
+@parser_classes([JSONParser, MultiPartParser])
 def donation_requests_view(request):
     """Handle donation request listing and creation"""
     if request.method == 'GET':
@@ -5502,8 +5651,15 @@ def donation_repost_view(request, donation_id):
     try:
         donation = DonationRequest.objects.get(donation_id=donation_id)
         
+        # Check if user already reposted this donation
+        existing_repost = Repost.objects.filter(donation_request=donation, user=request.user).first()
+        if existing_repost:
+            return JsonResponse({'error': 'You have already reposted this'}, status=400)
+        
         # Get caption from request data
         caption = request.data.get('caption', '')
+        if caption:
+            caption = caption.strip() or None
         
         # Create a repost of the donation
         repost = Repost.objects.create(
@@ -5512,6 +5668,16 @@ def donation_repost_view(request, donation_id):
             caption=caption,
             repost_date=timezone.now()
         )
+        
+        # Create notification for donation owner (only if the reposter is not the donation owner)
+        if request.user.user_id != donation.user.user_id:
+            Notification.objects.create(
+                user=donation.user,
+                notif_type='repost',
+                subject='Donation Reposted',
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
+                notif_date=timezone.now()
+            )
         
         return JsonResponse({
             'success': True,

@@ -756,7 +756,16 @@ class EmploymentHistory(models.Model):
             # If hired within 6 months of graduation, consider absorbed
             from datetime import date
             graduation_date = date(self.user.academic_info.year_graduated, 6, 30)  # Assume June graduation
-            if self.date_started <= graduation_date:
+            
+            # Ensure date_started is a date object for comparison
+            if isinstance(self.date_started, str):
+                try:
+                    from datetime import datetime
+                    self.date_started = datetime.strptime(self.date_started, '%Y-%m-%d').date()
+                except (ValueError, TypeError):
+                    self.date_started = None
+            
+            if self.date_started and self.date_started <= graduation_date:
                 self.absorbed = True
             else:
                 self.absorbed = False
