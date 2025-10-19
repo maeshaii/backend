@@ -89,6 +89,7 @@ urlpatterns = [
     
     # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),
+    path('posts/debug/', views.debug_posts_view, name='debug_posts'),
     path('posts/by-user-type/', views.posts_by_user_type_view, name='posts_by_user_type'),
     path('posts/<int:post_id>/like/', views.post_like_view, name='post_like'),
     path('posts/<int:post_id>/comments/', views.post_comments_view, name='post_comments'),
