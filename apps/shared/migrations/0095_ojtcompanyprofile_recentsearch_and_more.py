@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0094_merge_20251009_2132'),
+        ('shared', '0003_add_cloud_storage_fields'),
     ]
 
     operations = [

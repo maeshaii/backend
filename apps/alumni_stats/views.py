@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Create your views here.
 
-@cache_statistics(timeout=300)  # Cache for 5 minutes
+@cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def alumni_statistics_view(request):
@@ -48,19 +48,28 @@ def alumni_statistics_view(request):
         # Count employment status using database aggregation
         employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
             employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
-            unemployed=Count('id', filter=Q(q_employment_status__iexact='no'))
+            unemployed=Count('id', filter=Q(q_employment_status__iexact='no')),
+            pending_tracker=Count('id', filter=Q(q_employment_status__isnull=True) | Q(q_employment_status=''))
         )
         employed = employment_stats['employed']
         unemployed = employment_stats['unemployed']
+        pending_tracker = employment_stats['pending_tracker']
 
+        # Count absorbed users (who are also employed)
         absorbed = EmploymentHistory.objects.filter(user__in=alumni_qs, absorbed=True).count()
-        pending = max(total_alumni - employed - unemployed - absorbed, 0)
+        
+        # Alumni without TrackerData are also considered pending
+        alumni_without_tracker = alumni_qs.filter(tracker_data__isnull=True).count()
+        
+        # Total pending = alumni without tracker + alumni with tracker but no employment status
+        pending = pending_tracker + alumni_without_tracker
 
+        # NEW LOGIC: Combine employed and absorbed, but keep track of absorbed count for indicator
         status_counts = {
-            'Employed': employed,
+            'Employed': employed,  # This includes both employed and absorbed
             'Unemployed': unemployed,
-            'Absorb': absorbed,
             'Pending': pending,
+            'Absorbed_Count': absorbed,  # Keep track of absorbed count for frontend indicator
         }
 
         year_counts = Counter(
@@ -81,7 +90,7 @@ def alumni_statistics_view(request):
         logger.error(f"Error in alumni_statistics_view: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to load alumni statistics'}, status=500)
 
-@cache_statistics(timeout=300)  # Cache for 5 minutes
+@cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def generate_statistics_view(request):

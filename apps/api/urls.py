@@ -44,6 +44,7 @@ urlpatterns = [
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
     path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
+    path('ojt/available-years/', views.available_years_view, name='available_years'),
     path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
@@ -86,6 +87,7 @@ urlpatterns = [
     path('alumni/search/', views.search_alumni, name='search_alumni'),
     path('search/recent/', views.recent_searches_view, name='recent_searches'),
     path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
+    path('users/alumni/', views.users_alumni_view, name='users_alumni'),
     
     # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),

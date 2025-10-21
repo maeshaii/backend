@@ -705,8 +705,12 @@ class EmploymentHistory(models.Model):
         # STEP 1: Self-employed status based on tracker answer Q23 (q_employment_type)
         # Check if user is self-employed based on tracker response
         tracker_data = getattr(self.user, 'tracker_data', None)
-        if tracker_data and tracker_data.q_employment_type and 'self-employed' in tracker_data.q_employment_type.lower():
-            self.self_employed = True
+        if tracker_data and tracker_data.q_employment_type:
+            employment_type_lower = tracker_data.q_employment_type.lower()
+            if 'self-employed' in employment_type_lower or 'self employed' in employment_type_lower:
+                self.self_employed = True
+            else:
+                self.self_employed = False
         else:
             self.self_employed = False
         
@@ -729,7 +733,24 @@ class EmploymentHistory(models.Model):
         self.high_position = is_high_position
         
         # STEP 3: Check for absorbed status (for AACUP) - typically first job after graduation
-        if self.date_started and hasattr(self.user, 'academic_info') and self.user.academic_info.year_graduated:
+        # Priority 1: If current company matches OJT company, they were absorbed
+        absorbed_by_ojt_match = False
+        if self.company_name_current and hasattr(self.user, 'ojt_company_profile') and self.user.ojt_company_profile:
+            ojt_company = getattr(self.user.ojt_company_profile, 'company_name', '')
+            if ojt_company and self.company_name_current:
+                # Case-insensitive comparison with normalization
+                current_company_normalized = self.company_name_current.lower().strip()
+                ojt_company_normalized = ojt_company.lower().strip()
+                
+                # Check for exact match or partial match (for variations in company names)
+                if (current_company_normalized == ojt_company_normalized or 
+                    current_company_normalized in ojt_company_normalized or
+                    ojt_company_normalized in current_company_normalized):
+                    absorbed_by_ojt_match = True
+                    self.absorbed = True
+        
+        # Priority 2: If not absorbed by OJT match, check if hired within 6 months of graduation
+        if not absorbed_by_ojt_match and self.date_started and hasattr(self.user, 'academic_info') and self.user.academic_info.year_graduated:
             # If hired within 6 months of graduation, consider absorbed
             from datetime import date
             graduation_date = date(self.user.academic_info.year_graduated, 6, 30)  # Assume June graduation
@@ -737,6 +758,9 @@ class EmploymentHistory(models.Model):
                 self.absorbed = True
             else:
                 self.absorbed = False
+        elif not absorbed_by_ojt_match:
+            # If no date started or graduation info, default to False
+            self.absorbed = False
         
         # STEP 4: Smart Job Alignment with Database Expansion
         # SENIOR DEV: Intelligent job alignment with automatic database expansion

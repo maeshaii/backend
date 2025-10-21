@@ -1,41 +1,69 @@
-#!/usr/bin/env python
 import os
-import sys
 import django
 
-# Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 django.setup()
 
-from apps.api.views import ojt_by_year_view
-from django.test import RequestFactory
-from django.contrib.auth import get_user_model
+from apps.shared.models import OJTImport, User, AcademicInfo
 
-User = get_user_model()
+print('=== Debugging OJTImport and User Data ===')
 
-# Create a test request
-rf = RequestFactory()
-request = rf.get('/api/ojt/by-year/?year=2025&section=4-C')
+# Check OJTImport records
+imports = OJTImport.objects.all()
+print(f'OJTImport records: {imports.count()}')
+for imp in imports:
+    print(f'  Year: {imp.batch_year}, Status: {imp.status}, Course: "{imp.course}"')
 
-# Get an OJT user for authentication
-ojt_user = User.objects.filter(account_type__ojt=True).first()
-if ojt_user:
-    request.user = ojt_user
-    print(f"Testing with user: {ojt_user.acc_username}")
+# Check completed users
+completed_users = User.objects.filter(ojt_info__ojtstatus='Completed')
+print(f'\nCompleted OJT users: {completed_users.count()}')
+for user in completed_users[:3]:
+    academic_info = getattr(user, 'academic_info', None)
+    if academic_info:
+        print(f'  User: {user.f_name} {user.l_name}')
+        print(f'    Year: {academic_info.year_graduated}')
+        print(f'    Program: "{academic_info.program}"')
+        print(f'    Section: "{academic_info.section}"')
+    else:
+        print(f'  User: {user.f_name} {user.l_name} - No academic info')
+
+# Test the query that's failing
+print('\n=== Testing the failing query ===')
+try:
+    year = 2020
+    course = 'OJT'
+    unapproved_count = User.objects.filter(
+        academic_info__year_graduated=year,
+        academic_info__program=course,
+        ojt_info__ojtstatus='Completed'
+    ).exclude(
+        account_type__user=True
+    ).count()
+    print(f'Query result for year {year}, program {course}: {unapproved_count}')
+except Exception as e:
+    print(f'Query failed: {e}')
+    import traceback
+    traceback.print_exc()
+
+# Test the coordinator_requests_list_view function directly
+print('\n=== Testing coordinator_requests_list_view function ===')
+try:
+    from apps.api.views import coordinator_requests_list_view
+    from django.test import RequestFactory
     
-    try:
-        response = ojt_by_year_view(request)
-        print(f"Response status: {response.status_code}")
-        if response.status_code == 200:
-            response.render()
-            print(f"Response content: {response.content.decode()}")
-        else:
-            print(f"Error response: {response.status_code}")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-else:
-    print("No OJT user found")
-
-
+    factory = RequestFactory()
+    request = factory.get('/api/ojt/coordinator-requests/list/')
+    
+    # Mock authentication
+    class MockUser:
+        is_authenticated = True
+    request.user = MockUser()
+    
+    response = coordinator_requests_list_view(request)
+    print(f'Response status: {response.status_code}')
+    if hasattr(response, 'content'):
+        print(f'Response content: {response.content.decode()}')
+except Exception as e:
+    print(f'Function test failed: {e}')
+    import traceback
+    traceback.print_exc()

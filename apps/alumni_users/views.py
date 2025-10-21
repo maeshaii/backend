@@ -150,8 +150,23 @@ def alumni_detail_view(request, user_id):
 
         academic_info = getattr(user, 'academic_info', None)
         employment_info = getattr(user, 'employment', None)
+        tracker_data = getattr(user, 'tracker_data', None)
         batch_year = getattr(academic_info, 'year_graduated', None)
 
+        # Determine employment status
+        employment_status = 'Not disclosed'
+        if tracker_data and tracker_data.q_employment_status:
+            if tracker_data.q_employment_status.lower() == 'yes':
+                employment_status = 'Employed'
+            elif tracker_data.q_employment_status.lower() == 'no':
+                employment_status = 'Unemployed'
+            elif tracker_data.q_employment_status.lower() == 'pending':
+                employment_status = 'Pending'
+            else:
+                employment_status = tracker_data.q_employment_status.title()
+        elif employment_info and employment_info.company_name_current:
+            employment_status = 'Employed'
+        
         # Get follower and following counts
         from apps.shared.models import Follow
         followers_count = Follow.objects.filter(following=user).count()
@@ -187,6 +202,7 @@ def alumni_detail_view(request, user_id):
             'scope_current': getattr(employment_info, 'scope_current', None) if employment_info else get_field('scope_current', 'current scope'),
             'salary_current': getattr(employment_info, 'salary_current', None) if employment_info else get_field('salary_current', 'salary'),
             'self_employed': getattr(employment_info, 'self_employed', False) if employment_info else False,
+            'employment_status': employment_status,
             'followers_count': followers_count,
             'following_count': following_count,
             'account_type': {
