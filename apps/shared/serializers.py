@@ -7,6 +7,7 @@ from .models import (
     User, UserProfile, AcademicInfo, EmploymentHistory, 
     TrackerData, OJTInfo, AccountType, Conversation, Message, MessageAttachment
 )
+from .security import ContentSanitizer
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -228,10 +229,31 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['attachment_id', 'uploaded_at']
     
     def get_file_url(self, obj):
+        """Get file URL with proper cloud storage support"""
+        # Prioritize cloud storage URL (already absolute)
+        if obj.file_url:
+            # Check if it's already absolute
+            if obj.file_url.startswith('http'):
+                return obj.file_url
+            # If relative, make it absolute
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.file_url)
+            else:
+                from django.conf import settings
+                return f"http://localhost:8000{obj.file_url}"
+        
+        # Fallback to local storage - ensure absolute URL
         if obj.file:
             request = self.context.get('request')
             if request:
                 return request.build_absolute_uri(obj.file.url)
+            else:
+                # If no request context, construct URL manually
+                from django.conf import settings
+                return f"http://localhost:8000{obj.file.url}"
+        
+        # If neither field has a URL, return None
         return None
     
     def get_file_category(self, obj):
@@ -380,21 +402,18 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         fields = ['content', 'message_type', 'attachment_id']
     
     def validate_message_type(self, value):
-        """Validate message type"""
-        valid_types = ['text', 'image', 'file', 'system']
-        if value not in valid_types:
-            raise serializers.ValidationError(f"Invalid message type. Must be one of: {', '.join(valid_types)}")
-        return value
+        """Validate and sanitize message type"""
+        try:
+            return ContentSanitizer.validate_message_type(value)
+        except Exception as e:
+            raise serializers.ValidationError(str(e))
     
     def validate_content(self, value):
-        """Validate message content"""
-        if not value or not value.strip():
-            raise serializers.ValidationError("Message content cannot be empty.")
-        
-        if len(value.strip()) > 1000:
-            raise serializers.ValidationError("Message content cannot exceed 1000 characters.")
-        
-        return value.strip()
+        """Validate and sanitize message content"""
+        try:
+            return ContentSanitizer.sanitize_message_content(value)
+        except Exception as e:
+            raise serializers.ValidationError(str(e))
 
     def create(self, validated_data):
         attachment_id = validated_data.pop('attachment_id', None)

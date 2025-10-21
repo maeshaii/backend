@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Create your views here.
 
-@cache_statistics(timeout=300)  # Cache for 5 minutes
+@cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def alumni_statistics_view(request):
@@ -48,19 +48,28 @@ def alumni_statistics_view(request):
         # Count employment status using database aggregation
         employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
             employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
-            unemployed=Count('id', filter=Q(q_employment_status__iexact='no'))
+            unemployed=Count('id', filter=Q(q_employment_status__iexact='no')),
+            pending_tracker=Count('id', filter=Q(q_employment_status__isnull=True) | Q(q_employment_status=''))
         )
         employed = employment_stats['employed']
         unemployed = employment_stats['unemployed']
+        pending_tracker = employment_stats['pending_tracker']
 
+        # Count absorbed users (who are also employed)
         absorbed = EmploymentHistory.objects.filter(user__in=alumni_qs, absorbed=True).count()
-        pending = max(total_alumni - employed - unemployed - absorbed, 0)
+        
+        # Alumni without TrackerData are also considered pending
+        alumni_without_tracker = alumni_qs.filter(tracker_data__isnull=True).count()
+        
+        # Total pending = alumni without tracker + alumni with tracker but no employment status
+        pending = pending_tracker + alumni_without_tracker
 
+        # NEW LOGIC: Combine employed and absorbed, but keep track of absorbed count for indicator
         status_counts = {
-            'Employed': employed,
+            'Employed': employed,  # This includes both employed and absorbed
             'Unemployed': unemployed,
-            'Absorb': absorbed,
             'Pending': pending,
+            'Absorbed_Count': absorbed,  # Keep track of absorbed count for frontend indicator
         }
 
         year_counts = Counter(
@@ -81,7 +90,7 @@ def alumni_statistics_view(request):
         logger.error(f"Error in alumni_statistics_view: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to load alumni statistics'}, status=500)
 
-@cache_statistics(timeout=300)  # Cache for 5 minutes
+@cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def generate_statistics_view(request):
@@ -126,23 +135,31 @@ def generate_statistics_view(request):
             })
         
         elif stats_type == 'QPRO':
-            # QPRO: Employment statistics - OPTIMIZED with database aggregation
-            from apps.shared.models import TrackerData
-            from django.db.models import Q, Count
-            
-            # OPTIMIZED: Use database aggregation for employment counts
-            employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
-                employed=Count('id', filter=Q(q_employment_status__iexact='yes') | Q(q_employment_status__iexact='y') | Q(q_employment_status__iexact='true') | Q(q_employment_status__iexact='1')),
-                unemployed=Count('id', filter=Q(q_employment_status__iexact='no') | Q(q_employment_status__iexact='n') | Q(q_employment_status__iexact='false') | Q(q_employment_status__iexact='0')),
-                tracked=Count('id', filter=~Q(q_employment_status__isnull=True) & ~Q(q_employment_status=''))
-            )
-            
-            employed = employment_stats['employed']
-            unemployed = employment_stats['unemployed']
-            tracked_alumni = employment_stats['tracked']
-
-            total_alumni_count = total_alumni  # preserve original count explicitly
-            untracked = max(total_alumni_count - tracked_alumni, 0)
+            # QPRO: Employment statistics - Use same logic as alumni_statistics_view
+            try:
+                from apps.shared.models import TrackerData, EmploymentHistory
+                from django.db.models import Q, Count
+                
+                # Use same logic as alumni_statistics_view for consistency
+                employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+                    employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
+                    unemployed=Count('id', filter=Q(q_employment_status__iexact='no'))
+                )
+                
+                employed = employment_stats['employed']
+                unemployed = employment_stats['unemployed']
+                absorbed = EmploymentHistory.objects.filter(user__in=alumni_qs, absorbed=True).count()
+                
+                total_alumni_count = total_alumni  # preserve original count explicitly
+                # Use exact same logic as alumni_statistics_view
+                untracked = max(total_alumni_count - employed - unemployed - absorbed, 0)
+            except Exception as e:
+                logger.error(f"Error in QPRO stats calculation: {e}")
+                # Fallback to simple calculation
+                employed = 0
+                unemployed = 0
+                absorbed = 0
+                untracked = total_alumni
             employment_rate = (employed / total_alumni_count * 100) if total_alumni_count > 0 else 0
 
             # Calculate statistics with proper null handling
@@ -425,7 +442,7 @@ def export_detailed_alumni_data(request):
         tracker_columns = [tracker_questions[qid] for qid in sorted(tracker_questions.keys())]
         
         export_fields = [
-            'CTU_ID', 'First_Name', 'Middle_Name', 'Last_Name', 'Gender', 'Birthdate', 'Year_Graduated', 'Course', 'Section',
+            'CTU_ID', 'First_Name', 'Middle_Name', 'Last_Name', 'Gender', 'Birthdate', 'Year_Graduated', 'Program', 'Section',
             'Program', 'Status', 'Phone_Number', 'Email', 'Address', 'Civil_Status', 'Social_Media', 'Age',
             'Company_Name_Current', 'Position_Current', 'Sector_Current', 'Employment_Duration_Current', 'Salary_Current',
             'Supporting_Document_Current', 'Awards_Recognition_Current', 'Supporting_Document_Awards_Recognition',
@@ -470,9 +487,8 @@ def export_detailed_alumni_data(request):
                     'Gender': alumni.gender,
                     'Birthdate': str(profile.birthdate) if profile and profile.birthdate else '',
                     'Year_Graduated': getattr(academic_info, 'year_graduated', None) if academic_info else None,
-                    'Course': getattr(academic_info, 'course', None) if academic_info else None,
+                    'Program': getattr(academic_info, 'course', None) if academic_info else None,
                     'Section': getattr(academic_info, 'section', None) if academic_info else '',
-                    'Program': getattr(academic_info, 'program', None) if academic_info else '',
                     'Status': alumni.user_status,
                     'Phone_Number': getattr(profile, 'phone_num', None) if profile else None,
                     'Email': getattr(profile, 'email', None) if profile else None,

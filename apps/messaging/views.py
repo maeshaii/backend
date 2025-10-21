@@ -9,9 +9,12 @@ from django.db.models import Q
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.http import HttpResponse, Http404
+from django.conf import settings
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import logging
+import os
 from apps.shared.models import Conversation, Message, MessageAttachment, User
 from apps.shared.serializers import (
 	ConversationSerializer,
@@ -20,6 +23,11 @@ from apps.shared.serializers import (
 	MessageCreateSerializer,
 )
 from .permissions import IsAlumniOrOJT
+from apps.shared.security import ContentSanitizer, SecurityValidator
+from .message_cache import message_cache
+from .cloud_storage import cloud_storage
+from .monitoring import messaging_monitor, track_performance, PerformanceTracker
+from .performance_metrics import performance_metrics, PerformanceTracker as PerfTracker
 import os
 import uuid
 import mimetypes
@@ -58,8 +66,46 @@ class ConversationListView(generics.ListCreateAPIView):
     serializer_class = ConversationSerializer
     permission_classes = [IsAuthenticated, IsAlumniOrOJT]
 
+    @track_performance('conversation_list')
     def get_queryset(self):
-        return Conversation.objects.filter(participants=self.request.user)
+        user = self.request.user
+        
+        with PerformanceTracker('conversation_list_query', {'user_id': user.user_id}):
+            # Try to get from cache first
+            cached_conversations = message_cache.get_user_conversations(user.user_id)
+            if cached_conversations:
+                logger.debug(f"Retrieved {len(cached_conversations)} conversations from cache for user {user.user_id}")
+            
+            # Optimize queryset with select_related and prefetch_related
+            queryset = Conversation.objects.filter(
+                participants=user
+            ).select_related().prefetch_related(
+                'participants',
+                'messages__sender',
+                'messages__attachments'
+            ).order_by('-updated_at')
+            
+            # Cache the results for next time
+            conversations_data = []
+            for conv in queryset:
+                conv_data = {
+                    'conversation_id': conv.conversation_id,
+                    'created_at': conv.created_at.isoformat(),
+                    'updated_at': conv.updated_at.isoformat(),
+                    'participants': [p.user_id for p in conv.participants.all()],
+                }
+                conversations_data.append(conv_data)
+            
+            message_cache.cache_user_conversations(user.user_id, conversations_data)
+            
+            # Track business metric
+            messaging_monitor.track_business_metric(
+                'conversations_accessed',
+                1,
+                {'user_id': str(user.user_id)}
+            )
+            
+            return queryset
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -83,7 +129,11 @@ class MessageListView(generics.ListCreateAPIView):
         if not conversation.participants.filter(user_id=self.request.user.user_id).exists():
             return Message.objects.none()
 
-        qs = Message.objects.filter(conversation=conversation).order_by('-created_at', '-message_id')
+        qs = Message.objects.filter(conversation=conversation).select_related(
+            'sender', 'conversation'
+        ).prefetch_related(
+            'attachments'
+        ).order_by('-created_at', '-message_id')
 
         # Cursor pagination: use `cursor` as message_id to fetch older messages
         cursor = self.request.query_params.get('cursor')
@@ -94,13 +144,14 @@ class MessageListView(generics.ListCreateAPIView):
                     Q(created_at__lt=cursor_msg.created_at) |
                     Q(created_at=cursor_msg.created_at, message_id__lt=cursor_msg.message_id)
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Invalid cursor parameter: %s, error: %s", cursor, e)
 
         limit = self.request.query_params.get('limit')
         try:
             limit_val = max(1, min(int(limit or 50), 100))
-        except Exception:
+        except Exception as e:
+            logger.warning("Invalid limit parameter: %s, using default 50, error: %s", limit, e)
             limit_val = 50
 
         return qs[:limit_val]
@@ -112,20 +163,36 @@ class MessageListView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         conversation_id = self.kwargs['conversation_id']
-        conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-        if not conversation.participants.filter(user_id=request.user.user_id).exists():
-            return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        # Determine receiver for 1:1 conversations to satisfy legacy non-null column
-        receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
-        # Ensure legacy DB columns are populated (e.g., date_send)
-        message = serializer.save(
-            conversation=conversation,
-            sender=request.user,
-            receiver=receiver,
-            created_at=timezone.now(),
-        )
+        
+        # Start performance tracking for message creation
+        with PerfTracker('message_creation', {
+            'user_id': request.user.user_id,
+            'conversation_id': conversation_id
+        }) as tracker:
+            tracker.mark_stage('start')
+            
+            conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+            if not conversation.participants.filter(user_id=request.user.user_id).exists():
+                return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+            
+            tracker.mark_stage('access_check')
+            
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            
+            tracker.mark_stage('validation')
+            
+            # Determine receiver for 1:1 conversations to satisfy legacy non-null column
+            receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
+            # Ensure legacy DB columns are populated (e.g., date_send)
+            message = serializer.save(
+                conversation=conversation,
+                sender=request.user,
+                receiver=receiver,
+                created_at=timezone.now(),
+            )
+            
+            tracker.mark_stage('message_saved')
         # Link uploaded attachment if provided
         try:
             attachment_id = request.data.get('attachment_id')
@@ -133,24 +200,20 @@ class MessageListView(generics.ListCreateAPIView):
                 attachment = get_object_or_404(MessageAttachment, attachment_id=int(attachment_id))
                 attachment.message = message
                 attachment.save()
-        except Exception:
-            pass
-        # Ensure legacy column date_send is populated for existing schema
+        except Exception as e:
+            logger.warning("Failed to link attachment %s to message: %s", attachment_id, e)
+        # Ensure legacy columns are populated for existing schema using ORM
         try:
-            from django.db import connection
-            with connection.cursor() as cursor:
-                # Backfill legacy date_send if DB still missing it (older schema)
-                cursor.execute(
-                    "UPDATE shared_message SET date_send = NOW() WHERE message_id = %s AND (date_send IS NULL)",
-                    [message.message_id],
-                )
-                # Backfill legacy 'content' column to mirror message_content for older schemas
-                cursor.execute(
-                    "UPDATE shared_message SET content = %s WHERE message_id = %s AND (content IS NULL)",
-                    [message.content, message.message_id],
-                )
-        except Exception:
-            pass
+            # Backfill legacy date_send if DB still missing it (older schema)
+            Message.objects.filter(message_id=message.message_id, date_send__isnull=True).update(
+                date_send=timezone.now()
+            )
+            # Backfill legacy 'content' column to mirror message_content for older schemas
+            Message.objects.filter(message_id=message.message_id, content__isnull=True).update(
+                content=message.content
+            )
+        except Exception as e:
+            logger.warning("Failed to backfill legacy columns for message %s: %s", message.message_id, e)
 
         # Broadcast the new message to websocket listeners
         try:
@@ -159,8 +222,14 @@ class MessageListView(generics.ListCreateAPIView):
             attachment_info = None
             if hasattr(message, 'attachments') and message.attachments.exists():
                 attachment = message.attachments.first()
-                if attachment and attachment.file:
-                    attachment_url = attachment.file.url
+                if attachment:
+                    # Use cloud storage URL first, fallback to local storage with absolute URL
+                    if attachment.file_url:
+                        attachment_url = attachment.file_url
+                    elif attachment.file:
+                        # Build absolute URL for local storage
+                        attachment_url = request.build_absolute_uri(attachment.file.url)
+                    
                     # Include attachment info for frontend
                     attachment_info = {
                         'file_name': attachment.file_name,
@@ -183,10 +252,56 @@ class MessageListView(generics.ListCreateAPIView):
                     'timestamp': timezone.now().isoformat(),
                     'attachment_url': attachment_url,
                     'attachment_info': attachment_info,
+                    'attachments': [{
+                        'file_url': attachment_url,
+                        'file_name': attachment_info.get('file_name') if attachment_info else None,
+                        'file_type': attachment_info.get('file_type') if attachment_info else None,
+                        'file_category': attachment_info.get('file_category') if attachment_info else None,
+                        'file_size': attachment_info.get('file_size') if attachment_info else None,
+                    }] if attachment_url and attachment_info else [],
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Failed to broadcast message %s to WebSocket: %s", message.message_id, e)
+        
+        # Invalidate cache for this conversation
+        message_cache.invalidate_conversation_messages(conversation_id)
+        message_cache.invalidate_conversation_metadata(conversation_id)
+        
+        # Cache the new message
+        message_data = {
+            'message_id': message.message_id,
+            'content': message.content,
+            'message_type': message.message_type,
+            'sender_id': message.sender.user_id,
+            'sender_name': message.sender.full_name,
+            'created_at': message.created_at.isoformat(),
+            'is_read': message.is_read,
+            'attachment_url': attachment_url,
+            'attachment_info': attachment_info,
+        }
+        message_cache.cache_message(message_data)
+        
+        # Track message delivery
+        messaging_monitor.track_message_delivery(
+            message.message_id,
+            'sent',
+            request.user.user_id,
+            conversation_id,
+            {
+                'message_type': message.message_type,
+                'has_attachment': bool(attachment_url),
+                'content_length': len(message.content)
+            }
+        )
+        
+        # Track business metric
+        messaging_monitor.track_business_metric(
+            'messages_sent',
+            1,
+            {'conversation_id': str(conversation_id)}
+        )
+        
         conversation.save()
         response_serializer = MessageSerializer(message, context={'request': request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
@@ -210,7 +325,8 @@ class MessageListView(generics.ListCreateAPIView):
                 ).exists()
                 if remaining:
                     next_cursor = last.message_id
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to determine next cursor for conversation %s: %s", conversation_id, e)
             next_cursor = None
 
         return Response({
@@ -276,12 +392,22 @@ def delete_message(request, conversation_id, message_id):
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def messaging_stats(request):
 	user = request.user
+	
+	# Optimize database queries using aggregation and select_related
 	total_conversations = Conversation.objects.filter(participants=user).count()
 	total_messages_sent = Message.objects.filter(sender=user).count()
-	total_unread = 0
-	for conversation in Conversation.objects.filter(participants=user):
-		total_unread += conversation.get_unread_count(user)
-	recent_conversations = Conversation.objects.filter(participants=user).order_by('-updated_at')[:5]
+	
+	# Use single query with aggregation instead of N+1 queries
+	total_unread = Message.objects.filter(
+		conversation__participants=user,
+		is_read=False
+	).exclude(sender=user).count()
+	
+	# Optimize recent conversations query with select_related
+	recent_conversations = Conversation.objects.filter(
+		participants=user
+	).select_related().prefetch_related('messages').order_by('-updated_at')[:5]
+	
 	recent_serializer = ConversationSerializer(recent_conversations, many=True, context={'request': request})
 	return Response({
 		'total_conversations': total_conversations,
@@ -302,15 +428,23 @@ class AttachmentUploadView(APIView):
         if not file:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Additional security: Validate file extension matches MIME type
-        file_extension = os.path.splitext(file.name)[1].lower()
-        expected_mime = mimetypes.guess_type(file.name)[0]
-        if expected_mime and expected_mime != file.content_type:
-            logger.warning("File MIME type mismatch: %s vs expected %s for %s", file.content_type, expected_mime, file.name)
-            # Use the expected MIME type for validation instead of the provided one
-            file.content_type = expected_mime
+        try:
+            # Sanitize filename
+            original_filename = file.name
+            sanitized_filename = ContentSanitizer.sanitize_filename(original_filename)
+            
+            # Additional security: Validate file extension matches MIME type
+            file_extension = os.path.splitext(sanitized_filename)[1].lower()
+            expected_mime = mimetypes.guess_type(sanitized_filename)[0]
+            if expected_mime and expected_mime != file.content_type:
+                logger.warning("File MIME type mismatch: %s vs expected %s for %s", file.content_type, expected_mime, sanitized_filename)
+                # Use the expected MIME type for validation instead of the provided one
+                file.content_type = expected_mime
+        except Exception as e:
+            logger.error("Filename sanitization failed: %s", e)
+            return Response({'error': 'Invalid filename'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate file size based on category (10MB for images, 25MB for other files, 50MB for videos)
+        # Enhanced file size validation with security checks
         file_category = get_file_category(file.content_type)
         if file_category == 'image':
             max_size = 10 * 1024 * 1024  # 10MB for images
@@ -319,9 +453,27 @@ class AttachmentUploadView(APIView):
         else:
             max_size = 25 * 1024 * 1024  # 25MB for documents and other files
             
-        if file.size > max_size:
+        # Validate file size
+        if not SecurityValidator.validate_file_size(file.size, max_size // (1024*1024)):
             return Response({'error': f'File too large. Max size: {max_size // (1024*1024)}MB for {file_category} files'}, 
                             status=status.HTTP_400_BAD_REQUEST)
+        
+        # Additional security: Check for empty files
+        if file.size == 0:
+            return Response({'error': 'Empty files are not allowed'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate file content matches MIME type (magic number validation)
+        try:
+            file.seek(0)
+            file_content = file.read(1024)  # Read first 1KB for signature check
+            file.seek(0)  # Reset file pointer
+            
+            if not SecurityValidator.validate_file_content(file_content, file.content_type):
+                logger.warning("File content validation failed for %s: MIME type %s", sanitized_filename, file.content_type)
+                return Response({'error': 'File content does not match file type'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error("File content validation error: %s", e)
+            return Response({'error': 'File validation failed'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Validate file type - Comprehensive list of supported document and media types
         allowed_types = [
@@ -362,18 +514,83 @@ class AttachmentUploadView(APIView):
         ]
         if file.content_type not in allowed_types:
             return Response({'error': 'File type not allowed'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate file extension matches content type
+        allowed_extensions = {
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/png': ['.png'],
+            'image/gif': ['.gif'],
+            'image/webp': ['.webp'],
+            'image/bmp': ['.bmp'],
+            'image/tiff': ['.tiff', '.tif'],
+            'application/pdf': ['.pdf'],
+            'application/msword': ['.doc'],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+            'application/vnd.ms-excel': ['.xls'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'application/vnd.ms-powerpoint': ['.ppt'],
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+            'text/plain': ['.txt'],
+            'text/csv': ['.csv'],
+            'text/rtf': ['.rtf'],
+            'application/zip': ['.zip'],
+            'application/x-rar-compressed': ['.rar'],
+            'application/x-7z-compressed': ['.7z'],
+            'audio/mpeg': ['.mp3'],
+            'audio/wav': ['.wav'],
+            'audio/mp4': ['.m4a'],
+            'audio/ogg': ['.ogg'],
+            'video/mp4': ['.mp4'],
+            'video/avi': ['.avi'],
+            'video/quicktime': ['.mov'],
+            'video/x-msvideo': ['.avi'],
+        }
+        
+        if file.content_type in allowed_extensions:
+            if not SecurityValidator.validate_file_extension(sanitized_filename, allowed_extensions[file.content_type]):
+                return Response({'error': 'File extension does not match file type'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Let FileField handle storage
+            # Read file content for cloud storage
+            file_content = file.read()
+            file.seek(0)  # Reset file pointer
+            
+            # Upload to cloud storage
+            upload_result = cloud_storage.upload_file(
+                file_content=file_content,
+                file_name=sanitized_filename,
+                content_type=file.content_type,
+                user_id=request.user.user_id
+            )
+            
+            if not upload_result.get('success', False):
+                logger.error(f"Cloud storage upload failed: {upload_result.get('error', 'Unknown error')}")
+                return Response({'error': 'File upload failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # Create attachment record with cloud storage info
             attachment = MessageAttachment.objects.create(
-                file=file,
-                file_name=file.name,
+                file_name=sanitized_filename,
                 file_type=file.content_type,
                 file_size=file.size,
+                file_key=upload_result['file_key'],  # Store S3 key or local path
+                file_url=upload_result['file_url'],  # Store public URL
+                storage_type=upload_result['storage_type'],  # 's3' or 'local'
             )
+            
+            # For local storage, also populate the legacy file field
+            if upload_result['storage_type'] == 'local':
+                # Save file to legacy FileField for compatibility
+                file.seek(0)  # Reset file pointer
+                attachment.file.save(sanitized_filename, file, save=True)
             
             # Determine file category for frontend display
             file_category = get_file_category(file.content_type)
+            
+            # Ensure proper URL construction
+            file_url = attachment.file_url
+            if not file_url and attachment.file:
+                # Build absolute URL for local storage
+                file_url = request.build_absolute_uri(attachment.file.url)
             
             return Response({
                 'attachment_id': attachment.attachment_id,
@@ -381,7 +598,7 @@ class AttachmentUploadView(APIView):
                 'file_type': attachment.file_type,
                 'file_category': file_category,
                 'file_size': attachment.file_size,
-                'file_url': attachment.file.url if attachment.file else None,
+                'file_url': file_url,
                 'uploaded_at': attachment.uploaded_at.isoformat(),
             }, status=status.HTTP_201_CREATED)
 
@@ -389,3 +606,52 @@ class AttachmentUploadView(APIView):
             logger.exception("Attachment upload failed")
             return Response({'error': 'Upload failed', 'detail': str(e), 'type': e.__class__.__name__}, 
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def serve_file_with_ngrok_bypass(request, file_path):
+    """
+    Serve files with ngrok-skip-browser-warning header to bypass ngrok warning page
+    """
+    try:
+        # Construct the full file path
+        full_path = os.path.join(settings.MEDIA_ROOT, file_path)
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            raise Http404("File not found")
+        
+        # Read the file
+        with open(full_path, 'rb') as f:
+            file_content = f.read()
+        
+        # Determine content type
+        import mimetypes
+        content_type, _ = mimetypes.guess_type(full_path)
+        if not content_type:
+            content_type = 'application/octet-stream'
+        
+        # Create response with ngrok bypass header
+        response = HttpResponse(file_content, content_type=content_type)
+        response['ngrok-skip-browser-warning'] = 'true'
+        
+        # Check for mobile download parameters
+        download_param = request.GET.get('download')
+        bypass_param = request.GET.get('bypass')
+        ua_param = request.GET.get('ua')
+        
+        if download_param == '1' or bypass_param == '1' or ua_param == 'mobile':
+            # Force download for mobile devices
+            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+        else:
+            # Default behavior
+            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
+        
+        return response
+        
+    except Exception as e:
+        logger.exception(f"Error serving file {file_path}")
+        raise Http404("File not found")

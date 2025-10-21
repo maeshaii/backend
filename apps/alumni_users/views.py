@@ -37,13 +37,31 @@ def _build_profile_pic_url(user):
 def build_alumni_data(a):
     profile = getattr(a, 'profile', None)
     academic = getattr(a, 'academic_info', None)
+    employment = getattr(a, 'employment', None)
+    tracker_data = getattr(a, 'tracker_data', None)
+    
+    # Determine employment status
+    employment_status = 'Not disclosed'
+    if tracker_data and tracker_data.q_employment_status:
+        if tracker_data.q_employment_status.lower() == 'yes':
+            employment_status = 'Employed'
+        elif tracker_data.q_employment_status.lower() == 'no':
+            employment_status = 'Unemployed'
+        elif tracker_data.q_employment_status.lower() == 'pending':
+            employment_status = 'Pending'
+        else:
+            employment_status = tracker_data.q_employment_status.title()
+    elif employment and employment.company_name_current:
+        employment_status = 'Employed'
+    
     return {
         'id': a.user_id,
         'ctu_id': a.acc_username,
         'name': f"{a.f_name} {a.m_name or ''} {a.l_name}",
         'program': getattr(academic, 'program', None) if academic else None,
         'batch': getattr(academic, 'year_graduated', None) if academic else None,
-        'status': a.user_status,
+        'status': a.user_status,  # Keep user_status for account status
+        'employment_status': employment_status,  # Add employment status
         'gender': a.gender,
         'birthdate': str(getattr(profile, 'birthdate', None)) if profile and getattr(profile, 'birthdate', None) else None,
         'phone': getattr(profile, 'phone_num', None) if profile else None,
@@ -55,6 +73,10 @@ def build_alumni_data(a):
         'social_media': getattr(profile, 'social_media', None) if profile else None,
         'school_name': getattr(academic, 'school_name', None) if academic else None,
         'profile_pic': _build_profile_pic_url(a),
+        # Add employment data
+        'position_current': getattr(employment, 'position_current', None) if employment else None,
+        'company_name_current': getattr(employment, 'company_name_current', None) if employment else None,
+        'salary_current': getattr(employment, 'salary_current', None) if employment else None,
     }
 
 def get_field_from_question_map(user, question_text_map, field, *question_labels):
@@ -128,8 +150,23 @@ def alumni_detail_view(request, user_id):
 
         academic_info = getattr(user, 'academic_info', None)
         employment_info = getattr(user, 'employment', None)
+        tracker_data = getattr(user, 'tracker_data', None)
         batch_year = getattr(academic_info, 'year_graduated', None)
 
+        # Determine employment status
+        employment_status = 'Not disclosed'
+        if tracker_data and tracker_data.q_employment_status:
+            if tracker_data.q_employment_status.lower() == 'yes':
+                employment_status = 'Employed'
+            elif tracker_data.q_employment_status.lower() == 'no':
+                employment_status = 'Unemployed'
+            elif tracker_data.q_employment_status.lower() == 'pending':
+                employment_status = 'Pending'
+            else:
+                employment_status = tracker_data.q_employment_status.title()
+        elif employment_info and employment_info.company_name_current:
+            employment_status = 'Employed'
+        
         # Get follower and following counts
         from apps.shared.models import Follow
         followers_count = Follow.objects.filter(following=user).count()
@@ -165,6 +202,7 @@ def alumni_detail_view(request, user_id):
             'scope_current': getattr(employment_info, 'scope_current', None) if employment_info else get_field('scope_current', 'current scope'),
             'salary_current': getattr(employment_info, 'salary_current', None) if employment_info else get_field('salary_current', 'salary'),
             'self_employed': getattr(employment_info, 'self_employed', False) if employment_info else False,
+            'employment_status': employment_status,
             'followers_count': followers_count,
             'following_count': following_count,
             'account_type': {

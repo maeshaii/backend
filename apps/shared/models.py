@@ -253,13 +253,29 @@ class Message(models.Model):
 
 
 class MessageAttachment(models.Model):
+    STORAGE_CHOICES = [
+        ('local', 'Local Storage'),
+        ('s3', 'AWS S3'),
+        ('gcs', 'Google Cloud Storage'),
+    ]
+    
     attachment_id = models.AutoField(primary_key=True)
     message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name='attachments', null=True, blank=True)
-    file = models.FileField(upload_to='message_attachments/%Y/%m/%d/')
+    file = models.FileField(upload_to='message_attachments/%Y/%m/%d/', blank=True, null=True, help_text='Local file storage (deprecated, use file_key instead)')
     file_name = models.CharField(max_length=255)
     file_type = models.CharField(max_length=255)
     file_size = models.IntegerField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    
+    # Cloud storage fields
+    file_key = models.CharField(max_length=500, blank=True, null=True, help_text='S3 object key or local file path')
+    file_url = models.URLField(blank=True, null=True, help_text='Public URL for the file')
+    storage_type = models.CharField(
+        max_length=20, 
+        default='local',
+        choices=STORAGE_CHOICES,
+        help_text='Storage backend used for this file'
+    )
     
     class Meta:
         db_table = 'shared_messageattachment'
@@ -274,6 +290,29 @@ class MessageAttachment(models.Model):
     def file_size_mb(self):
         """Return file size in MB"""
         return round(self.file_size / (1024 * 1024), 2)
+    
+    @property
+    def get_file_url(self):
+        """Get file URL with fallback to local storage"""
+        if self.file_url:
+            return self.file_url
+        elif self.file:
+            return self.file.url
+        else:
+            return None
+    
+    def delete_file_from_storage(self):
+        """Delete file from storage backend"""
+        from apps.messaging.cloud_storage import cloud_storage
+        
+        if self.storage_type == 's3' and self.file_key:
+            return cloud_storage.delete_file(self.file_key)
+        elif self.file:
+            try:
+                return self.file.delete(save=False)
+            except Exception:
+                return False
+        return False
 
 class Notification(models.Model):
     notification_id = models.AutoField(primary_key=True)
@@ -728,8 +767,12 @@ class EmploymentHistory(models.Model):
         # STEP 1: Self-employed status based on tracker answer Q23 (q_employment_type)
         # Check if user is self-employed based on tracker response
         tracker_data = getattr(self.user, 'tracker_data', None)
-        if tracker_data and tracker_data.q_employment_type and 'self-employed' in tracker_data.q_employment_type.lower():
-            self.self_employed = True
+        if tracker_data and tracker_data.q_employment_type:
+            employment_type_lower = tracker_data.q_employment_type.lower()
+            if 'self-employed' in employment_type_lower or 'self employed' in employment_type_lower:
+                self.self_employed = True
+            else:
+                self.self_employed = False
         else:
             self.self_employed = False
         
@@ -752,7 +795,24 @@ class EmploymentHistory(models.Model):
         self.high_position = is_high_position
         
         # STEP 3: Check for absorbed status (for AACUP) - typically first job after graduation
-        if self.date_started and hasattr(self.user, 'academic_info') and self.user.academic_info.year_graduated:
+        # Priority 1: If current company matches OJT company, they were absorbed
+        absorbed_by_ojt_match = False
+        if self.company_name_current and hasattr(self.user, 'ojt_company_profile') and self.user.ojt_company_profile:
+            ojt_company = getattr(self.user.ojt_company_profile, 'company_name', '')
+            if ojt_company and self.company_name_current:
+                # Case-insensitive comparison with normalization
+                current_company_normalized = self.company_name_current.lower().strip()
+                ojt_company_normalized = ojt_company.lower().strip()
+                
+                # Check for exact match or partial match (for variations in company names)
+                if (current_company_normalized == ojt_company_normalized or 
+                    current_company_normalized in ojt_company_normalized or
+                    ojt_company_normalized in current_company_normalized):
+                    absorbed_by_ojt_match = True
+                    self.absorbed = True
+        
+        # Priority 2: If not absorbed by OJT match, check if hired within 6 months of graduation
+        if not absorbed_by_ojt_match and self.date_started and hasattr(self.user, 'academic_info') and self.user.academic_info.year_graduated:
             # If hired within 6 months of graduation, consider absorbed
             from datetime import date
             graduation_date = date(self.user.academic_info.year_graduated, 6, 30)  # Assume June graduation
@@ -769,6 +829,9 @@ class EmploymentHistory(models.Model):
                 self.absorbed = True
             else:
                 self.absorbed = False
+        elif not absorbed_by_ojt_match:
+            # If no date started or graduation info, default to False
+            self.absorbed = False
         
         # STEP 4: Smart Job Alignment with Database Expansion
         # SENIOR DEV: Intelligent job alignment with automatic database expansion
@@ -1098,6 +1161,32 @@ class OJTInfo(models.Model):
     def __str__(self):
         return f"OJT info for {self.user.full_name} - Status: {self.ojtstatus}"
 
+
+class OJTCompanyProfile(models.Model):
+    """OJT Company Profile - Stores company information for OJT students"""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='ojt_company_profile')
+    company_name = models.CharField(max_length=255, null=True, blank=True)
+    company_address = models.TextField(null=True, blank=True)
+    company_email = models.EmailField(null=True, blank=True)
+    company_contact = models.CharField(max_length=20, null=True, blank=True)
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    position = models.CharField(max_length=255, null=True, blank=True)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['company_name']),
+            models.Index(fields=['start_date']),
+            models.Index(fields=['end_date']),
+        ]
+    
+    def __str__(self):
+        return f"OJT Company Profile for {self.user.full_name} - {self.company_name}"
+
+
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
@@ -1235,12 +1324,12 @@ class TrackerResponse(models.Model):
                     tracker.q_sector_current = str(answer) if answer else tracker.q_sector_current
                     if answer:
                         employment.sector_current = str(answer)
-                elif question_id == 28:  # How long have you been employed?
+                elif question_id == 39:  # Employment Sector (Local/International)
+                    tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
+                elif question_id == 29:  # How long have you been employed?
                     tracker.q_employment_duration = str(answer) if answer else tracker.q_employment_duration
                     if answer:
                         employment.employment_duration_current = str(answer)
-                elif question_id == 38:  # Employment Sector (Local/International)
-                    tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
                 elif question_id == 30:  # Current Salary range (was 29)
                     tracker.q_salary_range = str(answer) if answer else tracker.q_salary_range
                     if answer:
@@ -1343,6 +1432,23 @@ class OJTImport(models.Model):
     file_name = models.CharField(max_length=255)
     records_imported = models.IntegerField(default=0)
     status = models.CharField(max_length=50, default='Completed')  # Completed, Failed, Partial
+
+class SendDate(models.Model):
+    """Model to store scheduled send dates for OJT students"""
+    coordinator = models.CharField(max_length=100)  # Coordinator who set the date
+    batch_year = models.IntegerField()
+    section = models.CharField(max_length=50, blank=True, null=True)
+    send_date = models.DateField()  # The scheduled date
+    is_processed = models.BooleanField(default=False)  # Whether it has been processed
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        unique_together = ['coordinator', 'batch_year', 'section']
+    
+    def __str__(self):
+        return f"{self.coordinator} - {self.batch_year} {self.section or 'All'} - {self.send_date}"
+
 class TrackerFileUpload(models.Model):
     response = models.ForeignKey(TrackerResponse, on_delete=models.CASCADE, related_name='files')
     question_id = models.IntegerField()  # ID of the question this file answers
@@ -1358,4 +1464,3 @@ class TrackerFileUpload(models.Model):
 # Forum-specific relations (now use shared tables)
 # ==========================
 # ForumRepost has been merged into Repost table
-# Forum reposts now use the shared Repost model with a forum foreign key

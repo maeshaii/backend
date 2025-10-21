@@ -22,6 +22,7 @@ urlpatterns = [
     path('change-password/', views.change_password_view, name='change_password'),
     # Alumni import/export (keep single implementation)
     path('alumni/statistics/', views.alumni_statistics_view, name='alumni_statistics'),
+    path('alumni/graduation-years/', views.graduation_years_view, name='graduation_years'),
     path('alumni/list/', views.alumni_list_view, name='alumni_list'),
     path('alumni-list/', alumni_list_view, name='alumni_list_alias'),
     path('export-alumni/', export_detailed_alumni_data, name='export_alumni_excel'),
@@ -43,6 +44,8 @@ urlpatterns = [
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
     path('ojt/approve-individual-to-alumni/', approve_individual_ojt_to_alumni_view, name='ojt_approve_individual_to_alumni'),
     path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
+    path('ojt/available-years/', views.available_years_view, name='available_years'),
+    path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
@@ -87,6 +90,7 @@ urlpatterns = [
     path('following/mentions/', views.get_following_for_mentions, name='get_following_for_mentions'),
     path('comments/<int:comment_id>/post/', views.get_post_from_comment, name='get_post_from_comment'),
     path('replies/<int:reply_id>/comment/', views.get_comment_from_reply, name='get_comment_from_reply'),
+    path('users/alumni/', views.users_alumni_view, name='users_alumni'),
     
     # Used by Mobile: Posts API endpoints
     path('posts/', views.posts_view, name='posts'),
@@ -136,7 +140,7 @@ urlpatterns = [
     path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
-    # # User Managem    ent API endpoints (Admin only)
+    # # User Management API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     

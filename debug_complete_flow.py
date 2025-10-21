@@ -38,7 +38,7 @@ def debug_complete_flow():
         
         # Check AcademicInfo
         if hasattr(user, 'academic_info') and user.academic_info:
-            print(f"    AcademicInfo: Year={user.academic_info.year_graduated}, Course={user.academic_info.course}")
+            print(f"    AcademicInfo: Year={user.academic_info.year_graduated}, Program={user.academic_info.course}")
         else:
             print(f"    AcademicInfo: MISSING")
         
@@ -61,7 +61,7 @@ def debug_complete_flow():
     for record in academic_records:
         year = record.year_graduated
         course = record.course
-        print(f"  User: {record.user.acc_username}, Year: {year}, Course: {course}")
+        print(f"  User: {record.user.acc_username}, Year: {year}, Program: {course}")
         if year:
             year_counts[year] += 1
     
@@ -116,6 +116,11 @@ def debug_complete_flow():
 
 if __name__ == "__main__":
     debug_complete_flow()
+
+
+
+
+
 
 
 
