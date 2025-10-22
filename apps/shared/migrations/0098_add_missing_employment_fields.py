@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0097_merge_20251011_2333'),
+        ('shared', '0095_ojtcompanyprofile_recentsearch_and_more'),
     ]
 
     operations = [

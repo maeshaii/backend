@@ -1161,8 +1161,8 @@ def import_ojt_view(request):
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
         
-        if not batch_year or not coordinator_username or not section:
-            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, coordinator_username: {bool(coordinator_username)}, section: {bool(section)}'}, status=400)
+        if not batch_year or not coordinator_username:
+            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, coordinator_username: {bool(coordinator_username)}'}, status=400)
 
         # Read Excel file
         try:

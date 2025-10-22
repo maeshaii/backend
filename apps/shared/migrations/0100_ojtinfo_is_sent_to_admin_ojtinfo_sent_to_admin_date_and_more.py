@@ -49,9 +49,6 @@ class Migration(migrations.Migration):
                 'ordering': ['date_created'],
             },
         ),
-        migrations.DeleteModel(
-            name='CoordinatorProgram',
-        ),
         migrations.AddIndex(
             model_name='reply',
             index=models.Index(fields=['comment', 'date_created'], name='shared_repl_comment_657ed9_idx'),
