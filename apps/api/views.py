@@ -887,13 +887,20 @@ def send_reminder_view(request):
             personalized_message = message.replace('[User\'s Name]', f"{user.f_name} {user.l_name}")
             user_link = f"{tracker_form_base_url}?user={user.user_id}"
             personalized_message = personalized_message.replace('[Tracker Form Link]', user_link)
-            Notification.objects.create(
+            notification = Notification.objects.create(
                 user=user,
                 notif_type=sender,
                 notifi_content=personalized_message,
                 notif_date=timezone.now(),
                 subject=subject
             )
+            
+            # Broadcast notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting tracker reminder notification: {e}")
             sent += 1
         except Exception as e:
             continue
@@ -3103,13 +3110,20 @@ def post_like_view(request, post_id):
             if created:
                 # Create notification for post owner (only if the liker is not the post owner)
                 if user.user_id != post.user.user_id:
-                    Notification.objects.create(
+                    like_notification = Notification.objects.create(
                         user=post.user,
                         notif_type='like',
                         subject='Post Liked',
                         notifi_content=f"{user.full_name} liked your post<!--POST_ID:{post.post_id}-->",
                         notif_date=timezone.now()
                     )
+                    
+                    # Broadcast like notification in real-time
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(like_notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting like notification: {e}")
                 return JsonResponse({'success': True, 'message': 'Post liked'})
             else:
                 return JsonResponse({'success': False, 'message': 'Post already liked'})
@@ -3257,13 +3271,20 @@ def post_comments_view(request, post_id):
 
             # Create notification for post owner
             if user.user_id != post.user.user_id:
-                Notification.objects.create(
+                comment_notification = Notification.objects.create(
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
                     notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
+                
+                # Broadcast comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(comment_notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting comment notification: {e}")
 
             return JsonResponse({
                 'success': True,
@@ -3371,13 +3392,20 @@ def post_repost_view(request, post_id):
 
         # Create notification for post owner (only if the reposter is not the post owner)
         if user.user_id != post.user.user_id:
-            Notification.objects.create(
+            repost_notification = Notification.objects.create(
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
                 notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}-->",
                 notif_date=timezone.now()
             )
+            
+            # Broadcast repost notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(repost_notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting repost notification: {e}")
 
         return JsonResponse({
             'success': True,
@@ -3935,14 +3963,22 @@ def forum_comments_view(request, forum_id):
                 comment_content=content,
                 date_created=timezone.now()
             )
+            
             if request.user.user_id != forum.user.user_id:
-                Notification.objects.create(
+                forum_comment_notification = Notification.objects.create(
                     user=forum.user,
                     notif_type='comment',
                     subject='Forum Commented',
                     notifi_content=f"{request.user.full_name} commented on your forum post<!--FORUM_ID:{forum.forum_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
+                
+                # Broadcast forum comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(forum_comment_notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting forum comment notification: {e}")
             return JsonResponse({'success': True, 'comment_id': comment.comment_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
@@ -4004,13 +4040,20 @@ def forum_repost_view(request, forum_id):
             return JsonResponse({'error': 'You have already reposted this'}, status=400)
         r = Repost.objects.create(forum=forum, user=request.user, repost_date=timezone.now())
         if request.method == "POST" and request.user.user_id != forum.user.user_id:
-            Notification.objects.create(
+            forum_repost_notification = Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
                 notifi_content=f"{request.user.full_name} reposted your forum post<!--FORUM_ID:{forum.forum_id}-->",
                 notif_date=timezone.now()
             )
+            
+            # Broadcast forum repost notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(forum_repost_notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting forum repost notification: {e}")
         return JsonResponse({'success': True, 'repost_id': r.repost_id})
     except Forum.DoesNotExist:
         return JsonResponse({'error': 'Forum not found'}, status=404)
@@ -4094,15 +4137,22 @@ def follow_user_view(request, user_id):
             if created:
                 # Notify the followed user
                 try:
-                    Notification.objects.create(
+                    follow_notification = Notification.objects.create(
                         user=user_to_follow,
                         notif_type='follow',
                         subject='New Follower',
                         notifi_content=f"{current_user.full_name}|{current_user.user_id} started following you.",
                         notif_date=timezone.now()
                     )
-                except Exception:
-                    pass
+                    
+                    # Broadcast follow notification in real-time
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(follow_notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting follow notification: {e}")
+                except Exception as e:
+                    logger.error(f"Error creating follow notification: {e}")
                 return JsonResponse({
                     'success': True,
                     'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()

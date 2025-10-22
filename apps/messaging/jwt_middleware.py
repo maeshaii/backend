@@ -36,7 +36,7 @@ class JWTAuthMiddleware:
         # Debug logging
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"JWT Middleware: Processing WebSocket connection")
+        logger.info(f"JWT Middleware: Processing WebSocket connection for scope: {scope.get('path', 'unknown')}")
 
         # Try JWT token authentication first
         token = self._extract_token_from_scope(scope)
@@ -46,12 +46,14 @@ class JWTAuthMiddleware:
             user = await self._authenticate_token(token)
             logger.info(f"JWT Middleware: JWT authentication result: {user is not None}")
             if user is not None:
+                logger.info(f"JWT Middleware: Authenticated user: {user.user_id}")
                 scope['user'] = user
         else:
             # Fallback to session-based authentication
             user = await self._authenticate_session(scope)
             logger.info(f"JWT Middleware: Session authentication result: {user is not None}")
             if user is not None:
+                logger.info(f"JWT Middleware: Authenticated user: {user.user_id}")
                 scope['user'] = user
 
         return await self.inner(scope, receive, send)

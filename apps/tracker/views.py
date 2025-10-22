@@ -21,7 +21,7 @@ def tracker_questions_view(request):
     """Return all tracker categories with their questions."""
     try:
         categories = []
-        for cat in QuestionCategory.objects.prefetch_related('questions').all():
+        for cat in QuestionCategory.objects.prefetch_related('questions').order_by('order'):
             categories.append({
                 "id": cat.id,
                 "title": cat.title,
@@ -32,9 +32,10 @@ def tracker_questions_view(request):
                         "text": q.text,
                         "type": q.type,
                         "options": q.options or [],
-                        "required": q.required
+                        "required": q.required,
+                        "order": q.order
                     }
-                    for q in cat.questions.all()
+                    for q in cat.questions.all().order_by('order')
                 ]
             })
         return JsonResponse({"success": True, "categories": categories})
@@ -173,15 +174,16 @@ def add_question_view(request):
     qtype = data.get('type')
     options = data.get('options', [])
     required = data.get('required', False)
+    order = data.get('order', 0)
     if not (category_id and text and qtype):
         return JsonResponse({'success': False, 'message': 'Missing required fields'}, status=400)
     try:
         category = QuestionCategory.objects.get(id=category_id)
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
-    q = Question.objects.create(category=category, text=text, type=qtype, options=options, required=required)
+    q = Question.objects.create(category=category, text=text, type=qtype, options=options, required=required, order=order)
     return JsonResponse({'success': True, 'question': {
-        'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required
+        'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required, 'order': q.order
     }})
 
 @api_view(["PUT"]) 
@@ -209,8 +211,10 @@ def update_question_view(request, question_id):
     # Only update fields that are explicitly provided to avoid unintended resets
     options_provided = 'options' in data
     required_provided = 'required' in data
+    order_provided = 'order' in data
     options = data.get('options')
     required = data.get('required')
+    order = data.get('order')
     try:
         q = Question.objects.get(id=question_id)
         if text:
@@ -221,8 +225,10 @@ def update_question_view(request, question_id):
             q.options = options or []
         if required_provided:
             q.required = bool(required)
+        if order_provided:
+            q.order = order
         q.save()
-        return JsonResponse({'success': True, 'question': {'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required}})
+        return JsonResponse({'success': True, 'question': {'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required, 'order': q.order}})
     except Question.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Question not found'}, status=404)
 
@@ -337,7 +343,7 @@ def submit_tracker_response_view(request):
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().
 
         # Create a thank you notification
-        Notification.objects.create(
+        thank_you_notification = Notification.objects.create(
             user=user,
             notif_type='CCICT',
             subject='Thank You for Completing the Tracker Form',
@@ -345,20 +351,35 @@ def submit_tracker_response_view(request):
             notif_date=timezone.now()
         )
 
+        # Broadcast thank you notification in real-time
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(thank_you_notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting thank you notification: {e}")
+
         # Notify all admin users that a tracker response was submitted
+        admin_notifications = []
         try:
             from apps.shared.models import User as SharedUser, AccountType as SharedAccountType
+            from apps.messaging.notification_broadcaster import broadcast_notification
             admin_accounts = SharedUser.objects.filter(account_type__admin=True)
             for admin_user in admin_accounts:
-                Notification.objects.create(
+                admin_notification = Notification.objects.create(
                     user=admin_user,
                     notif_type='tracker_submission',
                     subject='New Tracker Response Submitted',
                     notifi_content=f'{user.f_name} {user.l_name} has submitted a tracker response.',
                     notif_date=timezone.now()
                 )
-        except Exception:
-            pass
+                admin_notifications.append(admin_notification)
+                # Broadcast admin notification in real-time
+                try:
+                    broadcast_notification(admin_notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting admin notification: {e}")
+        except Exception as e:
+            logger.error(f"Error creating admin notifications: {e}")
         
         return JsonResponse({
             'success': True, 
