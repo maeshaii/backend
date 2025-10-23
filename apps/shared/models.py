@@ -1198,6 +1198,7 @@ class Question(models.Model):
     type = models.CharField(max_length=50)
     options = models.JSONField(blank=True, null=True)  # For radio/multiple/checkbox
     required = models.BooleanField(default=False)  # Added required field
+    order = models.PositiveIntegerField(default=0)  # Added for ordering questions within category
 
 class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)

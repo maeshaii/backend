@@ -64,3 +64,17 @@ def delete_all_ojt_users():
 if __name__ == "__main__":
     delete_all_ojt_users()
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+

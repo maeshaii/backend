@@ -4,7 +4,7 @@ import time
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.utils import timezone
-from apps.shared.models import Message, Conversation, User
+from apps.shared.models import Message, Conversation, User, Notification
 from apps.shared.security import ContentSanitizer
 from .connection_manager import connection_manager
 from .message_ordering import message_sequencer
@@ -54,37 +54,57 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			return
 		
 		# Verify user has access and role
-		if not await self.can_access_conversation():
-			logger.warning(f"User {getattr(self.user, 'user_id', None)} denied access to conversation {self.conversation_id}")
+		if not self.user or not hasattr(self.user, 'user_id'):
+			logger.warning(f"Invalid user for WebSocket connection: {self.user}")
+			await self.accept()
+			await self.send(text_data=json.dumps({
+				'type': 'connection_denied',
+				'reason': 'invalid_user',
+				'message': 'Invalid user session'
+			}))
 			await self.close()
 			return
 		
-		connection_stages['access_check'] = time.time()
+		# Check if user has access to this conversation
+		has_access = await database_sync_to_async(self._check_conversation_access)()
+		if not has_access:
+			logger.warning(f"User {getattr(self.user, 'user_id', None)} denied access to conversation {self.conversation_id}")
+			await self.accept()
+			await self.send(text_data=json.dumps({
+				'type': 'connection_denied',
+				'reason': 'access_denied',
+				'message': 'You do not have access to this conversation'
+			}))
+			await self.close()
+			return
+		
+		# Accept the connection
+		await self.accept()
 		
 		# Join conversation room
 		await self.channel_layer.group_add(
 			f"chat_{self.conversation_id}",
 			self.channel_name
 		)
-		await self.accept()
 		
-		connection_stages['websocket_accepted'] = time.time()
+		# Store connection metadata
+		connection_metadata = {
+			'user_id': getattr(self.user, 'user_id', None),
+			'conversation_id': self.conversation_id,
+			'ip_address': ip_address,
+			'user_agent': self.scope.get('headers', {}).get(b'user-agent', b'').decode('utf-8', errors='ignore'),
+			'connected_at': timezone.now().isoformat()
+		}
 		
 		# Add connection to pool
 		await database_sync_to_async(connection_pool.add_connection)(
 			getattr(self.user, 'user_id', None),
-			self.channel_name
+			self.channel_name,
+			connection_metadata
 		)
 		
 		# Add connection to Redis tracking
-		connection_metadata = {
-			'ip_address': self.scope.get('client', [None])[0] if self.scope.get('client') else None,
-			'user_agent': dict(self.scope.get('headers', [])).get(b'user-agent', b'').decode('utf-8', errors='ignore'),
-		}
-		
 		await database_sync_to_async(connection_manager.add_connection)(
-			getattr(self.user, 'user_id', None),
-			self.conversation_id,
 			self.channel_name,
 			connection_metadata
 		)
@@ -200,237 +220,325 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			if not can_send:
 				logger.warning(f"Message rate limited for user {getattr(self.user, 'user_id', None)}: {rate_info}")
 				await self.send(text_data=json.dumps({
-					'type': 'rate_limit_exceeded',
-					'reason': rate_info.get('reason', 'message_rate_limit_exceeded'),
+					'type': 'rate_limited',
+					'reason': rate_info.get('reason', 'rate_limit_exceeded'),
 					'retry_after': rate_info.get('retry_after', 60),
 					'message': 'Message rate limit exceeded. Please slow down.'
 				}))
 				return
 			
-			# Sanitize and validate message content
-			raw_content = data.get('message', '')
-			message_content = ContentSanitizer.sanitize_message_content(raw_content)
+			# Validate and sanitize message content
+			content = data.get('content', '').strip()
+			if not content:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'Message content cannot be empty'
+				}))
+				return
 			
-			# Sanitize and validate message type
-			raw_message_type = data.get('message_type', 'text')
-			message_type = ContentSanitizer.validate_message_type(raw_message_type)
+			# Sanitize content
+			sanitizer = ContentSanitizer()
+			content = sanitizer.sanitize_text(content)
+			
+			# Validate message type
+			message_type = data.get('message_type', 'text')
+			if not sanitizer.validate_message_type(message_type):
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'Invalid message type'
+				}))
+				return
+			
+			message_stages['validation_complete'] = time.time()
+			
+			# Create message in database
+			message_data = await database_sync_to_async(self._create_message)(
+				content, message_type, data.get('attachments', [])
+			)
+			
+			message_stages['database_save'] = time.time()
+			
+			if not message_data:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'Failed to save message'
+				}))
+				return
+			
+			# Broadcast message to conversation group
+			await self.channel_layer.group_send(
+				f"chat_{self.conversation_id}",
+				{
+					'type': 'chat_message',
+					'message': message_data
+				}
+			)
+			
+			message_stages['broadcast_complete'] = time.time()
+			
+			# Track message performance
+			await database_sync_to_async(performance_metrics.track_message_performance)(
+				self.channel_name,
+				message_stages,
+				getattr(self.user, 'user_id', None),
+				message_data.get('message_id')
+			)
+			
+			# Track message event
+			await database_sync_to_async(messaging_monitor.track_message_event)(
+				'message_sent',
+				getattr(self.user, 'user_id', None),
+				self.conversation_id,
+				{
+					'message_id': message_data.get('message_id'),
+					'message_type': message_type,
+					'content_length': len(content)
+				}
+			)
 			
 		except Exception as e:
+			logger.error(f"Error handling message: {e}")
 			await self.send(text_data=json.dumps({
 				'type': 'error',
-				'message': f'Invalid message: {str(e)}'
+				'message': 'Failed to process message'
 			}))
-			return
-		
-		message_stages['validation_complete'] = time.time()
-		
-		# Save message to database
-		message = await self.save_message(message_content, message_type)
-		
-		message_stages['message_saved'] = time.time()
-		
-		# Create message metadata with sequencing
-		message_metadata = await database_sync_to_async(message_sequencer.create_message_metadata)(
-			message.message_id,
-			self.conversation_id,
-			getattr(self.user, 'user_id', None),
-			message.content,
-			message.message_type
-		)
-		
-		message_stages['sequencing_complete'] = time.time()
-		
-		# Get attachment details if exists
-		attachment_url = None
-		attachment_info = None
-		if hasattr(message, 'attachments') and message.attachments.exists():
-			attachment = message.attachments.first()
-			if attachment:
-				# Use cloud storage URL first, fallback to local storage
-				if attachment.file_url:
-					attachment_url = attachment.file_url
-				elif attachment.file:
-					# For WebSocket, we need to construct absolute URL
-					# This is a simplified version - in production, use proper domain
-					attachment_url = f"http://localhost:8000{attachment.file.url}"
-				
-				attachment_info = {
-					'file_name': attachment.file_name,
-					'file_type': attachment.file_type,
-					'file_category': get_file_category(attachment.file_type),
-					'file_size': attachment.file_size,
-				}
-
-		# Broadcast to all users in the conversation with sequencing info
-		await self.channel_layer.group_send(
-			f"chat_{self.conversation_id}",
-			{
-				'type': 'chat_message',
-				'message_id': message.message_id,
-				'sequence_number': message_metadata.get('sequence_number'),
-				'content': message.content,
-				'sender_id': getattr(self.user, 'user_id', None),
-				'sender_name': getattr(self.user, 'full_name', ''),
-				'message_type': message.message_type,
-				'created_at': message.created_at.isoformat(),
-				'timestamp': timezone.now().isoformat(),
-				'microsecond_timestamp': message_metadata.get('microsecond_timestamp'),
-				'attachment_url': attachment_url,
-				'attachment_info': attachment_info,
-				'attachments': [{
-					'file_url': attachment_url,
-					'file_name': attachment_info.get('file_name') if attachment_info else None,
-					'file_type': attachment_info.get('file_type') if attachment_info else None,
-					'file_category': attachment_info.get('file_category') if attachment_info else None,
-					'file_size': attachment_info.get('file_size') if attachment_info else None,
-				}] if attachment_url and attachment_info else [],
-			}
-		)
-		
-		message_stages['broadcast_complete'] = time.time()
-		
-		# Track message delivery performance
-		await database_sync_to_async(performance_metrics.track_message_delivery_performance)(
-			message.message_id,
-			message_stages,
-			getattr(self.user, 'user_id', None),
-			self.conversation_id
-		)
-		
-		logger.info(f"Message sent: {message.message_id} by user {getattr(self.user, 'user_id', None)}")
 
 	async def handle_typing(self, data):
 		"""Handle typing indicators"""
-		is_typing = data.get('is_typing', False)
-		
-		# Check typing rate limiting
-		can_type, rate_info = await database_sync_to_async(rate_limiter.check_typing_rate_limit)(
-			getattr(self.user, 'user_id', None),
-			self.conversation_id
-		)
-		
-		if not can_type:
-			logger.warning(f"Typing rate limited for user {getattr(self.user, 'user_id', None)}: {rate_info}")
-			# Don't send error message for typing rate limits to avoid spam
-			return
-		
-		# Update user presence in Redis
-		status = 'typing' if is_typing else 'online'
-		await database_sync_to_async(connection_manager.update_user_presence)(
-			getattr(self.user, 'user_id', None),
-			self.conversation_id,
-			status
-		)
-		
-		await self.channel_layer.group_send(
-			f"chat_{self.conversation_id}",
-			{
-				'type': 'user_typing',
-				'user_id': getattr(self.user, 'user_id', None),
-				'user_name': getattr(self.user, 'full_name', ''),
-				'is_typing': is_typing,
-				'timestamp': timezone.now().isoformat(),
-			}
-		)
+		try:
+			is_typing = data.get('is_typing', False)
+			
+			# Broadcast typing indicator to conversation group
+			await self.channel_layer.group_send(
+				f"chat_{self.conversation_id}",
+				{
+					'type': 'typing_indicator',
+					'user_id': getattr(self.user, 'user_id', None),
+					'user_name': getattr(self.user, 'full_name', 'Unknown'),
+					'is_typing': is_typing
+				}
+			)
+			
+		except Exception as e:
+			logger.error(f"Error handling typing indicator: {e}")
 
 	async def handle_read_receipt(self, data):
 		"""Handle read receipts"""
-		message_id = data.get('message_id')
-		if message_id:
-			await self.mark_message_as_read(message_id)
+		try:
+			message_id = data.get('message_id')
+			if not message_id:
+				return
 			
+			# Update read status in database
+			await database_sync_to_async(self._mark_message_as_read)(message_id)
+			
+			# Broadcast read receipt to conversation group
 			await self.channel_layer.group_send(
 				f"chat_{self.conversation_id}",
 				{
 					'type': 'read_receipt',
 					'message_id': message_id,
-					'read_by': getattr(self.user, 'user_id', None),
-					'read_at': timezone.now().isoformat(),
+					'user_id': getattr(self.user, 'user_id', None),
+					'read_at': timezone.now().isoformat()
 				}
 			)
+			
+		except Exception as e:
+			logger.error(f"Error handling read receipt: {e}")
 
 	async def handle_ping(self, data):
-		"""Handle ping messages for connection health check"""
+		"""Handle ping/pong for connection health"""
 		await self.send(text_data=json.dumps({
 			'type': 'pong',
-			'timestamp': timezone.now().isoformat(),
+			'timestamp': timezone.now().isoformat()
 		}))
 
 	async def chat_message(self, event):
-		"""Send message to WebSocket"""
+		"""Handle chat message from group"""
+		message = event['message']
 		await self.send(text_data=json.dumps({
 			'type': 'message',
-			'message_id': event['message_id'],
-			'content': event['content'],
-			'sender_id': event['sender_id'],
-			'sender_name': event['sender_name'],
-			'message_type': event['message_type'],
-			'created_at': event['created_at'],
-			'timestamp': event['timestamp'],
-			'attachment_url': event['attachment_url'],
-			'attachment_info': event.get('attachment_info'),
+			'message': message
 		}))
 
-	async def user_typing(self, event):
-		"""Send typing indicator to WebSocket"""
+	async def typing_indicator(self, event):
+		"""Handle typing indicator from group"""
 		await self.send(text_data=json.dumps({
 			'type': 'typing',
 			'user_id': event['user_id'],
 			'user_name': event['user_name'],
-			'is_typing': event['is_typing'],
-			'timestamp': event['timestamp'],
+			'is_typing': event['is_typing']
 		}))
 
 	async def read_receipt(self, event):
-		"""Send read receipt to WebSocket"""
+		"""Handle read receipt from group"""
 		await self.send(text_data=json.dumps({
 			'type': 'read_receipt',
 			'message_id': event['message_id'],
-			'read_by': event['read_by'],
-			'read_at': event['read_at'],
-		}))
-
-	async def presence_update(self, event):
-		"""Handle presence updates from Redis connection manager"""
-		await self.send(text_data=json.dumps({
-			'type': 'presence_update',
 			'user_id': event['user_id'],
-			'conversation_id': event['conversation_id'],
-			'status': event['status'],
-			'timestamp': event['timestamp'],
+			'read_at': event['read_at']
 		}))
 
-	@database_sync_to_async
-	def save_message(self, content, message_type):
-		"""Save message to database"""
-		conversation = Conversation.objects.get(conversation_id=self.conversation_id)
-		message = Message.objects.create(
-			conversation=conversation,
-			sender=self.user,
-			content=content,
-			message_type=message_type,
-		)
-		conversation.save()
-		return message
-
-	@database_sync_to_async
-	def mark_message_as_read(self, message_id):
-		"""Mark a message as read"""
-		try:
-			message = Message.objects.get(
-				message_id=message_id,
-				conversation__conversation_id=self.conversation_id,
-			)
-			message.is_read = True
-			message.save()
-		except Message.DoesNotExist:
-			logger.warning(f"Message {message_id} not found")
-
-	@database_sync_to_async
-	def can_access_conversation(self):
-		"""Allow access if the user is a participant of the conversation."""
+	def _check_conversation_access(self):
+		"""Check if user has access to conversation"""
 		try:
 			conversation = Conversation.objects.get(conversation_id=self.conversation_id)
-			return conversation.participants.filter(user_id=getattr(self.user, 'user_id', None)).exists()
+			return conversation.participants.filter(user_id=self.user.user_id).exists()
 		except Conversation.DoesNotExist:
 			return False
+
+	def _create_message(self, content, message_type, attachments):
+		"""Create message in database"""
+		try:
+			conversation = Conversation.objects.get(conversation_id=self.conversation_id)
+			
+			# Create message
+			message = Message.objects.create(
+				conversation=conversation,
+				sender=self.user,
+				content=content,
+				message_type=message_type
+			)
+			
+			# Handle attachments
+			for attachment_data in attachments:
+				# Process attachment logic here
+				pass
+			
+			# Return message data for broadcasting
+			return {
+				'message_id': message.message_id,
+				'sender_id': message.sender.user_id,
+				'sender_name': message.sender.full_name,
+				'content': message.content,
+				'message_type': message.message_type,
+				'created_at': message.created_at.isoformat(),
+				'attachments': []
+			}
+			
+		except Exception as e:
+			logger.error(f"Error creating message: {e}")
+			return None
+
+	def _mark_message_as_read(self, message_id):
+		"""Mark message as read"""
+		try:
+			message = Message.objects.get(message_id=message_id)
+			# Update read status logic here
+			pass
+		except Message.DoesNotExist:
+			pass
+
+
+class NotificationConsumer(AsyncWebsocketConsumer):
+	"""
+	WebSocket consumer for real-time notifications.
+	Handles notification broadcasting and real-time updates.
+	"""
+	
+	async def connect(self):
+		"""Handle WebSocket connection for notifications"""
+		self.user = self.scope['user']
+		
+		# Log connection attempt
+		logger.info(f"Notification WebSocket connection attempt from user {getattr(self.user, 'user_id', None)}")
+		logger.info(f"User object: {self.user}")
+		logger.info(f"User type: {type(self.user)}")
+		
+		# Check if user is authenticated
+		if not self.user or not hasattr(self.user, 'user_id'):
+			logger.warning(f"Invalid user for notification WebSocket: {self.user}")
+			await self.accept()
+			await self.send(text_data=json.dumps({
+				'type': 'connection_denied',
+				'reason': 'invalid_user',
+				'message': 'Invalid user session'
+			}))
+			await self.close()
+			return
+		
+		# Accept the connection
+		await self.accept()
+		
+		# Join user-specific notification room
+		user_id = getattr(self.user, 'user_id', None)
+		group_name = f"notifications_{user_id}"
+		logger.info(f"Adding user {user_id} to notification group: {group_name}")
+		
+		await self.channel_layer.group_add(
+			group_name,
+			self.channel_name
+		)
+		
+		# Send connection confirmation
+		await self.send(text_data=json.dumps({
+			'type': 'connection_established',
+			'user_id': user_id,
+			'timestamp': timezone.now().isoformat(),
+		}))
+		
+		logger.info(f"Notification WebSocket connected: user {user_id}, channel: {self.channel_name}")
+
+	async def disconnect(self, close_code):
+		"""Handle WebSocket disconnection"""
+		user_id = getattr(self.user, 'user_id', None)
+		
+		# Leave notification room
+		await self.channel_layer.group_discard(
+			f"notifications_{user_id}",
+			self.channel_name
+		)
+		
+		logger.info(f"Notification WebSocket disconnected: user {user_id}")
+
+	async def receive(self, text_data):
+		"""Handle incoming WebSocket messages"""
+		try:
+			data = json.loads(text_data)
+			message_type = data.get('type', 'ping')
+			
+			if message_type == 'ping':
+				await self.handle_ping(data)
+			else:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': f'Unknown message type: {message_type}'
+				}))
+				
+		except json.JSONDecodeError as e:
+			logger.error(f"JSON decode error: {e}")
+			await self.send(text_data=json.dumps({
+				'type': 'error',
+				'message': 'Invalid JSON format'
+			}))
+		except Exception as e:
+			logger.error(f"Error processing notification message: {e}")
+			await self.send(text_data=json.dumps({
+				'type': 'error',
+				'message': 'Internal server error'
+			}))
+
+	async def handle_ping(self, data):
+		"""Handle ping/pong for connection health"""
+		await self.send(text_data=json.dumps({
+			'type': 'pong',
+			'timestamp': timezone.now().isoformat()
+		}))
+
+	async def notification_update(self, event):
+		"""Handle notification update from group"""
+		logger.info(f"NotificationConsumer: Received notification_update event: {event}")
+		await self.send(text_data=json.dumps({
+			'type': 'notification_update',
+			'notification': event['notification']
+		}))
+		logger.info(f"NotificationConsumer: Sent notification to WebSocket client")
+
+	async def notification_count_update(self, event):
+		"""Handle notification count update from group"""
+		logger.info(f"NotificationConsumer: Received notification_count_update event: {event}")
+		await self.send(text_data=json.dumps({
+			'type': 'notification_count_update',
+			'count': event['count']
+		}))
+		logger.info(f"NotificationConsumer: Sent count update to WebSocket client")

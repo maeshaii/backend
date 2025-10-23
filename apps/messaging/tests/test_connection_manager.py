@@ -319,3 +319,17 @@ class ConnectionManagerTestCase(TestCase):
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
