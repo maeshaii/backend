@@ -3142,10 +3142,14 @@ def post_detail_view(request, post_id):
                 repost_comments_count = repost_comments.count()
                 repost_comments_data = []
                 for comment in repost_comments:
+                    # Get replies count for this comment
+                    replies_count = Reply.objects.filter(comment=comment).count()
+                    
                     repost_comments_data.append({
                         'comment_id': comment.comment_id,
                         'comment_content': comment.comment_content,
                         'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                        'replies_count': replies_count,
                         'user': {
                             'user_id': comment.user.user_id,
                             'f_name': comment.user.f_name,
@@ -4205,49 +4209,41 @@ def post_repost_view(request, post_id):
 @api_view(["PUT", "DELETE"]) 
 @permission_classes([IsAuthenticated])
 def repost_delete_view(request, repost_id):
-    if request.method == "OPTIONS":
-        response = JsonResponse({'detail': 'OK'})
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Access-Control-Allow-Methods"] = "PUT, DELETE, OPTIONS"
-        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken, Authorization"
-        return response
-
+    """
+    Unified handler for editing and deleting reposts (post, forum, and donation reposts)
+    """
     try:
         repost = Repost.objects.get(repost_id=repost_id)
 
-        # Get user from token
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return JsonResponse({'error': 'Authentication required'}, status=401)
-
-        token = auth_header.split(' ')[1]
-        try:
-            from rest_framework_simplejwt.tokens import AccessToken
-            access_token = AccessToken(token)
-            user_id = access_token['user_id']
-            user = User.objects.get(user_id=user_id)
-        except Exception as e:
-            return JsonResponse({'error': 'Invalid token'}, status=401)
-
         # Check if user owns the repost
-        if repost.user.user_id != user.user_id:
-            return JsonResponse({'error': 'Unauthorized'}, status=403)
+        if repost.user.user_id != request.user.user_id:
+            return JsonResponse({'error': 'Unauthorized - You can only edit/delete your own reposts'}, status=403)
 
         if request.method == 'PUT':
+            # Edit repost caption
             try:
                 data = json.loads(request.body or '{}')
                 caption = (data.get('caption') or '').strip() or None
                 repost.caption = caption
                 repost.save(update_fields=['caption'])
-                return JsonResponse({'success': True})
+                print(f"✏️ DEBUG: User {request.user.user_id} edited repost {repost_id}, new caption: {caption}")
+                return JsonResponse({'success': True, 'message': 'Repost updated successfully'})
             except Exception as e:
+                print(f"❌ ERROR editing repost {repost_id}: {str(e)}")
                 return JsonResponse({'success': False, 'error': str(e)}, status=400)
 
-        repost.delete()
-        return JsonResponse({'success': True, 'message': 'Repost deleted'})
+        elif request.method == 'DELETE':
+            # Delete repost
+            print(f"🗑️ DEBUG: User {request.user.user_id} deleting repost {repost_id}")
+            repost.delete()
+            return JsonResponse({'success': True, 'message': 'Repost deleted successfully'})
+            
     except Repost.DoesNotExist:
         return JsonResponse({'error': 'Repost not found'}, status=404)
     except Exception as e:
+        print(f"❌ ERROR in repost_delete_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
 
 @api_view(["GET"])
@@ -4443,6 +4439,12 @@ def forum_list_create_view(request):
                 data = json.loads(request.body or "{}")
                 content = data.get('post_content') or data.get('content') or ''
             
+            logger.info(f'Forum POST received - Content: {content[:50] if content else "None"}...')
+            logger.info(f'Forum POST data keys: {list(data.keys())}')
+            logger.info(f'Forum POST - Has "image": {"image" in data}, Has "images": {"images" in data}')
+            if 'images' in data:
+                logger.info(f'Forum POST - images type: {type(data["images"])}, count: {len(data["images"]) if isinstance(data["images"], list) else "N/A"}')
+            
             if not str(content).strip():
                 return JsonResponse({'error': 'content required'}, status=400)
             
@@ -4453,9 +4455,56 @@ def forum_list_create_view(request):
                 type='forum',
             )
             
-            # Handle image uploads if any
+            # Handle image uploads - base64 or FormData
+            import uuid
+            import base64
+            from django.core.files.base import ContentFile
+            
             try:
-                if hasattr(request, 'FILES') and request.FILES:
+                # Handle base64 encoded image (single image from web frontend)
+                if 'image' in data and data['image'] and isinstance(data['image'], str) and data['image'].startswith('data:image'):
+                    logger.info('Received base64 image for forum')
+                    try:
+                        format, imgstr = data['image'].split(';base64,')
+                        ext = format.split('/')[-1]
+                        img_data = base64.b64decode(imgstr)
+                        file_name = f"{uuid.uuid4()}.{ext}"
+                        
+                        # Create ContentImage instance for forum
+                        forum_image = ContentImage.objects.create(
+                            content_type='forum',
+                            content_id=forum.forum_id,
+                            order=0
+                        )
+                        forum_image.image.save(file_name, ContentFile(img_data), save=True)
+                        logger.info(f'Saved base64 forum image: {forum_image.image.url}')
+                    except Exception as img_exc:
+                        logger.error(f'Error saving base64 forum image: {img_exc}')
+                
+                # Handle multiple base64 encoded images (from web frontend with multiple images)
+                elif 'images' in data and isinstance(data['images'], list) and len(data['images']) > 0:
+                    logger.info(f'Received {len(data["images"])} base64 images for forum')
+                    for index, image_data in enumerate(data['images']):
+                        if image_data and isinstance(image_data, str) and image_data.startswith('data:image'):
+                            try:
+                                format, imgstr = image_data.split(';base64,')
+                                ext = format.split('/')[-1]
+                                img_data = base64.b64decode(imgstr)
+                                file_name = f"{uuid.uuid4()}.{ext}"
+                                
+                                # Create ContentImage instance for forum
+                                forum_image = ContentImage.objects.create(
+                                    content_type='forum',
+                                    content_id=forum.forum_id,
+                                    order=index
+                                )
+                                forum_image.image.save(file_name, ContentFile(img_data), save=True)
+                                logger.info(f'Saved base64 forum image {index}: {forum_image.image.url}')
+                            except Exception as img_exc:
+                                logger.error(f'Error saving base64 forum image {index}: {img_exc}')
+                
+                # Handle FormData file uploads (from mobile app)
+                elif hasattr(request, 'FILES') and request.FILES:
                     logger.info(f'Received {len(request.FILES)} files via FormData for forum')
                     for index, (key, file) in enumerate(request.FILES.items()):
                         if key.startswith('images') and file:
@@ -4472,7 +4521,7 @@ def forum_list_create_view(request):
                                 logger.error(f'Error saving FormData forum image {index}: {e}')
                                 continue
             except Exception as e:
-                logger.error(f'Error handling files for forum: {e}')
+                logger.error(f'Error handling images for forum: {e}')
             
             # Notify OJT and alumni users if post author is admin or PESO
             notify_users_of_admin_peso_post(request.user, "forum", forum.forum_id)
@@ -4560,6 +4609,25 @@ def forum_list_create_view(request):
                             'l_name': r.user.l_name,
                             'profile_pic': build_profile_pic_url(r.user),
                         },
+                        # Get repost likes and comments
+                        'likes': [{
+                            'user_id': like.user.user_id
+                        } for like in Like.objects.filter(repost=r).select_related('user')],
+                        'likes_count': Like.objects.filter(repost=r).count(),
+                        'comments': [{
+                            'comment_id': comment.comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                            'replies_count': Reply.objects.filter(comment=comment).count(),
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': build_profile_pic_url(comment.user),
+                            }
+                        } for comment in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
+                        'comments_count': Comment.objects.filter(repost=r).count(),
                         'original_post': {
                             'post_id': f.forum_id,
                             'post_content': f.content,
@@ -5375,15 +5443,31 @@ def posts_view(request):
                 reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
                     # Get repost likes count and data
-                    repost_likes = Like.objects.filter(repost=repost)
+                    repost_likes = Like.objects.filter(repost=repost).select_related('user')
                     repost_likes_count = repost_likes.count()
                     repost_likes_data = []
 
                     # Get repost comments count and data
-                    repost_comments = Comment.objects.filter(repost=repost)
+                    repost_comments = Comment.objects.filter(repost=repost).select_related('user')
                     repost_comments_count = repost_comments.count()
                     repost_comments_data = []
-                    # Comments will be loaded separately
+                    for comment in repost_comments:
+                        # Get replies count for this comment
+                        replies_count = Reply.objects.filter(comment=comment).count()
+                        
+                        repost_comments_data.append({
+                            'comment_id': comment.comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                            'replies_count': replies_count,
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': build_profile_pic_url(comment.user),
+                            }
+                        })
 
                     feed_items.append({
                         'repost_id': repost.repost_id,
@@ -5955,14 +6039,7 @@ def donation_requests_view(request):
                             'comments_count': Comment.objects.filter(repost=repost).count(),
                             'likes': [
                                 {
-                                    'like_id': like.like_id,
-                                    'user': {
-                                        'user_id': like.user.user_id,
-                                        'f_name': like.user.f_name,
-                                        'm_name': like.user.m_name,
-                                        'l_name': like.user.l_name,
-                                        'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
-                                    }
+                                    'user_id': like.user.user_id
                                 } for like in Like.objects.filter(repost=repost)
                             ],
                             'comments': [
@@ -5970,6 +6047,7 @@ def donation_requests_view(request):
                                     'comment_id': comment.comment_id,
                                     'comment_content': comment.comment_content,
                                     'date_created': comment.date_created.isoformat(),
+                                    'replies_count': Reply.objects.filter(comment=comment).count(),
                                     'user': {
                                         'user_id': comment.user.user_id,
                                         'f_name': comment.user.f_name,
@@ -5978,7 +6056,27 @@ def donation_requests_view(request):
                                         'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
                                     }
                                 } for comment in Comment.objects.filter(repost=repost).select_related('user')
-                            ]
+                            ],
+                            'original_post': {
+                                'donation_id': donation.donation_id,
+                                'post_content': donation.description,
+                                'post_images': [
+                                    {
+                                        'image_id': img.image_id,
+                                        'image_url': img.image.url,
+                                        'order': img.order
+                                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
+                                ],
+                                'status': donation.status,
+                                'created_at': donation.created_at.isoformat(),
+                                'user': {
+                                    'user_id': donation.user.user_id,
+                                    'f_name': donation.user.f_name,
+                                    'm_name': donation.user.m_name,
+                                    'l_name': donation.user.l_name,
+                                    'profile_pic': build_profile_pic_url(donation.user),
+                                }
+                            }
                         } for repost in reposts
                     ]
                 }

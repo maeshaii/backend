@@ -126,7 +126,7 @@ urlpatterns = [
     path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
     path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
     path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
-    path('reposts/<int:repost_id>/', views.forum_repost_delete_view, name='repost_delete'),
+    # Removed duplicate route - reposts/<int:repost_id>/ is already defined above in line 110
     
     # User profile social media and email endpoints
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
