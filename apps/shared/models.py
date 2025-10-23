@@ -61,7 +61,7 @@ class Reply(models.Model):
     reply_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='replies')
     comment = models.ForeignKey('Comment', on_delete=models.CASCADE, related_name='replies')
-    reply_content = models.TextField()
+    reply_content = models.TextField(default="", blank=True)
     date_created = models.DateTimeField(auto_now_add=True)
     
     class Meta:

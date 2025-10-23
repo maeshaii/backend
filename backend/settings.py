@@ -119,7 +119,7 @@ CSRF_TRUSTED_ORIGINS = [
 
     "http://192.168.1.5:8000",
     "https://*.ngrok-free.app",
-    "https://c62817c9f479.ngrok-free.app",
+    "https://saul-relevant-letha.ngrok-free.dev",
 ]
 ROOT_URLCONF = 'backend.urls'
 
@@ -336,8 +336,8 @@ INITIAL_PASSWORD_FERNET_KEY = os.getenv('INITIAL_PASSWORD_FERNET_KEY')
 
 AUTH_USER_MODEL = 'shared.User'
 DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv('DATA_UPLOAD_MAX_NUMBER_FIELDS', '10000'))
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
-FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(50 * 1024 * 1024)))  # 50MB for large base64 images
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(50 * 1024 * 1024)))  # 50MB for large file uploads
 
 # Email Configuration (Optional)
 if os.getenv('EMAIL_BACKEND'):

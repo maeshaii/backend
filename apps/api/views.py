@@ -4427,6 +4427,7 @@ def forum_list_create_view(request):
             
             # Handle image uploads if any
             try:
+                # Handle FormData file uploads (mobile app)
                 if hasattr(request, 'FILES') and request.FILES:
                     logger.info(f'Received {len(request.FILES)} files via FormData for forum')
                     for index, (key, file) in enumerate(request.FILES.items()):
@@ -4443,8 +4444,62 @@ def forum_list_create_view(request):
                             except Exception as e:
                                 logger.error(f'Error saving FormData forum image {index}: {e}')
                                 continue
+                
+                # Handle base64 images (JSON requests from mobile)
+                elif 'post_images' in data and data['post_images']:
+                    logger.info(f'Received {len(data["post_images"])} base64 images for forum')
+                    for index, image_data in enumerate(data['post_images']):
+                        if image_data and image_data.startswith('data:image'):
+                            try:
+                                import base64
+                                from django.core.files.base import ContentFile
+                                import uuid
+                                
+                                format, imgstr = image_data.split(';base64,')
+                                ext = format.split('/')[-1]
+                                img_data = base64.b64decode(imgstr)
+                                file_name = f"{uuid.uuid4()}.{ext}"
+                                
+                                # Create ContentImage instance for forum
+                                forum_image = ContentImage.objects.create(
+                                    content_type='forum',
+                                    content_id=forum.forum_id,
+                                    order=index
+                                )
+                                forum_image.image.save(file_name, ContentFile(img_data), save=True)
+                                logger.info(f'Saved base64 forum image {index}: {forum_image.image.url}')
+                            except Exception as e:
+                                logger.error(f'Error saving base64 forum image {index}: {e}')
+                                continue
+                
+                # Handle single image (backward compatibility)
+                elif 'post_image' in data and data['post_image']:
+                    logger.info('Received single base64 image for forum')
+                    image_data = data['post_image']
+                    if image_data and image_data.startswith('data:image'):
+                        try:
+                            import base64
+                            from django.core.files.base import ContentFile
+                            import uuid
+                            
+                            format, imgstr = image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            img_data = base64.b64decode(imgstr)
+                            file_name = f"{uuid.uuid4()}.{ext}"
+                            
+                            # Create ContentImage instance for forum
+                            forum_image = ContentImage.objects.create(
+                                content_type='forum',
+                                content_id=forum.forum_id,
+                                order=0
+                            )
+                            forum_image.image.save(file_name, ContentFile(img_data), save=True)
+                            logger.info(f'Saved single base64 forum image: {forum_image.image.url}')
+                        except Exception as e:
+                            logger.error(f'Error saving single base64 forum image: {e}')
+                            
             except Exception as e:
-                logger.error(f'Error handling files for forum: {e}')
+                logger.error(f'Error handling images for forum: {e}')
             
             # Notify OJT and alumni users if post author is admin or PESO
             notify_users_of_admin_peso_post(request.user, "forum", forum.forum_id)
@@ -5137,6 +5192,7 @@ def posts_view(request):
                                 print(f'Saved multiple image {index}: {post_image.image.url}')
                             except Exception as img_exc:
                                 print(f'Error saving multiple image {index}: {img_exc}')
+                                logger.error(f'Error saving multiple image {index}: {img_exc}')
                 
                 # Handle FormData file uploads (mobile app)
                 elif request.FILES:
@@ -5181,6 +5237,9 @@ def posts_view(request):
                     print('No images in data')
             except Exception as e:
                 print(f'Exception in image handling: {e}')
+                logger.error(f'Exception in image handling: {e}')
+                # Don't fail the entire post creation if image handling fails
+                pass
             # --- END IMAGE HANDLING ---
 
             # Get multiple images for response
@@ -5490,8 +5549,8 @@ def posts_by_user_type_view(request):
 
         return JsonResponse({'posts': posts_data})
     except Exception as e:
-        logger.error(f"posts_by_user_type_view failed: {e}")
-        return JsonResponse({'posts': []}, status=200)
+        logger.error(f"posts_view failed: {e}")
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
