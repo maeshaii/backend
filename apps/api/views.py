@@ -16,7 +16,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -1199,6 +1199,9 @@ def import_ojt_view(request):
                 'Social Media': 'Social_Media',
                 'Contact_Person_Name': 'Contact_Person',
                 'Contact_Person_Position': 'Position',
+                'status': 'Status',  # Normalize status column
+                'OJT_Status': 'Status',
+                'ojt_status': 'Status',
             }, inplace=True)
         except Exception:
             pass
@@ -1291,6 +1294,23 @@ def import_ojt_view(request):
 
                 # --- Age not derived from password; keep None unless separately provided
                 age = None
+
+                # --- Parse OJT Status from Excel ---
+                ojt_status = 'Ongoing'  # Default status
+                if 'Status' in row and pd.notna(row.get('Status')):
+                    excel_status = str(row.get('Status')).strip()
+                    # Normalize status values
+                    if excel_status.lower() in ['completed', 'complete', 'done']:
+                        ojt_status = 'Completed'
+                    elif excel_status.lower() in ['ongoing', 'active', 'in progress']:
+                        ojt_status = 'Ongoing'
+                    elif excel_status.lower() in ['incomplete', 'failed', 'dropped']:
+                        ojt_status = 'Incomplete'
+                    else:
+                        ojt_status = excel_status  # Use as-is if not recognized
+                    print(f"Row {index+2} - Status from Excel: '{excel_status}' -> Normalized to: '{ojt_status}'")
+                else:
+                    print(f"Row {index+2} - No Status in Excel, defaulting to: '{ojt_status}'")
 
                 # --- Parse OJT Start/End Dates ---
                 ojt_start_date = None
@@ -1455,7 +1475,9 @@ def import_ojt_view(request):
                         employment.save()
 
                         # Update OJT info (status, dates if parsed)
-                        ojt_info.ojtstatus = str(row.get('Status') or row.get('status') or '').strip() or ojt_info.ojtstatus
+                        # Use status from Excel file (defaults to 'Ongoing' if not provided)
+                        ojt_info.ojtstatus = ojt_status
+                        print(f"Row {index+2} - Set existing user status to: '{ojt_status}'")
                         # Start/End already parsed above if available
                         if 'ojt_start_date' in locals() and ojt_start_date:
                             # model has only end date field; keep for future extension
@@ -1585,12 +1607,14 @@ def import_ojt_view(request):
                 )
                 # Create OJT info
                 try:
+                    # Use status from Excel file (defaults to 'Ongoing' if not provided)
                     OJTInfo.objects.create(
                         ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         user=ojt_user,
                         ojt_end_date=ojt_end_date,
-                        ojtstatus=str(row.get('Status') or row.get('status') or '').strip() or None,
+                        ojtstatus=ojt_status,  # Use status from Excel
                     )
+                    print(f"Row {index+2} - Created new user with status: '{ojt_status}'")
                 except Exception:
                     pass
                 
@@ -6649,20 +6673,26 @@ def recent_searches_view(request):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def set_send_date_view(request):
     """Set send date for OJT students"""
     try:
         data = request.data
-        coordinator = data.get('coordinator')
+        print(f"🔍 DEBUG set_send_date_view - Received data: {data}")
+        
+        coordinator = data.get('coordinator_username') or data.get('coordinator')
         batch_year = data.get('batch_year')
         section = data.get('section')
         send_date = data.get('send_date')
         
+        print(f"🔍 DEBUG set_send_date_view - coordinator: {coordinator}, batch_year: {batch_year}, section: {section}, send_date: {send_date}")
+        
         if not all([coordinator, batch_year, send_date]):
+            print(f"❌ Missing required fields - coordinator: {bool(coordinator)}, batch_year: {bool(batch_year)}, send_date: {bool(send_date)}")
             return JsonResponse({
                 'success': False,
-                'message': 'Missing required fields: coordinator, batch_year, send_date'
+                'message': f'Missing required fields - coordinator: {bool(coordinator)}, batch_year: {bool(batch_year)}, send_date: {bool(send_date)}'
             }, status=400)
         
         # Validate date format
@@ -6691,6 +6721,8 @@ def set_send_date_view(request):
             send_date_record.is_processed = False
             send_date_record.save()
         
+        print(f"✅ Successfully set send date for batch {batch_year}: {send_date_obj}")
+        
         return JsonResponse({
             'success': True,
             'message': f'Send date set successfully for entire batch {batch_year}. On this date, all completed OJT students will be automatically sent to admin.',
@@ -6700,7 +6732,55 @@ def set_send_date_view(request):
         })
         
     except Exception as e:
+        print(f"❌ Error in set_send_date_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({
             'success': False,
             'message': f'Error setting send date: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def get_send_dates_view(request):
+    """Get scheduled send dates for a coordinator"""
+    try:
+        coordinator = request.GET.get('coordinator', '')
+        print(f"🔍 DEBUG get_send_dates_view - coordinator: {coordinator}")
+        
+        if not coordinator:
+            return JsonResponse({
+                'success': False,
+                'message': 'Coordinator parameter is required'
+            }, status=400)
+        
+        # Get all unprocessed send dates for this coordinator
+        send_dates = SendDate.objects.filter(
+            coordinator=coordinator,
+            is_processed=False
+        ).order_by('send_date')
+        
+        scheduled_dates = []
+        for sd in send_dates:
+            scheduled_dates.append({
+                'id': sd.id,
+                'batch_year': sd.batch_year,
+                'section': sd.section,
+                'send_date': sd.send_date.strftime('%Y-%m-%d'),
+                'created_at': sd.created_at.strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'scheduled_dates': scheduled_dates,
+            'count': len(scheduled_dates)
+        })
+        
+    except Exception as e:
+        logger.error(f"get_send_dates_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error fetching send dates: {str(e)}'
         }, status=500)
