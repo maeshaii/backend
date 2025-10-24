@@ -96,14 +96,22 @@ class Command(BaseCommand):
                 
                 for user in ojt_users:
                     if hasattr(user, 'ojt_info') and user.ojt_info:
-                        if user.ojt_info.status == 'Completed':
+                        if user.ojt_info.ojtstatus == 'Completed':
                             completed_users.append(user)
-                        elif user.ojt_info.status == 'Ongoing':
+                        elif user.ojt_info.ojtstatus == 'Ongoing':
                             ongoing_users.append(user)
                 
                 # Send completed users to admin
                 completed_count = 0
                 if completed_users:
+                    # Mark each completed user as sent to admin
+                    for user in completed_users:
+                        if hasattr(user, 'ojt_info') and user.ojt_info:
+                            user.ojt_info.is_sent_to_admin = True
+                            user.ojt_info.sent_to_admin_date = timezone.now()
+                            user.ojt_info.save()
+                            completed_count += 1
+                    
                     # Create OJTImport record to mark this batch as requested
                     ojt_import, created = OJTImport.objects.get_or_create(
                         coordinator=send_date_record.coordinator,
@@ -112,23 +120,21 @@ class Command(BaseCommand):
                         section=send_date_record.section or '',
                         defaults={
                             'file_name': f'Auto-scheduled batch {send_date_record.batch_year}',
-                            'records_imported': len(completed_users),
+                            'records_imported': completed_count,
                             'status': 'Requested'
                         }
                     )
                     
                     if not created:
                         ojt_import.status = 'Requested'
-                        ojt_import.records_imported = len(completed_users)
+                        ojt_import.records_imported = completed_count
                         ojt_import.save()
-                    
-                    completed_count = len(completed_users)
                 
                 # Mark ongoing users as incomplete
                 ongoing_count = 0
                 for user in ongoing_users:
                     if hasattr(user, 'ojt_info'):
-                        user.ojt_info.status = 'Incomplete'
+                        user.ojt_info.ojtstatus = 'Incomplete'
                         user.ojt_info.save()
                         ongoing_count += 1
                 
