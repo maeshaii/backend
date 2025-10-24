@@ -245,10 +245,19 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
         
-        # Get follower and following counts
-        from apps.shared.models import Follow
-        followers_count = Follow.objects.filter(following=user).count()
-        following_count = Follow.objects.filter(follower=user).count()
+        # Get follower and following counts (optimized - only if needed)
+        followers_count = 0
+        following_count = 0
+        try:
+            # Only fetch counts if user is not admin (admins don't need social counts)
+            if not user.account_type.admin:
+                from apps.shared.models import Follow
+                followers_count = Follow.objects.filter(following=user).count()
+                following_count = Follow.objects.filter(follower=user).count()
+        except Exception:
+            # Fallback to 0 if there are database issues
+            followers_count = 0
+            following_count = 0
         
         data = {
             'refresh': str(refresh),
@@ -3055,7 +3064,7 @@ def search_alumni(request):
     # Search by first, middle, or last name (case-insensitive)
     users = User.objects.filter(
         q_objects,
-        Q(account_type__user=True) | Q(account_type__admin=True) | Q(account_type__peso=True)
+        Q(account_type__user=True) | Q(account_type__admin=True) | Q(account_type__peso=True) | Q(account_type__ojt=True)
     )[:10]
     results = [
         {
@@ -3066,6 +3075,7 @@ def search_alumni(request):
                 'user': getattr(u.account_type, 'user', False),
                 'admin': getattr(u.account_type, 'admin', False),
                 'peso': getattr(u.account_type, 'peso', False),
+                'ojt': getattr(u.account_type, 'ojt', False),
             }
         }
         for u in users
