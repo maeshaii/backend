@@ -33,6 +33,7 @@ urlpatterns = [
     # OJT-specific routes for coordinators
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
+    path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),

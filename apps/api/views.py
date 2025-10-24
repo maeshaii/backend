@@ -1353,16 +1353,32 @@ def import_ojt_view(request):
                 existing_user = User.objects.filter(acc_username=ctu_id).first()
                 if existing_user:
                     try:
+                        print(f"Row {index+2} - User {ctu_id} already exists, updating...")
+                        
                         # Ensure related models exist
                         from apps.shared.models import UserProfile, AcademicInfo, OJTInfo, EmploymentHistory
                         profile, _ = UserProfile.objects.get_or_create(user=existing_user)
                         academic, _ = AcademicInfo.objects.get_or_create(user=existing_user)
                         # Update section if provided
-                        if section:
-                            academic.section = section
+                        if user_section:
+                            academic.section = user_section
                             academic.save()
                         ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
                         employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
+                        
+                        # IMPORTANT: Re-generate password for existing users to ensure they can be exported
+                        existing_user.set_password(password_raw)
+                        existing_user.save()
+                        print(f"Row {index+2} - Reset password for existing user {ctu_id}")
+                        
+                        # Add to exported passwords for download
+                        exported_passwords.append({
+                            'CTU_ID': ctu_id,
+                            'First_Name': first_name,
+                            'Last_Name': last_name,
+                            'Password': password_raw
+                        })
+                        print(f"Row {index+2} - Added existing user to password export list")
 
                         # Update names to match latest import where present
                         if first_name:
@@ -1493,9 +1509,9 @@ def import_ojt_view(request):
                             print(f"Row {index+2} - Failed to update OJT Company Profile: {e}")
                             pass
 
-                        # Count as updated instead of skipped
-                        skipped_count += 0
-                        created_count += 0
+                        # Count as created so passwords get downloaded
+                        created_count += 1
+                        print(f"Row {index+2} - Updated existing user, counted as created for password export")
                         continue
                     except Exception as _e:
                         # Fall through to try creating a new one if update fails
@@ -1696,28 +1712,52 @@ def ojt_statistics_view(request):
                     key = (y, section)
                     unique_year_sections[key] = True
             
-            print(f"🔍 DEBUG: Unique year+section combinations: {unique_year_sections.keys()}")
+            print(f"🔍 DEBUG: Unique year+section combinations from imports: {unique_year_sections.keys()}")
             
-            # Now count actual OJT users for each year and section (exclude alumni)
+            # ALSO get year+section combinations from actual users in database
+            # This ensures we show cards even if import records were deleted
+            from django.db.models import Q
+            actual_users = User.objects.filter(
+                account_type__ojt=True
+            ).exclude(
+                acc_username='coordinator'
+            ).exclude(
+                f_name='Coordinator'
+            ).select_related('academic_info')
+            
+            if coordinator_username:
+                # For coordinators, we need to match by their managed year+sections
+                # But since import records might be deleted, let's just show all OJT users
+                pass
+            
+            # Add year+section from actual users
+            for user in actual_users:
+                if hasattr(user, 'academic_info') and user.academic_info:
+                    year = user.academic_info.year_graduated
+                    section = user.academic_info.section or 'Unknown'
+                    if year:
+                        unique_year_sections[(year, section)] = True
+            
+            print(f"🔍 DEBUG: Unique year+section combinations (with users): {unique_year_sections.keys()}")
+            
+            # Now count actual OJT users for each year and section (exclude alumni and coordinators)
             for (year, section) in unique_year_sections.keys():
-                # Count actual OJT users in database for this year AND section (exclude alumni)
+                # Count actual OJT users in database for this year AND section
+                # Only count active OJT students, NOT alumni
                 ojt_count = User.objects.filter(
                     academic_info__year_graduated=year,
                     academic_info__section=section,
                     account_type__ojt=True  # Only count OJT students, not alumni
+                ).exclude(
+                    acc_username='coordinator'  # Exclude coordinator users
+                ).exclude(
+                    f_name='Coordinator'  # Exclude any user with name "Coordinator"
                 ).count()
                 
-                # Count alumni for this year and section
-                alumni_count = User.objects.filter(
-                    academic_info__year_graduated=year,
-                    academic_info__section=section,
-                    account_type__user=True  # Count alumni
-                ).count()
-                
-                # Show section if it has OJT students OR alumni (total count)
-                total_count = ojt_count + alumni_count
-                year_section_counts[(year, section)] = max(total_count, 1)  # At least 1 to show card
-                print(f"🔍 DEBUG: Year {year}, Section {section}: {ojt_count} OJT users + {alumni_count} alumni = {total_count} total")
+                # Only show cards with actual OJT students (don't count alumni)
+                if ojt_count > 0:
+                    year_section_counts[(year, section)] = ojt_count
+                    print(f"🔍 DEBUG: Year {year}, Section {section}: {ojt_count} OJT students")
             
             print(f"🔍 DEBUG: year_section_counts final: {year_section_counts}")
                 
@@ -1766,10 +1806,14 @@ def ojt_by_year_view(request):
         # Filter by section if provided
         if section:
             print(f"🔍 DEBUG: Filtering by section: {section}")
-            # Filter by actual section stored in AcademicInfo
+            # Filter by actual section stored in AcademicInfo - ONLY OJT STUDENTS
             ojt_data = (
                 User.objects
-                .filter(academic_info__year_graduated=year_int, academic_info__section=section)
+                .filter(
+                    academic_info__year_graduated=year_int, 
+                    academic_info__section=section,
+                    account_type__ojt=True  # Only OJT students, not alumni
+                )
                 .exclude(acc_username='coordinator')  # Exclude coordinator user
                 .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
                 .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
@@ -1783,17 +1827,24 @@ def ojt_by_year_view(request):
                 print(f"🔍 DEBUG: Admin request - filtering by is_sent_to_admin=True")
                 ojt_data = (
                     User.objects
-                    .filter(academic_info__year_graduated=year_int, ojt_info__is_sent_to_admin=True)
+                    .filter(
+                        academic_info__year_graduated=year_int, 
+                        ojt_info__is_sent_to_admin=True,
+                        account_type__ojt=True  # Only OJT students
+                    )
                     .exclude(acc_username='coordinator')  # Exclude coordinator user
                     .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
                     .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
                     .order_by('l_name', 'f_name')
                 )
             else:
-                # Coordinator request - show all users for the year
+                # Coordinator request - show all OJT users for the year
                 ojt_data = (
                     User.objects
-                    .filter(academic_info__year_graduated=year_int)
+                    .filter(
+                        academic_info__year_graduated=year_int,
+                        account_type__ojt=True  # Only OJT students, not alumni
+                    )
                     .exclude(acc_username='coordinator')  # Exclude coordinator user
                     .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
                     .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
@@ -1950,6 +2001,84 @@ def ojt_clear_view(request):
 
         return JsonResponse({'success': True, 'message': f'Cleared OJT data for batch {year_int}'})
     except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+# OJT Company Statistics for coordinators
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ojt_company_statistics_view(request):
+    """
+    Returns company statistics with count of OJT students per company
+    """
+    try:
+        coordinator_username = request.GET.get('coordinator', '')
+        
+        from apps.shared.models import OJTCompanyProfile
+        from django.db.models import Count
+        
+        # Base query - get all OJT company profiles
+        company_profiles = OJTCompanyProfile.objects.all()
+        
+        # Filter by coordinator if provided
+        if coordinator_username:
+            # Get OJT users managed by this coordinator
+            # First get all imports by this coordinator to find which years/sections they manage
+            from apps.shared.models import OJTImport
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+            
+            # Get unique year+section combinations
+            year_sections = set()
+            for imp in coordinator_imports:
+                year = getattr(imp, 'batch_year', None)
+                section = getattr(imp, 'section', None)
+                if year:
+                    year_sections.add((year, section))
+            
+            # Filter users by these year+section combinations
+            from django.db.models import Q
+            year_section_filters = Q()
+            for year, section in year_sections:
+                if section:
+                    year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                else:
+                    year_section_filters |= Q(user__academic_info__year_graduated=year)
+            
+            if year_section_filters:
+                company_profiles = company_profiles.filter(year_section_filters)
+        
+        # Group by company name and count
+        company_stats = (
+            company_profiles
+            .exclude(company_name__isnull=True)
+            .exclude(company_name='')
+            .exclude(user__acc_username='coordinator')  # Exclude coordinator users
+            .values('company_name')
+            .annotate(student_count=Count('id'))
+            .order_by('-student_count', 'company_name')
+        )
+        
+        # Format the response
+        companies = []
+        total_students = 0
+        for stat in company_stats:
+            companies.append({
+                'company_name': stat['company_name'],
+                'count': stat['student_count']
+            })
+            total_students += stat['student_count']
+        
+        return JsonResponse({
+            'success': True,
+            'companies': companies,
+            'total_companies': len(companies),
+            'total_students': total_students
+        })
+        
+    except Exception as e:
+        print(f"Error in ojt_company_statistics_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
