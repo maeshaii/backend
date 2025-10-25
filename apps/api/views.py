@@ -142,6 +142,22 @@ def build_profile_pic_url(user):
     # Return empty string instead of None for consistency
     return ""
 
+def build_image_url(image_field):
+    """Build full URL for ContentImage fields"""
+    try:
+        if image_field and hasattr(image_field, 'url'):
+            url = image_field.url
+            # If it's already a full URL, return as is
+            if url.startswith('http'):
+                return url
+            # If it's a relative URL, prepend the base URL
+            from django.conf import settings
+            base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+            return f"{base_url}{url}"
+    except Exception:
+        pass
+    return ""
+
 # Utility: extract current user from Authorization header (Bearer/JWT) robustly
 def get_current_user_from_request(request):
     auth_header = request.headers.get('Authorization') or request.META.get('HTTP_AUTHORIZATION')
@@ -3378,9 +3394,10 @@ def post_detail_view(request, post_id):
             # Use the new ContentImage model
             content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
             for img in content_images:
+                image_url = build_image_url(img.image)
                 post_images.append({
                     'image_id': img.image_id,
-                    'image_url': img.image.url,
+                    'image_url': image_url,
                     'order': img.order
                 })
 
@@ -4600,15 +4617,9 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
 def forum_list_create_view(request):
     try:
         if request.method == "POST":
-            # Handle both FormData and JSON requests
-            try:
-                # Try to get data from request.data first (works for both JSON and FormData)
-                data = request.data
-                content = data.get('post_content') or data.get('content') or ''
-            except Exception:
-                # Fallback to JSON parsing
-                data = json.loads(request.body or "{}")
-                content = data.get('post_content') or data.get('content') or ''
+            # Handle both FormData and JSON requests using request.data
+            data = request.data
+            content = data.get('post_content') or data.get('content') or ''
             
             logger.info(f'Forum POST received - Content: {content[:50] if content else "None"}...')
             logger.info(f'Forum POST data keys: {list(data.keys())}')
@@ -4677,20 +4688,29 @@ def forum_list_create_view(request):
                 # Handle FormData file uploads (from mobile app)
                 elif hasattr(request, 'FILES') and request.FILES:
                     logger.info(f'Received {len(request.FILES)} files via FormData for forum')
-                    for index, (key, file) in enumerate(request.FILES.items()):
+                    
+                    # Get all image files and sort them by key to ensure consistent ordering
+                    image_files = []
+                    for key, file in request.FILES.items():
                         if key.startswith('images') and file:
-                            try:
-                                # Create ContentImage instance for forum
-                                forum_image = ContentImage.objects.create(
-                                    content_type='forum',
-                                    content_id=forum.forum_id,
-                                    order=index
-                                )
-                                forum_image.image.save(file.name, file, save=True)
-                                logger.info(f'Saved FormData forum image {index}: {forum_image.image.url}')
-                            except Exception as e:
-                                logger.error(f'Error saving FormData forum image {index}: {e}')
-                                continue
+                            image_files.append((key, file))
+                    
+                    # Sort by key to ensure consistent ordering (images[0], images[1], etc.)
+                    image_files.sort(key=lambda x: x[0])
+                    
+                    for order_index, (key, file) in enumerate(image_files):
+                        try:
+                            # Create ContentImage instance for forum
+                            forum_image = ContentImage.objects.create(
+                                content_type='forum',
+                                content_id=forum.forum_id,
+                                order=order_index
+                            )
+                            forum_image.image.save(file.name, file, save=True)
+                            logger.info(f'Saved FormData forum image {order_index}: {forum_image.image.url}')
+                        except Exception as e:
+                            logger.error(f'Error saving FormData forum image {order_index}: {e}')
+                            continue
             except Exception as e:
                 logger.error(f'Error handling images for forum: {e}')
             
@@ -5384,14 +5404,21 @@ def posts_view(request):
             # Exclude forum posts from regular posts feed
             posts = Post.objects.exclude(type='forum').select_related('user').order_by('-post_id')
         if request.method == "POST":
-            data = json.loads(request.body or "{}")
+            # Handle both JSON and FormData requests using request.data
+            data = request.data
             post_content = data.get('post_content') or ''
             post_type = data.get('type') or 'personal'
 
             print(f"POST request received - User: {request.user.user_id}, Content: {post_content[:50]}..., Type: {post_type}")
             print(f"Data keys: {list(data.keys())}")
+            print(f"Request FILES: {bool(request.FILES)}")
+            if request.FILES:
+                print(f"FILES keys: {list(request.FILES.keys())}")
             if 'post_images' in data:
                 print(f"post_images received: {len(data.get('post_images', []))} images")
+                print(f"post_images type: {type(data.get('post_images'))}")
+                if data.get('post_images'):
+                    print(f"First image preview: {str(data.get('post_images')[0])[:100]}...")
             if 'post_image' in data:
                 print(f"post_image received: {bool(data.get('post_image'))}")
 
@@ -5413,45 +5440,78 @@ def posts_view(request):
             import sys
             
             try:
-                # Handle multiple images (base64) - check this first for JSON requests
-                if 'post_images' in data and data['post_images']:
+                print("Starting image processing...")
+                # Handle FormData file uploads (mobile app) - check this first
+                if request.FILES:
+                    print(f'Received {len(request.FILES)} files via FormData')
+                    print(f'File keys: {list(request.FILES.keys())}')
+                    
+                    # Get all image files and sort them by key to ensure consistent ordering
+                    image_files = []
+                    for key, file in request.FILES.items():
+                        if key.startswith('images') and file:
+                            image_files.append((key, file))
+                    
+                    # Sort by key to ensure consistent ordering (images[0], images[1], etc.)
+                    image_files.sort(key=lambda x: x[0])
+                    
+                    for order_index, (key, file) in enumerate(image_files):
+                        print(f'Processing file {order_index}: key={key}, file={file}, name={file.name}, size={file.size}')
+                        try:
+                            # Create ContentImage instance for post
+                            print(f'Creating ContentImage for post {new_post.post_id}, order {order_index}')
+                            post_image = ContentImage.objects.create(
+                                content_type='post',
+                                content_id=new_post.post_id,
+                                order=order_index
+                            )
+                            print(f'ContentImage created with ID {post_image.image_id}')
+                            
+                            # Save the file
+                            print(f'Saving file {file.name} to ContentImage')
+                            post_image.image.save(file.name, file, save=True)
+                            
+                            # Verify the file was saved
+                            if post_image.image:
+                                print(f'Saved FormData image {order_index}: {post_image.image.url}')
+                            else:
+                                print(f'Warning: File not properly saved for image {order_index}')
+                        except Exception as img_exc:
+                            print(f'Error saving FormData image {order_index}: {img_exc}')
+                            import traceback
+                            traceback.print_exc()
+                
+                # Handle multiple images (base64) - for JSON requests
+                elif 'post_images' in data and data['post_images']:
                     print(f'Received {len(data["post_images"])} images in data')
+                    print(f'post_images type: {type(data["post_images"])}')
                     
                     for index, post_image_data in enumerate(data['post_images']):
+                        print(f'Processing image {index}: {str(post_image_data)[:50]}...')
                         if post_image_data and post_image_data.startswith('data:image'):
                             try:
+                                print(f'Decoding base64 image {index}...')
                                 format, imgstr = post_image_data.split(';base64,')
                                 ext = format.split('/')[-1]
                                 img_data = base64.b64decode(imgstr)
                                 file_name = f"{uuid.uuid4()}.{ext}"
                                 
+                                print(f'Creating ContentImage for post {new_post.post_id}, order {index}')
                                 # Create ContentImage instance for post
                                 post_image = ContentImage.objects.create(
                                     content_type='post',
                                     content_id=new_post.post_id,
                                     order=index
                                 )
+                                print(f'ContentImage created with ID {post_image.image_id}')
+                                
+                                print(f'Saving image file {file_name}...')
                                 post_image.image.save(file_name, ContentFile(img_data), save=True)
                                 print(f'Saved multiple image {index}: {post_image.image.url}')
                             except Exception as img_exc:
                                 print(f'Error saving multiple image {index}: {img_exc}')
-                
-                # Handle FormData file uploads (mobile app)
-                elif request.FILES:
-                    print(f'Received {len(request.FILES)} files via FormData')
-                    for index, (key, file) in enumerate(request.FILES.items()):
-                        if key.startswith('images') and file:
-                            try:
-                                # Create ContentImage instance for post
-                                post_image = ContentImage.objects.create(
-                                    content_type='post',
-                                    content_id=new_post.post_id,
-                                    order=index
-                                )
-                                post_image.image.save(file.name, file, save=True)
-                                print(f'Saved FormData image {index}: {post_image.image.url}')
-                            except Exception as img_exc:
-                                print(f'Error saving FormData image {index}: {img_exc}')
+                                import traceback
+                                traceback.print_exc()
                 
                 # Handle single image (backward compatibility)
                 elif 'post_image' in data and data['post_image']:
@@ -5587,10 +5647,11 @@ def posts_view(request):
                 if content_images.count() > 0:
                     post_images = []
                     for img in content_images:
-                        print(f'Adding direct image: {img.image.url}')
+                        image_url = build_image_url(img.image)
+                        print(f'Adding direct image: {image_url}')
                         post_images.append({
                             'image_id': img.image_id,
-                            'image_url': img.image.url,
+                            'image_url': image_url,
                             'order': img.order
                         })
 
@@ -6297,20 +6358,29 @@ def donation_requests_view(request):
             # Handle FormData file uploads (mobile app)
             if request.FILES:
                 logger.info(f'Received {len(request.FILES)} files via FormData for donation')
-                for index, (key, file) in enumerate(request.FILES.items()):
+                
+                # Get all image files and sort them by key to ensure consistent ordering
+                image_files = []
+                for key, file in request.FILES.items():
                     if key.startswith('images') and file:
-                        try:
-                            # Create ContentImage instance for donation
-                            donation_image = ContentImage.objects.create(
-                                content_type='donation',
-                                content_id=donation.donation_id,
-                                order=index
-                            )
-                            donation_image.image.save(file.name, file, save=True)
-                            logger.info(f'Saved FormData donation image {index}: {donation_image.image.url}')
-                        except Exception as e:
-                            logger.error(f'Error saving FormData donation image {index}: {e}')
-                            continue
+                        image_files.append((key, file))
+                
+                # Sort by key to ensure consistent ordering
+                image_files.sort(key=lambda x: x[0])
+                
+                for order_index, (key, file) in enumerate(image_files):
+                    try:
+                        # Create ContentImage instance for donation
+                        donation_image = ContentImage.objects.create(
+                            content_type='donation',
+                            content_id=donation.donation_id,
+                            order=order_index
+                        )
+                        donation_image.image.save(file.name, file, save=True)
+                        logger.info(f'Saved FormData donation image {order_index}: {donation_image.image.url}')
+                    except Exception as e:
+                        logger.error(f'Error saving FormData donation image {order_index}: {e}')
+                        continue
             # Handle base64 images (backward compatibility)
             elif images:
                 for index, image_data in enumerate(images):
