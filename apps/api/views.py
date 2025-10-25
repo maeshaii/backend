@@ -61,7 +61,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
 
 # Utility: build profile_pic URL with cache-busting when possible
-def create_mention_notifications(content, commenter_user, post_id=None, comment_id=None, reply_id=None):
+def create_mention_notifications(content, commenter_user, post_id=None, comment_id=None, reply_id=None, forum_id=None, donation_id=None):
     """Create notifications for users mentioned in content"""
     import re
     from apps.shared.models import Notification
@@ -94,18 +94,31 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                 # Add post/comment/reply ID for redirection
                 if reply_id:
                     notification_content += f"<!--REPLY_ID:{reply_id}-->"
-                elif comment_id:
+                
+                if comment_id:
                     notification_content += f"<!--COMMENT_ID:{comment_id}-->"
+                
+                # Add forum, donation, or post ID (in priority order)
+                if forum_id:
+                    notification_content += f"<!--FORUM_ID:{forum_id}-->"
+                elif donation_id:
+                    notification_content += f"<!--DONATION_ID:{donation_id}-->"
                 elif post_id:
                     notification_content += f"<!--POST_ID:{post_id}-->"
                 
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=user,
                     notif_type='mention',
                     subject='You were mentioned',
                     notifi_content=notification_content,
                     notif_date=timezone.now()
                 )
+                # Broadcast mention notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting mention notification: {e}")
         except Exception as e:
             # Skip if user not found or other error
             continue
@@ -354,7 +367,6 @@ def change_password_view(request):
         pass
 
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
-
 @api_view(["POST"])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -800,7 +812,6 @@ def import_alumni_view(request):
         })
     except Exception as e:
         return JsonResponse({'success': False, 'message': f'Server error: {str(e)}'}, status=500)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def alumni_statistics_view(request):
@@ -965,7 +976,6 @@ def send_reminder_view(request):
         except Exception as e:
             continue
     return JsonResponse({'success': True, 'sent': sent, 'total': len(users)})
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def notifications_view(request):
@@ -1147,7 +1157,6 @@ def delete_notifications_view(request):
         return JsonResponse({'success': True, 'deleted': deleted})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
 # OJT-specific import function for coordinators
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -1271,7 +1280,6 @@ def import_ojt_view(request):
             )
         except Exception:
             ojt_account_type = None
-
         for index, row in df.iterrows():
             print(f"--- Processing Row {index+2} ---")
             try:
@@ -1633,7 +1641,6 @@ def import_ojt_view(request):
                     print(f"Row {index+2} - Created new user with status: '{ojt_status}'")
                 except Exception:
                     pass
-                
                 # Create OJT Company Profile
                 try:
                     from apps.shared.models import OJTCompanyProfile
@@ -1822,7 +1829,6 @@ def ojt_statistics_view(request):
 
     except Exception as e:
         return JsonResponse({'success': True, 'years': [], 'total_records': 0, 'note': str(e)})
-
 # OJT data by year for coordinators
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -2120,8 +2126,6 @@ def ojt_company_statistics_view(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 # Update OJT status for a specific user
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -2470,8 +2474,6 @@ def approve_coordinator_request_view(request):
         return JsonResponse({'success': True, 'approved': updated, 'year': year_int})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def get_coordinator_sections_view(request):
@@ -2541,9 +2543,6 @@ def available_years_view(request):
         
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
 def approve_ojt_to_alumni_view(request):
     """Approve completed OJT students to become alumni with password generation"""
     try:
@@ -2812,7 +2811,7 @@ def approve_individual_ojt_to_alumni_view(request):
                 'user_id': user.user_id,
                 'username': user.acc_username,
                 'password': password,
-                'name': f"{user.f_name} {user.l_name}"
+                'name': f"{user.f_name} {user.m_name or ''} {user.l_name}"
             }]
         })
     except Exception as e:
@@ -2968,8 +2967,6 @@ def alumni_profile_view(request, user_id):
         return JsonResponse({'error': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
-
 @api_view(['GET', 'PUT'])
 @permission_classes([IsAuthenticated])
 def alumni_employment_view(request, user_id):
@@ -3100,7 +3097,6 @@ def alumni_employment_view(request, user_id):
         print(f"Traceback: {traceback.format_exc()}")
         return JsonResponse({'error': str(e)}, status=500)
 
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_following_for_mentions(request):
@@ -3172,7 +3168,7 @@ def get_post_from_comment(request, comment_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["GET"])
+@api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_comment_from_reply(request, reply_id):
     """Get the comment ID from a reply ID for notification redirects"""
@@ -3265,11 +3261,7 @@ def delete_alumni_profile_pic(request):
         return Response({'success': True})
     except User.DoesNotExist:
         return Response({'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
-
-
-
 # mobile side
-
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticatedOrReadOnly])
 def post_detail_view(request, post_id):
@@ -3458,7 +3450,6 @@ def post_likes_view(request, post_id):
 # ==========================
 # Repost interactions (Used by Mobile)
 # ==========================
-
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def repost_detail_view(request, repost_id):
@@ -3639,6 +3630,12 @@ def repost_like_view(request, repost_id):
                         notif_date=timezone.now()
                     )
                     print(f"🔔 DEBUG: Created repost like notification for user {repost.user.user_id}: {notification.notifi_content}")
+                    # Broadcast repost like notification in real-time
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting repost like notification: {e}")
                 else:
                     print(f"🔍 DEBUG: User {user.user_id} is the repost owner, no notification created")
                     
@@ -3684,8 +3681,6 @@ def repost_likes_list_view(request, repost_id):
             }
         })
     return JsonResponse({'likes': likes_data})
-
-
 @api_view(["GET", "POST"]) 
 @permission_classes([IsAuthenticated])
 def repost_comments_view(request, repost_id):
@@ -3754,13 +3749,20 @@ def repost_comments_view(request, repost_id):
                 else:
                     notif_content = f"{request.user.full_name} commented on your {repost_type}<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
                 
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=repost.user,
                     notif_type='comment',
                     subject='Repost Commented',
                     notifi_content=notif_content,
                     notif_date=timezone.now()
                 )
+                
+                # Broadcast repost comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting repost comment notification: {e}")
             
             return JsonResponse({'success': True, 'comment_id': comment.comment_id})
         except Exception as e:
@@ -3929,7 +3931,6 @@ def comment_edit_view(request, post_id, comment_id):
         return JsonResponse({'error': 'Comment not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def post_comments_view(request, post_id):
@@ -4006,7 +4007,6 @@ def post_comments_view(request, post_id):
         return JsonResponse({'error': 'Post not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 # Reply API Views - Handle comment replies
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
@@ -4062,13 +4062,20 @@ def comment_replies_view(request, comment_id):
             
             # Create notification for comment owner
             if user.user_id != comment.user.user_id:
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=comment.user,
                     notif_type='reply',
                     subject='Comment Replied',
                     notifi_content=f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}-->",
                     notif_date=timezone.now()
                 )
+                
+                # Broadcast reply notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting reply notification: {e}")
             
             return JsonResponse({
                 'success': True,
@@ -4293,9 +4300,6 @@ def post_delete_view(request, post_id):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
-
-
 @api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
 def post_repost_view(request, post_id):
@@ -4408,7 +4412,6 @@ def repost_delete_view(request, repost_id):
         import traceback
         traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def alumni_followers_view(request, user_id):
@@ -4567,13 +4570,20 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
                 else:
                     content += f"<!--POST_ID:{post_id}-->"
             
-            Notification.objects.create(
+            notification = Notification.objects.create(
                 user=user,
                 notif_type='admin_peso_post',
                 subject=subject,
                 notifi_content=content,
                 notif_date=timezone.now()
             )
+            
+            # Broadcast notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting admin/peso post notification: {e}")
             notifications_created += 1
         
         return notifications_created
@@ -4581,11 +4591,9 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
     except Exception as e:
         print(f"Error creating notifications: {e}")
         return 0
-
 # ==========================
 # Forum API (shared_forum links to shared_post)
 # ==========================
-
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, JSONParser])
@@ -4822,8 +4830,6 @@ def forum_list_create_view(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({'forums': [], 'error': str(e)}, status=200)
-
-
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def forum_detail_edit_view(request, forum_id):
@@ -4937,8 +4943,6 @@ def forum_detail_edit_view(request, forum_id):
         # delete forum directly (cascades remove related likes, comments, reposts)
         forum.delete()
         return JsonResponse({'success': True, 'message': 'Forum deleted'})
-
-
 @api_view(["POST", "DELETE"]) 
 @permission_classes([IsAuthenticated])
 def forum_like_view(request, forum_id):
@@ -4968,13 +4972,20 @@ def forum_like_view(request, forum_id):
                 }
             )
             if created and request.user.user_id != forum.user.user_id:
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=forum.user,
                     notif_type='like',
                     subject='Forum Liked',
                     notifi_content=f"{request.user.full_name} liked your forum post<!--FORUM_ID:{forum.forum_id}-->",
                     notif_date=timezone.now()
                 )
+                
+                # Broadcast forum like notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting forum like notification: {e}")
             return JsonResponse({'success': True})
         else:
             try:
@@ -5039,7 +5050,8 @@ def forum_comments_view(request, forum_id):
             create_mention_notifications(
                 content,
                 request.user,
-                comment_id=comment.comment_id
+                comment_id=comment.comment_id,
+                forum_id=forum.forum_id
             )
             
             if request.user.user_id != forum.user.user_id:
@@ -5280,7 +5292,6 @@ def follow_user_view(request, user_id):
         return JsonResponse({'error': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def check_follow_status_view(request, user_id):
@@ -5333,12 +5344,9 @@ def check_follow_status_view(request, user_id):
         return JsonResponse({'error': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 import base64
 import uuid
 from django.core.files.base import ContentFile
-
-
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, JSONParser])
@@ -5711,7 +5719,6 @@ def debug_posts_view(request):
         })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def posts_by_user_type_view(request):
@@ -5970,7 +5977,6 @@ def userprofile_social_media_view(request, user_id):
             'success': False,
             'error': str(e)
         }, status=400)
-
 @api_view(['GET', 'PUT'])
 @permission_classes([IsAuthenticated])
 def userprofile_email_view(request, user_id):
@@ -6112,7 +6118,6 @@ def forgot_password_view(request):
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
-
 # Donation API Views
 @api_view(['GET', 'POST'])
 @authentication_classes([JWTAuthentication])
@@ -6395,13 +6400,19 @@ def donation_like_view(request, donation_id):
             if created:
                 # Create notification for donation owner
                 if request.user.user_id != donation.user.user_id:
-                    Notification.objects.create(
+                    notification = Notification.objects.create(
                         user=donation.user,
                         notif_type='like',
                         subject='Donation Liked',
                         notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
                         notif_date=timezone.now()
                     )
+                    # Broadcast donation like notification in real-time
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting donation like notification: {e}")
                 return JsonResponse({'success': True, 'message': 'Donation liked'})
             else:
                 return JsonResponse({'success': False, 'message': 'Already liked'})
@@ -6476,18 +6487,25 @@ def donation_comments_view(request, donation_id):
             create_mention_notifications(
                 comment_content,
                 request.user,
-                comment_id=comment.comment_id
+                comment_id=comment.comment_id,
+                donation_id=donation.donation_id
             )
             
             # Create notification for donation owner
             if request.user.user_id != donation.user.user_id:
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=donation.user,
                     notif_type='comment',
                     subject='Donation Commented',
                     notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
+                # Broadcast donation comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting donation comment notification: {e}")
             
             # Return the full comment data
             comment_data = {
@@ -6584,13 +6602,19 @@ def donation_repost_view(request, donation_id):
         
         # Create notification for donation owner (only if the reposter is not the donation owner)
         if request.user.user_id != donation.user.user_id:
-            Notification.objects.create(
+            notification = Notification.objects.create(
                 user=donation.user,
                 notif_type='repost',
                 subject='Donation Reposted',
                 notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
                 notif_date=timezone.now()
             )
+            # Broadcast donation repost notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting donation repost notification: {e}")
         
         return JsonResponse({
             'success': True,
@@ -6603,11 +6627,6 @@ def donation_repost_view(request, donation_id):
     except Exception as e:
         logger.error(f"Error reposting donation: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
-
-
-@api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
 def donation_detail_edit_view(request, donation_id):
     """Handle donation detail view, edit, and delete"""
     try:
@@ -6896,11 +6915,6 @@ def set_send_date_view(request):
             'success': False,
             'message': f'Error setting send date: {str(e)}'
         }, status=500)
-
-
-@api_view(['GET'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
     try:
