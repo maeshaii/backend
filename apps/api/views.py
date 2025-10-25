@@ -4862,11 +4862,20 @@ def forum_detail_edit_view(request, forum_id):
             comments = Comment.objects.filter(forum=forum).select_related('user').order_by('-date_created')
             reposts = Repost.objects.filter(forum=forum).select_related('user')
             is_liked = Like.objects.filter(forum=forum, user=request.user).exists()
+            
+            # Get images from ContentImage model
+            content_images = ContentImage.objects.filter(content_type='forum', content_id=forum.forum_id).order_by('order')
+            post_images = [{
+                'image_id': img.image_id,
+                'image_url': img.image.url if img.image else None,
+                'order': img.order
+            } for img in content_images]
 
             return JsonResponse({
                 'post_id': forum.forum_id,
                 'post_content': forum.content,
-                'post_image': (forum.image.url if forum.image else None),
+                'post_image': None,  # Forum posts don't have single image
+                'post_images': post_images,  # Use ContentImage instead
                 'type': 'forum',
                 'created_at': forum.created_at.isoformat() if forum.created_at else None,
                 'likes_count': likes.count(),
@@ -4907,7 +4916,8 @@ def forum_detail_edit_view(request, forum_id):
                     'original_post': {
                         'post_id': forum.forum_id,
                         'post_content': forum.content,
-                        'post_image': (forum.image.url if forum.image else None),
+                        'post_image': None,  # Forum posts don't have single image
+                        'post_images': post_images,  # Use ContentImage instead
                         'created_at': forum.created_at.isoformat() if forum.created_at else None,
                         'user': {
                             'user_id': forum.user.user_id,
@@ -6404,7 +6414,7 @@ def donation_like_view(request, donation_id):
                         user=donation.user,
                         notif_type='like',
                         subject='Donation Liked',
-                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                         notif_date=timezone.now()
                     )
                     # Broadcast donation like notification in real-time
@@ -6497,7 +6507,7 @@ def donation_comments_view(request, donation_id):
                     user=donation.user,
                     notif_type='comment',
                     subject='Donation Commented',
-                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 # Broadcast donation comment notification in real-time
@@ -6606,7 +6616,7 @@ def donation_repost_view(request, donation_id):
                 user=donation.user,
                 notif_type='repost',
                 subject='Donation Reposted',
-                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                 notif_date=timezone.now()
             )
             # Broadcast donation repost notification in real-time
@@ -6627,14 +6637,14 @@ def donation_repost_view(request, donation_id):
     except Exception as e:
         logger.error(f"Error reposting donation: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
 def donation_detail_edit_view(request, donation_id):
     """Handle donation detail view, edit, and delete"""
     try:
         donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        # Check if user owns the donation or is admin
-        if donation.user != request.user and not request.user.account_type == 'admin':
-            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
         
         if request.method == 'GET':
             # Get likes, comments, and reposts for this donation
@@ -6649,13 +6659,13 @@ def donation_detail_edit_view(request, donation_id):
                 'post_id': donation.donation_id,  # Add for compatibility with frontend
                 'user': {
                     'user_id': donation.user.user_id,
-                    'f_name': donation.user.f_name,
-                    'm_name': donation.user.m_name,
-                    'l_name': donation.user.l_name,
+                    'f_name': donation.user.f_name or '',
+                    'm_name': donation.user.m_name or '',
+                    'l_name': donation.user.l_name or '',
                     'profile_pic': build_profile_pic_url(donation.user),
                     'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
                     'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                    'name': f"{donation.user.f_name or ''} {donation.user.m_name or ''} {donation.user.l_name or ''}".strip()
                 },
                 'description': donation.description,
                 'status': donation.status,
