@@ -142,19 +142,36 @@ def build_profile_pic_url(user):
     # Return empty string instead of None for consistency
     return ""
 
-def build_image_url(image_field):
+def build_image_url(image_field, request=None):
     """Build full URL for ContentImage fields"""
     try:
         if image_field and hasattr(image_field, 'url'):
             url = image_field.url
+            print(f'build_image_url - original URL: {url}')
             # If it's already a full URL, return as is
             if url.startswith('http'):
+                print(f'build_image_url - already full URL: {url}')
                 return url
             # If it's a relative URL, prepend the base URL
             from django.conf import settings
-            base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
-            return f"{base_url}{url}"
-    except Exception:
+            
+            # Try to get the base URL from the request if available
+            if request:
+                # Get the host from the request
+                host = request.get_host()
+                scheme = 'https' if request.is_secure() else 'http'
+                base_url = f"{scheme}://{host}"
+                print(f'build_image_url - using request host: {base_url}')
+            else:
+                # Fallback to settings or default ngrok URL
+                base_url = getattr(settings, 'BASE_URL', 'https://sweaty-salma-catoptrical.ngrok-free.dev')
+                print(f'build_image_url - using settings/fallback: {base_url}')
+            
+            full_url = f"{base_url}{url}"
+            print(f'build_image_url - built full URL: {full_url}')
+            return full_url
+    except Exception as e:
+        print(f'build_image_url - error: {e}')
         pass
     return ""
 
@@ -3394,7 +3411,7 @@ def post_detail_view(request, post_id):
             # Use the new ContentImage model
             content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
             for img in content_images:
-                image_url = build_image_url(img.image)
+                image_url = build_image_url(img.image, request)
                 post_images.append({
                     'image_id': img.image_id,
                     'image_url': image_url,
@@ -5632,10 +5649,11 @@ def posts_view(request):
                 if hasattr(post, 'images'):
                     print(f'Post has images property, count: {post.images.count()}')
                     for img in post.images.all():
-                        print(f'Adding image: {img.image.url}')
+                        image_url = build_image_url(img.image, request)
+                        print(f'Adding image: {image_url}')
                         post_images.append({
                             'image_id': img.image_id,
-                            'image_url': img.image.url,
+                            'image_url': image_url,
                             'order': img.order
                         })
                 else:
@@ -5645,9 +5663,9 @@ def posts_view(request):
                 content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
                 print(f'Direct ContentImage query found {content_images.count()} images')
                 if content_images.count() > 0:
-                    post_images = []
+                    # Don't reset post_images array, append to existing images
                     for img in content_images:
-                        image_url = build_image_url(img.image)
+                        image_url = build_image_url(img.image, request)
                         print(f'Adding direct image: {image_url}')
                         post_images.append({
                             'image_id': img.image_id,
@@ -5684,66 +5702,70 @@ def posts_view(request):
                 # Add each repost as a separate feed item
                 reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
-                    # Get repost likes count and data
-                    repost_likes = Like.objects.filter(repost=repost).select_related('user')
-                    repost_likes_count = repost_likes.count()
-                    repost_likes_data = []
+                    try:
+                        # Get repost likes count and data
+                        repost_likes = Like.objects.filter(repost=repost).select_related('user')
+                        repost_likes_count = repost_likes.count()
+                        repost_likes_data = []
 
-                    # Get repost comments count and data
-                    repost_comments = Comment.objects.filter(repost=repost).select_related('user')
-                    repost_comments_count = repost_comments.count()
-                    repost_comments_data = []
-                    for comment in repost_comments:
-                        # Get replies count for this comment
-                        replies_count = Reply.objects.filter(comment=comment).count()
-                        
-                        repost_comments_data.append({
-                            'comment_id': comment.comment_id,
-                            'comment_content': comment.comment_content,
-                            'date_created': comment.date_created.isoformat() if comment.date_created else None,
-                            'replies_count': replies_count,
+                        # Get repost comments count and data
+                        repost_comments = Comment.objects.filter(repost=repost).select_related('user')
+                        repost_comments_count = repost_comments.count()
+                        repost_comments_data = []
+                        for comment in repost_comments:
+                            # Get replies count for this comment
+                            replies_count = Reply.objects.filter(comment=comment).count()
+                            
+                            repost_comments_data.append({
+                                'comment_id': comment.comment_id,
+                                'comment_content': comment.comment_content,
+                                'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                                'replies_count': replies_count,
+                                'user': {
+                                    'user_id': comment.user.user_id,
+                                    'f_name': comment.user.f_name,
+                                    'm_name': comment.user.m_name,
+                                    'l_name': comment.user.l_name,
+                                    'profile_pic': build_profile_pic_url(comment.user),
+                                }
+                            })
+
+                        feed_items.append({
+                            'repost_id': repost.repost_id,
+                            'repost_date': repost.repost_date.isoformat(),
+                            'repost_caption': repost.caption,
+                            'likes_count': repost_likes_count,
+                            'comments_count': repost_comments_count,
+                            'likes': repost_likes_data,
+                            'comments': repost_comments_data,
                             'user': {
-                                'user_id': comment.user.user_id,
-                                'f_name': comment.user.f_name,
-                                'm_name': comment.user.m_name,
-                                'l_name': comment.user.l_name,
-                                'profile_pic': build_profile_pic_url(comment.user),
-                            }
+                                'user_id': repost.user.user_id,
+                                'f_name': repost.user.f_name,
+                                'm_name': repost.user.m_name,
+                                'l_name': repost.user.l_name,
+                                'profile_pic': build_profile_pic_url(repost.user),
+                            },
+                            'original_post': {
+                                'post_id': post.post_id,
+                                'post_content': post.post_content,
+                                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
+                                'post_images': post_images,  # Multiple images (already calculated above)
+                                'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                                'user': {
+                                    'user_id': post.user.user_id,
+                                    'f_name': post.user.f_name,
+                                    'm_name': post.user.m_name,
+                                    'l_name': post.user.l_name,
+                                    'profile_pic': build_profile_pic_url(post.user),
+                                }
+                            },
+                            'item_type': 'repost',  # Mark as repost
+                            'sort_date': repost.repost_date.isoformat(),
                         })
-
-                    feed_items.append({
-                        'repost_id': repost.repost_id,
-                        'repost_date': repost.repost_date.isoformat(),
-                        'repost_caption': repost.caption,
-                        'likes_count': repost_likes_count,
-                        'comments_count': repost_comments_count,
-                        'likes': repost_likes_data,
-                        'comments': repost_comments_data,
-                        'user': {
-                            'user_id': repost.user.user_id,
-                            'f_name': repost.user.f_name,
-                            'm_name': repost.user.m_name,
-                            'l_name': repost.user.l_name,
-                            'profile_pic': build_profile_pic_url(repost.user),
-                        },
-                        'original_post': {
-                            'post_id': post.post_id,
-                            'post_content': post.post_content,
-                            'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
-                            'post_images': post_images,  # Multiple images (already calculated above)
-                            'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
-                            'user': {
-                                'user_id': post.user.user_id,
-                                'f_name': post.user.f_name,
-                                'm_name': post.user.m_name,
-                                'l_name': post.user.l_name,
-                                'profile_pic': build_profile_pic_url(post.user),
-                            }
-                        },
-                        'item_type': 'repost',  # Mark as repost
-                        'sort_date': repost.repost_date.isoformat(),
-                })
-            except Exception:
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"Error processing post {post.post_id}: {e}")
                 continue
 
         # Sort all feed items by date (most recent first)

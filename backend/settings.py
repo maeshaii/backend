@@ -119,7 +119,7 @@ CSRF_TRUSTED_ORIGINS = [
 
     "http://192.168.1.5:8000",
     "https://*.ngrok-free.app",
-    "https://sweaty-salma-catoptrical.ngrok-free.dev",
+    "https://nonalliterative-brian-tastefully.ngrok-free.dev",
 ]
 ROOT_URLCONF = 'backend.urls'
 
