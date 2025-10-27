@@ -1138,6 +1138,11 @@ def users_list_view(request):
     user = request.user
     # Allow any authenticated user to fetch suggested users
     current_user_id = request.GET.get('current_user_id')
+    
+    # If no current_user_id provided, use the authenticated user's ID
+    if not current_user_id:
+        current_user_id = str(user.user_id)
+    
     try:
         # Parse current_user_id to int if possible for safety
         try:
@@ -3519,7 +3524,7 @@ def repost_detail_view(request, repost_id):
             'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
             'post_images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': build_image_url(img.image, request),
                 'order': img.order
             } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
             'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
@@ -3539,7 +3544,7 @@ def repost_detail_view(request, repost_id):
             'forum_type': repost.forum.type,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': build_image_url(img.image, request),
                 'order': img.order
             } for img in repost.forum.images.all()],
             'created_at': repost.forum.created_at.isoformat() if hasattr(repost.forum, 'created_at') else None,
@@ -3559,7 +3564,7 @@ def repost_detail_view(request, repost_id):
             'status': repost.donation_request.status,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': build_image_url(img.image, request),
                 'order': img.order
             } for img in repost.donation_request.images.all()],
             'created_at': repost.donation_request.created_at.isoformat() if hasattr(repost.donation_request, 'created_at') else None,
