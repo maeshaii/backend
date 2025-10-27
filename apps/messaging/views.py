@@ -184,6 +184,13 @@ class MessageListView(generics.ListCreateAPIView):
             
             # Determine receiver for 1:1 conversations to satisfy legacy non-null column
             receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
+            
+            # Convert message request to regular conversation when someone replies
+            if conversation.is_message_request:
+                conversation.is_message_request = False
+                conversation.save()
+                logger.info(f"Converted message request {conversation_id} to regular conversation")
+            
             # Ensure legacy DB columns are populated (e.g., date_send)
             message = serializer.save(
                 conversation=conversation,
@@ -205,8 +212,9 @@ class MessageListView(generics.ListCreateAPIView):
         # Ensure legacy columns are populated for existing schema using ORM
         try:
             # Backfill legacy date_send if DB still missing it (older schema)
-            Message.objects.filter(message_id=message.message_id, date_send__isnull=True).update(
-                date_send=timezone.now()
+            # Note: created_at field maps to date_send column in database
+            Message.objects.filter(message_id=message.message_id, created_at__isnull=True).update(
+                created_at=timezone.now()
             )
             # Backfill legacy 'content' column to mirror message_content for older schemas
             Message.objects.filter(message_id=message.message_id, content__isnull=True).update(
@@ -239,27 +247,34 @@ class MessageListView(generics.ListCreateAPIView):
                     }
             
             channel_layer = get_channel_layer()
+            
+            # Create the message data structure
+            message_data = {
+                'message_id': message.message_id,
+                'content': message.content,
+                'sender_id': request.user.user_id,
+                'sender_name': getattr(request.user, 'full_name', ''),
+                'message_type': message.message_type,
+                'created_at': message.created_at.isoformat(),
+                'timestamp': timezone.now().isoformat(),
+                'attachment_url': attachment_url,
+                'attachment_info': attachment_info,
+                'attachments': [{
+                    'file_url': attachment_url,
+                    'file_name': attachment_info.get('file_name') if attachment_info else None,
+                    'file_type': attachment_info.get('file_type') if attachment_info else None,
+                    'file_category': attachment_info.get('file_category') if attachment_info else None,
+                    'file_size': attachment_info.get('file_size') if attachment_info else None,
+                }] if attachment_url and attachment_info else [],
+            }
+            
+            # Send to WebSocket group
             async_to_sync(channel_layer.group_send)(
                 f"chat_{conversation.conversation_id}",
                 {
                     'type': 'chat_message',
-                    'message_id': message.message_id,
-                    'content': message.content,
-                    'sender_id': request.user.user_id,
-                    'sender_name': getattr(request.user, 'full_name', ''),
-                    'message_type': message.message_type,
-                    'created_at': message.created_at.isoformat(),
-                    'timestamp': timezone.now().isoformat(),
-                    'attachment_url': attachment_url,
-                    'attachment_info': attachment_info,
-                    'attachments': [{
-                        'file_url': attachment_url,
-                        'file_name': attachment_info.get('file_name') if attachment_info else None,
-                        'file_type': attachment_info.get('file_type') if attachment_info else None,
-                        'file_category': attachment_info.get('file_category') if attachment_info else None,
-                        'file_size': attachment_info.get('file_size') if attachment_info else None,
-                    }] if attachment_url and attachment_info else [],
-                },
+                    'message': message_data  # This is the key the consumer expects
+                }
             )
         except Exception as e:
             logger.error("Failed to broadcast message %s to WebSocket: %s", message.message_id, e)
@@ -338,54 +353,54 @@ class MessageListView(generics.ListCreateAPIView):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def mark_conversation_as_read(request, conversation_id):
-	conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-	if not conversation.participants.filter(user_id=request.user.user_id).exists():
-		return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-	updated_count = Message.objects.filter(conversation=conversation, is_read=False).exclude(sender=request.user).update(is_read=True)
-	return Response({'status': 'success', 'messages_marked_read': updated_count, 'timestamp': timezone.now().isoformat()})
+    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+    if not conversation.participants.filter(user_id=request.user.user_id).exists():
+        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    updated_count = Message.objects.filter(conversation=conversation, is_read=False).exclude(sender=request.user).update(is_read=True)
+    return Response({'status': 'success', 'messages_marked_read': updated_count, 'timestamp': timezone.now().isoformat()})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def search_users(request):
-	query = request.GET.get('q', '').strip()
-	if not query:
-		return Response({'error': 'Query parameter required'}, status=status.HTTP_400_BAD_REQUEST)
-	if len(query) < 2:
-		return Response({'error': 'Query must be at least 2 characters'}, status=status.HTTP_400_BAD_REQUEST)
-	users = User.objects.filter(
-		Q(f_name__icontains=query) |
-		Q(l_name__icontains=query) |
-		Q(acc_username__icontains=query),
-		Q(account_type__user=True) | Q(account_type__ojt=True),
-		user_status='active',
-	).exclude(user_id=request.user.user_id).distinct()[:10]
-	from apps.shared.serializers import UserSerializer
-	serializer = UserSerializer(users, many=True)
-	return Response({'users': serializer.data, 'count': len(users), 'query': query})
+    query = request.GET.get('q', '').strip()
+    if not query:
+        return Response({'error': 'Query parameter required'}, status=status.HTTP_400_BAD_REQUEST)
+    if len(query) < 2:
+        return Response({'error': 'Query must be at least 2 characters'}, status=status.HTTP_400_BAD_REQUEST)
+    users = User.objects.filter(
+        Q(f_name__icontains=query) |
+        Q(l_name__icontains=query) |
+        Q(acc_username__icontains=query),
+        Q(account_type__user=True) | Q(account_type__ojt=True),
+        user_status='active',
+    ).exclude(user_id=request.user.user_id).distinct()[:10]
+    from apps.shared.serializers import UserSerializer
+    serializer = UserSerializer(users, many=True)
+    return Response({'users': serializer.data, 'count': len(users), 'query': query})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def conversation_detail(request, conversation_id):
-	conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-	if not conversation.participants.filter(user_id=request.user.user_id).exists():
-		return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-	serializer = ConversationSerializer(conversation, context={'request': request})
-	return Response(serializer.data)
+    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+    if not conversation.participants.filter(user_id=request.user.user_id).exists():
+        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    serializer = ConversationSerializer(conversation, context={'request': request})
+    return Response(serializer.data)
 
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def delete_message(request, conversation_id, message_id):
-	conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-	if not conversation.participants.filter(user_id=request.user.user_id).exists():
-		return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
-	message = get_object_or_404(Message, message_id=message_id, conversation=conversation)
-	if message.sender.user_id != request.user.user_id:
-		return Response({'error': 'You can only delete your own messages'}, status=status.HTTP_403_FORBIDDEN)
-	message.delete()
-	return Response({'status': 'success', 'message': 'Message deleted successfully'})
+    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+    if not conversation.participants.filter(user_id=request.user.user_id).exists():
+        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    message = get_object_or_404(Message, message_id=message_id, conversation=conversation)
+    if message.sender.user_id != request.user.user_id:
+        return Response({'error': 'You can only delete your own messages'}, status=status.HTTP_403_FORBIDDEN)
+    message.delete()
+    return Response({'status': 'success', 'message': 'Message deleted successfully'})
 
 
 @api_view(['GET'])
@@ -427,6 +442,17 @@ class AttachmentUploadView(APIView):
         file = request.FILES.get('file')
         if not file:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Extract conversation_id from form data (for validation purposes)
+        conversation_id = request.data.get('conversation_id')
+        if conversation_id:
+            try:
+                conversation = get_object_or_404(Conversation, conversation_id=int(conversation_id))
+                # Verify user has access to this conversation
+                if not conversation.participants.filter(user_id=request.user.user_id).exists():
+                    return Response({'error': 'Access denied to conversation'}, status=status.HTTP_403_FORBIDDEN)
+            except (ValueError, TypeError):
+                return Response({'error': 'Invalid conversation_id'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             # Sanitize filename

@@ -133,6 +133,7 @@ class Conversation(models.Model):
     participants = models.ManyToManyField('User', related_name='conversations')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_message_request = models.BooleanField(default=False, help_text="True if this is a message request from non-mutual follow")
     
     class Meta:
         ordering = ['-updated_at']

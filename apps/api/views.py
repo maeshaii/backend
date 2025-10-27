@@ -4238,6 +4238,132 @@ def check_follow_status_view(request, user_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def mutual_follows_view(request, user_id):
+    """Get mutual follows between current user and target user"""
+    if request.method == "OPTIONS":
+        response = JsonResponse({'detail': 'OK'})
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken, Authorization"
+        return response
+
+    try:
+        current_user = get_current_user_from_request(request)
+        if not current_user:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+
+        target_user = User.objects.get(user_id=user_id)
+        
+        from apps.shared.models import Follow
+        
+        # Get users that both current_user and target_user follow
+        current_user_following = set(Follow.objects.filter(follower=current_user).values_list('following_id', flat=True))
+        target_user_following = set(Follow.objects.filter(follower=target_user).values_list('following_id', flat=True))
+        
+        # Find mutual follows
+        mutual_follow_ids = current_user_following.intersection(target_user_following)
+        
+        if not mutual_follow_ids:
+            return JsonResponse({
+                'success': True,
+                'mutual_follows': [],
+                'count': 0
+            })
+        
+        # Get mutual follow user details
+        mutual_follows = User.objects.filter(user_id__in=mutual_follow_ids)
+        mutual_follows_data = []
+        
+        for user in mutual_follows:
+            mutual_follows_data.append({
+                'user_id': user.user_id,
+                'ctu_id': user.acc_username,
+                'name': ' '.join(filter(None, [user.f_name, user.m_name, user.l_name])),
+                'f_name': user.f_name,
+                'm_name': user.m_name,
+                'l_name': user.l_name,
+                'profile_pic': build_profile_pic_url(user),
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'mutual_follows': mutual_follows_data,
+            'count': len(mutual_follows_data)
+        })
+        
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'User not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def online_users_view(request):
+    """Get online users that the current user has mutual follows with"""
+    if request.method == "OPTIONS":
+        response = JsonResponse({'detail': 'OK'})
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken, Authorization"
+        return response
+
+    try:
+        current_user = get_current_user_from_request(request)
+        if not current_user:
+            return JsonResponse({'error': 'Authentication required'}, status=401)
+
+        from apps.shared.models import Follow
+        from apps.messaging.connection_manager import connection_manager
+        
+        # Get all users that current user follows
+        following_ids = set(Follow.objects.filter(follower=current_user).values_list('following_id', flat=True))
+        
+        # Get all users that follow current user
+        follower_ids = set(Follow.objects.filter(following=current_user).values_list('follower_id', flat=True))
+        
+        # Find mutual follows
+        mutual_follow_ids = following_ids.intersection(follower_ids)
+        
+        if not mutual_follow_ids:
+            return JsonResponse({
+                'success': True,
+                'online_users': [],
+                'count': 0
+            })
+        
+        # Get online status for mutual follows
+        online_users = []
+        for user_id in mutual_follow_ids:
+            # Check if user is online (has active connections)
+            user_connections = connection_manager.get_user_connections(user_id)
+            if user_connections:
+                try:
+                    user = User.objects.get(user_id=user_id)
+                    online_users.append({
+                        'user_id': user.user_id,
+                        'ctu_id': user.acc_username,
+                        'name': ' '.join(filter(None, [user.f_name, user.m_name, user.l_name])),
+                        'f_name': user.f_name,
+                        'm_name': user.m_name,
+                        'l_name': user.l_name,
+                        'profile_pic': build_profile_pic_url(user),
+                        'is_online': True,
+                        'last_seen': timezone.now().isoformat()
+                    })
+                except User.DoesNotExist:
+                    continue
+        
+        return JsonResponse({
+            'success': True,
+            'online_users': online_users,
+            'count': len(online_users)
+        })
+        
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
 import base64
 import uuid
 from django.core.files.base import ContentFile

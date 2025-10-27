@@ -88,23 +88,32 @@ class ChatConsumer(AsyncWebsocketConsumer):
 		)
 		
 		# Store connection metadata
+		# Extract user-agent from headers (headers is a list of tuples)
+		user_agent = b''
+		headers = self.scope.get('headers', [])
+		for header_name, header_value in headers:
+			if header_name.lower() == b'user-agent':
+				user_agent = header_value
+				break
+		
 		connection_metadata = {
 			'user_id': getattr(self.user, 'user_id', None),
 			'conversation_id': self.conversation_id,
 			'ip_address': ip_address,
-			'user_agent': self.scope.get('headers', {}).get(b'user-agent', b'').decode('utf-8', errors='ignore'),
+			'user_agent': user_agent.decode('utf-8', errors='ignore'),
 			'connected_at': timezone.now().isoformat()
 		}
 		
 		# Add connection to pool
 		await database_sync_to_async(connection_pool.add_connection)(
 			getattr(self.user, 'user_id', None),
-			self.channel_name,
-			connection_metadata
+			self.channel_name
 		)
 		
 		# Add connection to Redis tracking
 		await database_sync_to_async(connection_manager.add_connection)(
+			getattr(self.user, 'user_id', None),
+			self.conversation_id,
 			self.channel_name,
 			connection_metadata
 		)
@@ -142,31 +151,43 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
 	async def disconnect(self, close_code):
 		"""Handle WebSocket disconnection"""
-		# Remove connection from pool
-		await database_sync_to_async(connection_pool.remove_connection)(
-			getattr(self.user, 'user_id', None),
-			self.channel_name
-		)
+		try:
+			# Remove connection from pool
+			await database_sync_to_async(connection_pool.remove_connection)(
+				getattr(self.user, 'user_id', None),
+				self.channel_name
+			)
+		except Exception as e:
+			logger.warning(f"Failed to remove connection from pool: {e}")
 		
-		# Remove connection from Redis tracking
-		await database_sync_to_async(connection_manager.remove_connection)(self.channel_name)
+		try:
+			# Remove connection from Redis tracking
+			await database_sync_to_async(connection_manager.remove_connection)(self.channel_name)
+		except Exception as e:
+			logger.warning(f"Failed to remove connection from manager: {e}")
 		
-		# Leave conversation room
-		await self.channel_layer.group_discard(
-			f"chat_{self.conversation_id}",
-			self.channel_name
-		)
+		try:
+			# Leave conversation room
+			await self.channel_layer.group_discard(
+				f"chat_{self.conversation_id}",
+				self.channel_name
+			)
+		except Exception as e:
+			logger.warning(f"Failed to leave conversation room: {e}")
 		
-		# Track WebSocket disconnection
-		await database_sync_to_async(messaging_monitor.track_websocket_event)(
-			'disconnected',
-			getattr(self.user, 'user_id', None),
-			self.conversation_id,
-			{
-				'channel_name': self.channel_name,
-				'close_code': close_code
-			}
-		)
+		try:
+			# Track WebSocket disconnection
+			await database_sync_to_async(messaging_monitor.track_websocket_event)(
+				'disconnected',
+				getattr(self.user, 'user_id', None),
+				self.conversation_id,
+				{
+					'channel_name': self.channel_name,
+					'close_code': close_code
+				}
+			)
+		except Exception as e:
+			logger.warning(f"Failed to track disconnection: {e}")
 		
 		logger.info(f"WebSocket disconnected: user {getattr(self.user, 'user_id', None)} from conversation {self.conversation_id}")
 
@@ -355,10 +376,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
 	async def chat_message(self, event):
 		"""Handle chat message from group"""
-		message = event['message']
+		# Handle both old and new message formats
+		message = event.get('message') or event.get('data', {})
 		await self.send(text_data=json.dumps({
 			'type': 'message',
 			'message': message
+		}))
+
+	async def presence_update(self, event):
+		"""Handle presence update from group"""
+		await self.send(text_data=json.dumps({
+			'type': 'presence_update',
+			'user_id': event.get('user_id'),
+			'status': event.get('status', 'online'),
+			'timestamp': timezone.now().isoformat()
 		}))
 
 	async def typing_indicator(self, event):
@@ -391,6 +422,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
 		"""Create message in database"""
 		try:
 			conversation = Conversation.objects.get(conversation_id=self.conversation_id)
+			
+			# Convert message request to regular conversation when someone replies
+			if conversation.is_message_request:
+				conversation.is_message_request = False
+				conversation.save()
+				logger.info(f"Converted message request {self.conversation_id} to regular conversation via WebSocket")
 			
 			# Create message
 			message = Message.objects.create(

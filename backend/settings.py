@@ -101,8 +101,11 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-# Permit any ngrok-free.app subdomain over https
-CORS_ALLOWED_ORIGIN_REGEXES = [r'^https://[a-z0-9-]+\.ngrok-free\.app$']
+# Permit any ngrok-free.app and ngrok-free.dev subdomain over https
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'^https://[a-z0-9-]+\.ngrok-free\.app$',
+    r'^https://[a-z0-9-]+\.ngrok-free\.dev$'
+]
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
@@ -112,6 +115,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://10.0.2.2:8000",
     "http://192.168.2.112:8000",
+    "https://simultaneously-wrinkliest-dominik.ngrok-free.dev",
 
     "http://192.168.1.27:8000",
     "http://192.168.1.18:8000",

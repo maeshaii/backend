@@ -284,7 +284,7 @@ class ConversationSerializer(serializers.ModelSerializer):
         model = Conversation
         fields = [
             'conversation_id', 'participants', 'last_message', 'unread_count', 
-            'other_participant', 'updated_at'
+            'other_participant', 'updated_at', 'is_message_request'
         ]
         read_only_fields = ['conversation_id', 'created_at', 'updated_at']
     
@@ -391,9 +391,40 @@ class CreateConversationSerializer(serializers.ModelSerializer):
             if existing:
                 return existing
 
-        conversation = Conversation.objects.create()
-        conversation.participants.set([current_user, *other_users])
-        return conversation
+        # Check if users are mutual follows for message request system
+        from apps.shared.models import Follow
+        
+        # For 1:1 conversations, check if it's a mutual follow
+        if len(other_users) == 1:
+            other_user = other_users[0]
+            
+            # Check if current user follows other user
+            current_follows_other = Follow.objects.filter(
+                follower=current_user,
+                following=other_user
+            ).exists()
+            
+            # Check if other user follows current user
+            other_follows_current = Follow.objects.filter(
+                follower=other_user,
+                following=current_user
+            ).exists()
+            
+            # If not mutual follows, this will be a message request
+            is_mutual_follow = current_follows_other and other_follows_current
+            
+            # Create conversation with request status
+            conversation = Conversation.objects.create(
+                is_message_request=not is_mutual_follow
+            )
+            conversation.participants.set([current_user, other_user])
+            
+            return conversation
+        else:
+            # For group conversations, create normally
+            conversation = Conversation.objects.create()
+            conversation.participants.set([current_user, *other_users])
+            return conversation
 
 class MessageCreateSerializer(serializers.ModelSerializer):
     attachment_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)

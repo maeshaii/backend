@@ -51,7 +51,16 @@ class ContentSanitizer:
         if len(content) > cls.MAX_CONTENT_LENGTH:
             raise ValidationError(f"Content too long. Maximum {cls.MAX_CONTENT_LENGTH} characters allowed.")
         
-        # Strip HTML tags completely for now (can be made configurable later)
+        # For attachment messages (images, videos, files), allow emoji and basic text
+        attachment_indicators = ['📷', '🎥', '📊', '📄', '🎵', '📎', 'Image', 'Video', 'File', 'Document', 'Audio']
+        if any(indicator in content for indicator in attachment_indicators):
+            # For attachment messages, only strip dangerous HTML but keep emojis and basic text
+            sanitized = bleach.clean(content, tags=[], strip=True)
+            # Remove excessive whitespace but keep single spaces
+            sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+            return sanitized
+        
+        # For regular text messages, strip HTML tags completely
         sanitized = strip_tags(content)
         
         # Remove any remaining HTML entities that might be dangerous

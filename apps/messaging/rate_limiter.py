@@ -323,7 +323,7 @@ class ConnectionPool:
     """
     
     # Configuration
-    MAX_CONNECTIONS_PER_USER = 5
+    MAX_CONNECTIONS_PER_USER = 50
     MAX_TOTAL_CONNECTIONS = 1000
     CONNECTION_CLEANUP_INTERVAL = 300  # 5 minutes
     
@@ -502,6 +502,7 @@ class ConnectionPool:
 # Global instances
 rate_limiter = WebSocketRateLimiter()
 connection_pool = ConnectionPool()
+
 
 
 
