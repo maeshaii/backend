@@ -6925,6 +6925,62 @@ def set_send_date_view(request):
             'success': False,
             'message': f'Error setting send date: {str(e)}'
         }, status=500)
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def check_all_sent_status_view(request):
+    """Check if all completed OJT students are already sent to admin for a specific batch"""
+    try:
+        coordinator = request.GET.get('coordinator', '')
+        batch_year = request.GET.get('batch_year', '')
+        
+        # Base query
+        base_query = User.objects.filter(
+            account_type__ojt=True,
+            ojt_info__ojtstatus='Completed'
+        ).exclude(acc_username='coordinator')
+        
+        # Filter by batch year if provided
+        if batch_year and batch_year != 'ALL':
+            try:
+                year = int(batch_year)
+                base_query = base_query.filter(academic_info__year_graduated=year)
+            except (ValueError, TypeError):
+                pass
+        
+        # Count completed students NOT sent to admin
+        completed_not_sent = base_query.filter(
+            ojt_info__is_sent_to_admin=False
+        ).count()
+        
+        # Count completed students already sent
+        completed_sent = base_query.filter(
+            ojt_info__is_sent_to_admin=True
+        ).count()
+        
+        all_sent = (completed_not_sent == 0 and completed_sent > 0)
+        
+        return JsonResponse({
+            'success': True,
+            'all_sent': all_sent,
+            'completed_not_sent': completed_not_sent,
+            'completed_sent': completed_sent,
+            'total_completed': completed_not_sent + completed_sent,
+            'batch_year': batch_year
+        })
+        
+    except Exception as e:
+        logger.error(f"check_all_sent_status_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': str(e)
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
     try:

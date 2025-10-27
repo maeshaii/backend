@@ -48,6 +48,7 @@ urlpatterns = [
     path('ojt/available-years/', views.available_years_view, name='available_years'),
     path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
     path('ojt/get-send-dates/', views.get_send_dates_view, name='get_send_dates'),
+    path('ojt/check-all-sent/', views.check_all_sent_status_view, name='check_all_sent_status'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
