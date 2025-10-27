@@ -3485,9 +3485,9 @@ def repost_detail_view(request, repost_id):
             'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
             'post_images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': img.image.url,
                 'order': img.order
-            } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
+            } for img in repost.post.images.all()],
             'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
         }
     elif repost.forum:
@@ -3505,7 +3505,7 @@ def repost_detail_view(request, repost_id):
             'forum_type': repost.forum.type,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': img.image.url,
                 'order': img.order
             } for img in repost.forum.images.all()],
             'created_at': repost.forum.created_at.isoformat() if hasattr(repost.forum, 'created_at') else None,
@@ -3525,7 +3525,7 @@ def repost_detail_view(request, repost_id):
             'status': repost.donation_request.status,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': img.image_url,
+                'image_url': img.image.url,
                 'order': img.order
             } for img in repost.donation_request.images.all()],
             'created_at': repost.donation_request.created_at.isoformat() if hasattr(repost.donation_request, 'created_at') else None,
@@ -6414,7 +6414,7 @@ def donation_like_view(request, donation_id):
                         user=donation.user,
                         notif_type='like',
                         subject='Donation Liked',
-                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
                         notif_date=timezone.now()
                     )
                     # Broadcast donation like notification in real-time
@@ -6507,7 +6507,7 @@ def donation_comments_view(request, donation_id):
                     user=donation.user,
                     notif_type='comment',
                     subject='Donation Commented',
-                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
                 # Broadcast donation comment notification in real-time
@@ -6616,7 +6616,7 @@ def donation_repost_view(request, donation_id):
                 user=donation.user,
                 notif_type='repost',
                 subject='Donation Reposted',
-                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
                 notif_date=timezone.now()
             )
             # Broadcast donation repost notification in real-time
