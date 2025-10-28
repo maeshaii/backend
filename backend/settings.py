@@ -74,11 +74,13 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:3001',
     'http://127.0.0.1:3001',
     'http://192.168.2.112:8000',
+    'http://192.168.101.70:8000',
 ]
 CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
 
 # Do not use wildcard '*' when credentials are included. Prefer specific origins and regex for ngrok.
-CORS_ALLOW_ALL_ORIGINS = False
+# Enable this for mobile development - mobile apps don't send traditional origin headers
+CORS_ALLOW_ALL_ORIGINS = True
 
 # Allow typical headers/methods during development
 CORS_ALLOW_HEADERS = [
@@ -91,6 +93,7 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'ngrok-skip-browser-warning',
 ]
 CORS_ALLOW_METHODS = [
     'DELETE',
@@ -115,6 +118,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://10.0.2.2:8000",
     "http://192.168.2.112:8000",
+    "http://192.168.101.70:8000",
     "https://simultaneously-wrinkliest-dominik.ngrok-free.dev",
 
     "http://192.168.1.27:8000",

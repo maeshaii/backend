@@ -10,9 +10,25 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='conversation',
-            name='is_message_request',
-            field=models.BooleanField(default=False, help_text='True if this is a message request from non-mutual follow'),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "ALTER TABLE shared_conversation "
+                        "ADD COLUMN IF NOT EXISTS is_message_request boolean DEFAULT FALSE;"
+                    ),
+                    reverse_sql=(
+                        "ALTER TABLE shared_conversation "
+                        "DROP COLUMN IF EXISTS is_message_request;"
+                    ),
+                ),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name='conversation',
+                    name='is_message_request',
+                    field=models.BooleanField(default=False, help_text='True if this is a message request from non-mutual follow'),
+                ),
+            ],
         ),
     ]

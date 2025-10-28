@@ -10,9 +10,25 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='question',
-            name='order',
-            field=models.PositiveIntegerField(default=0),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "ALTER TABLE shared_question "
+                        "ADD COLUMN IF NOT EXISTS \"order\" integer DEFAULT 0;"
+                    ),
+                    reverse_sql=(
+                        "ALTER TABLE shared_question "
+                        "DROP COLUMN IF EXISTS \"order\";"
+                    ),
+                ),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name='question',
+                    name='order',
+                    field=models.PositiveIntegerField(default=0),
+                ),
+            ],
         ),
     ]

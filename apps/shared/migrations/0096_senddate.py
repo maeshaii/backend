@@ -10,20 +10,54 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='SendDate',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('coordinator', models.CharField(max_length=100)),
-                ('batch_year', models.IntegerField()),
-                ('section', models.CharField(blank=True, max_length=50, null=True)),
-                ('send_date', models.DateField()),
-                ('is_processed', models.BooleanField(default=False)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('processed_at', models.DateTimeField(blank=True, null=True)),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "CREATE TABLE IF NOT EXISTS shared_senddate ("
+                        "id bigserial PRIMARY KEY,"
+                        "coordinator varchar(100) NOT NULL,"
+                        "batch_year integer NOT NULL,"
+                        "section varchar(50),"
+                        "send_date date NOT NULL,"
+                        "is_processed boolean NOT NULL DEFAULT FALSE,"
+                        "created_at timestamp with time zone NOT NULL DEFAULT now(),"
+                        "processed_at timestamp with time zone"
+                        ");"
+                    ),
+                    reverse_sql=(
+                        "DROP TABLE IF EXISTS shared_senddate;"
+                    ),
+                ),
+                migrations.RunSQL(
+                    sql=(
+                        "DO $$ BEGIN "
+                        "IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'shared_senddate_unique_idx') THEN "
+                        "CREATE UNIQUE INDEX shared_senddate_unique_idx ON shared_senddate (coordinator, batch_year, section); "
+                        "END IF; END $$;"
+                    ),
+                    reverse_sql=(
+                        "DROP INDEX IF EXISTS shared_senddate_unique_idx;"
+                    ),
+                ),
             ],
-            options={
-                'unique_together': {('coordinator', 'batch_year', 'section')},
-            },
+            state_operations=[
+                migrations.CreateModel(
+                    name='SendDate',
+                    fields=[
+                        ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                        ('coordinator', models.CharField(max_length=100)),
+                        ('batch_year', models.IntegerField()),
+                        ('section', models.CharField(blank=True, max_length=50, null=True)),
+                        ('send_date', models.DateField()),
+                        ('is_processed', models.BooleanField(default=False)),
+                        ('created_at', models.DateTimeField(auto_now_add=True)),
+                        ('processed_at', models.DateTimeField(blank=True, null=True)),
+                    ],
+                    options={
+                        'unique_together': {('coordinator', 'batch_year', 'section')},
+                    },
+                ),
+            ],
         ),
     ]

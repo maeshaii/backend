@@ -12,20 +12,52 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='RecentSearch',
-            fields=[
-                ('id', models.AutoField(primary_key=True, serialize=False)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='recent_searches', to=settings.AUTH_USER_MODEL)),
-                ('searched_user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='appears_in_recent_searches', to=settings.AUTH_USER_MODEL)),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "CREATE TABLE IF NOT EXISTS shared_recentsearch ("
+                        "id serial PRIMARY KEY,"
+                        "created_at timestamp with time zone NOT NULL DEFAULT now(),"
+                        "owner_id integer NOT NULL REFERENCES shared_user(user_id) ON DELETE CASCADE,"
+                        "searched_user_id integer NOT NULL REFERENCES shared_user(user_id) ON DELETE CASCADE"
+                        ");"
+                    ),
+                    reverse_sql=(
+                        "DROP TABLE IF EXISTS shared_recentsearch;"
+                    ),
+                ),
+                migrations.RunSQL(
+                    sql=(
+                        "DO $$ BEGIN "
+                        "IF NOT EXISTS ("
+                        "SELECT 1 FROM pg_constraint WHERE conrelid = 'shared_recentsearch'::regclass AND contype = 'u'"
+                        ") THEN "
+                        "ALTER TABLE shared_recentsearch ADD CONSTRAINT shared_recentsearch_owner_searched_unique UNIQUE (owner_id, searched_user_id); "
+                        "END IF; END $$;"
+                    ),
+                    reverse_sql=(
+                        "ALTER TABLE shared_recentsearch DROP CONSTRAINT IF EXISTS shared_recentsearch_owner_searched_unique;"
+                    ),
+                ),
             ],
-            options={
-                'ordering': ['-created_at'],
-            },
-        ),
-        migrations.AlterUniqueTogether(
-            name='recentsearch',
-            unique_together={('owner', 'searched_user')},
+            state_operations=[
+                migrations.CreateModel(
+                    name='RecentSearch',
+                    fields=[
+                        ('id', models.AutoField(primary_key=True, serialize=False)),
+                        ('created_at', models.DateTimeField(auto_now_add=True)),
+                        ('owner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='recent_searches', to=settings.AUTH_USER_MODEL)),
+                        ('searched_user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='appears_in_recent_searches', to=settings.AUTH_USER_MODEL)),
+                    ],
+                    options={
+                        'ordering': ['-created_at'],
+                    },
+                ),
+                migrations.AlterUniqueTogether(
+                    name='recentsearch',
+                    unique_together={('owner', 'searched_user')},
+                ),
+            ],
         ),
     ]

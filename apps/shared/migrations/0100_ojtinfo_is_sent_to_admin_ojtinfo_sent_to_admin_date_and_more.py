@@ -12,28 +12,74 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='ojtinfo',
-            name='is_sent_to_admin',
-            field=models.BooleanField(default=False),
-        ),
-        migrations.AddField(
-            model_name='ojtinfo',
-            name='sent_to_admin_date',
-            field=models.DateTimeField(blank=True, null=True),
-        ),
-        migrations.CreateModel(
-            name='RecentSearch',
-            fields=[
-                ('id', models.AutoField(primary_key=True, serialize=False)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('owner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='recent_searches', to=settings.AUTH_USER_MODEL)),
-                ('searched_user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='appears_in_recent_searches', to=settings.AUTH_USER_MODEL)),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "ALTER TABLE shared_ojtinfo "
+                        "ADD COLUMN IF NOT EXISTS is_sent_to_admin boolean DEFAULT FALSE;"
+                    ),
+                    reverse_sql=(
+                        "ALTER TABLE shared_ojtinfo "
+                        "DROP COLUMN IF EXISTS is_sent_to_admin;"
+                    ),
+                ),
+                migrations.RunSQL(
+                    sql=(
+                        "ALTER TABLE shared_ojtinfo "
+                        "ADD COLUMN IF NOT EXISTS sent_to_admin_date timestamp with time zone;"
+                    ),
+                    reverse_sql=(
+                        "ALTER TABLE shared_ojtinfo "
+                        "DROP COLUMN IF EXISTS sent_to_admin_date;"
+                    ),
+                ),
             ],
-            options={
-                'ordering': ['-created_at'],
-                'unique_together': {('owner', 'searched_user')},
-            },
+            state_operations=[
+                migrations.AddField(
+                    model_name='ojtinfo',
+                    name='is_sent_to_admin',
+                    field=models.BooleanField(default=False),
+                ),
+                migrations.AddField(
+                    model_name='ojtinfo',
+                    name='sent_to_admin_date',
+                    field=models.DateTimeField(blank=True, null=True),
+                ),
+            ],
+        ),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "CREATE TABLE IF NOT EXISTS shared_recentsearch ("
+                        "id serial PRIMARY KEY,"
+                        "created_at timestamp with time zone NOT NULL DEFAULT now(),"
+                        "owner_id integer NOT NULL REFERENCES shared_user(user_id) ON DELETE CASCADE,"
+                        "searched_user_id integer NOT NULL REFERENCES shared_user(user_id) ON DELETE CASCADE,"
+                        "UNIQUE (owner_id, searched_user_id)"
+                        ");"
+                    ),
+                    reverse_sql=(
+                        "DROP TABLE IF EXISTS shared_recentsearch;"
+                    ),
+                ),
+            ],
+            state_operations=[
+                migrations.CreateModel(
+                    name='RecentSearch',
+                    fields=[
+                        ('id', models.AutoField(primary_key=True, serialize=False)),
+                        ('created_at', models.DateTimeField(auto_now_add=True)),
+                        ('owner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='recent_searches', to=settings.AUTH_USER_MODEL)),
+                        ('searched_user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='appears_in_recent_searches', to=settings.AUTH_USER_MODEL)),
+                    ],
+                    options={
+                        'ordering': ['-created_at'],
+                        'unique_together': {('owner', 'searched_user')},
+                    },
+                ),
+            ],
         ),
         migrations.CreateModel(
             name='Reply',

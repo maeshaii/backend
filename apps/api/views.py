@@ -4,9 +4,11 @@ Uses shared models and serializers for data representation. If this file continu
 """
 
 import logging
+import uuid
 logger = logging.getLogger(__name__)
 
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
 from django.core.files.storage import default_storage
@@ -96,6 +98,22 @@ def award_engagement_points(user, action_type):
     except Exception as e:
         logger.error(f"Error awarding points to user {user.user_id}: {e}")
 
+
+def get_content_images_safe(content_id, content_type):
+    """
+    Safely retrieve ContentImage objects with proper error handling.
+    Returns empty list if table doesn't exist.
+    """
+    try:
+        content_images = ContentImage.objects.filter(content_type=content_type, content_id=content_id)
+        return [{
+            'image_id': img.image_id,
+            'image_url': img.image.url if img.image else None,
+            'order': img.order
+        } for img in content_images]
+    except Exception as e:
+        print(f"Warning: Could not load ContentImage for {content_type} {content_id}: {e}")
+        return []
 
 # --- Helpers for Posts ---
 
@@ -3573,14 +3591,19 @@ def post_detail_view(request, post_id):
             post_images = []
             #shaira
             # Use the new ContentImage model
-            content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
-            for img in content_images:
-                image_url = build_image_url(img.image, request)
-                post_images.append({
-                    'image_id': img.image_id,
-                    'image_url': image_url,
-                    'order': img.order
-                })
+            try:
+                content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+                for img in content_images:
+                    image_url = build_image_url(img.image, request)
+                    post_images.append({
+                        'image_id': img.image_id,
+                        'image_url': image_url,
+                        'order': img.order
+                    })
+            except Exception as img_error:
+                # Fallback if ContentImage table doesn't exist yet (migrations not run)
+                print(f"Warning: Could not load ContentImage: {img_error}")
+                post_images = []
 
             post_data = {
                 'post_id': post.post_id,
@@ -5077,12 +5100,17 @@ def forum_detail_edit_view(request, forum_id):
             is_liked = Like.objects.filter(forum=forum, user=request.user).exists()
             
             # Get images from ContentImage model
-            content_images = ContentImage.objects.filter(content_type='forum', content_id=forum.forum_id).order_by('order')
-            post_images = [{
-                'image_id': img.image_id,
-                'image_url': img.image.url if img.image else None,
-                'order': img.order
-            } for img in content_images]
+            post_images = []
+            try:
+                content_images = ContentImage.objects.filter(content_type='forum', content_id=forum.forum_id).order_by('order')
+                post_images = [{
+                    'image_id': img.image_id,
+                    'image_url': img.image.url if img.image else None,
+                    'order': img.order
+                } for img in content_images]
+            except Exception as e:
+                print(f"Warning: Could not load ContentImage for forum: {e}")
+                post_images = []
 
             return JsonResponse({
                 'post_id': forum.forum_id,
@@ -5862,20 +5890,29 @@ def posts_view(request):
             # --- END IMAGE HANDLING ---
             
             # Award engagement points (+15 for post with photo)
-            has_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id).exists()
+            has_images = False
+            try:
+                has_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id).exists()
+            except Exception as e:
+                print(f"Warning: Could not check ContentImage for engagement points: {e}")
+            
             if has_images:
                 award_engagement_points(request.user, 'post_with_photo')
 
             # Get multiple images for response
             post_images = []
             # Use the new ContentImage model
-            content_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id)
-            for img in content_images:
-                post_images.append({
-                    'image_id': img.image_id,
-                    'image_url': img.image.url,
-                    'order': img.order
-                })
+            try:
+                content_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id)
+                for img in content_images:
+                    post_images.append({
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    })
+            except Exception as e:
+                print(f"Warning: Could not load ContentImage for response: {e}")
+                post_images = []
             
             return JsonResponse({
                 'success': True,
@@ -5953,33 +5990,40 @@ def posts_view(request):
 
                 # Get multiple images for the post
                 post_images = []
-                print(f'Processing images for post {post.post_id}')
-                if hasattr(post, 'images'):
-                    print(f'Post has images property, count: {post.images.count()}')
-                    for img in post.images.all():
-                        image_url = build_image_url(img.image, request)
-                        print(f'Adding image: {image_url}')
-                        post_images.append({
-                            'image_id': img.image_id,
-                            'image_url': image_url,
-                            'order': img.order
-                        })
-                else:
-                    print(f'Post does not have images property')
-                
-                # Alternative: Direct ContentImage query
-                content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
-                print(f'Direct ContentImage query found {content_images.count()} images')
-                if content_images.count() > 0:
-                    # Don't reset post_images array, append to existing images
-                    for img in content_images:
-                        image_url = build_image_url(img.image, request)
-                        print(f'Adding direct image: {image_url}')
-                        post_images.append({
-                            'image_id': img.image_id,
-                            'image_url': image_url,
-                            'order': img.order
-                        })
+                try:
+                    print(f'Processing images for post {post.post_id}')
+                    if hasattr(post, 'images'):
+                        print(f'Post has images property, count: {post.images.count()}')
+                        for img in post.images.all():
+                            image_url = build_image_url(img.image, request)
+                            print(f'Adding image: {image_url}')
+                            post_images.append({
+                                'image_id': img.image_id,
+                                'image_url': image_url,
+                                'order': img.order
+                            })
+                    else:
+                        print(f'Post does not have images property')
+                    
+                    # Alternative: Direct ContentImage query (safe if table exists)
+                    try:
+                        content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+                        print(f'Direct ContentImage query found {content_images.count()} images')
+                        if content_images.count() > 0:
+                            # Don't reset post_images array, append to existing images
+                            for img in content_images:
+                                image_url = build_image_url(img.image, request)
+                                print(f'Adding direct image: {image_url}')
+                                post_images.append({
+                                    'image_id': img.image_id,
+                                    'image_url': image_url,
+                                    'order': img.order
+                                })
+                    except Exception as img_error:
+                        print(f"Warning: ContentImage query failed: {img_error}")
+                except Exception as img_error:
+                    print(f"Error processing images for post {post.post_id}: {img_error}")
+                    post_images = []  # Ensure post_images is always set
 
                 # Add the original post as a feed item
                 feed_items.append({
@@ -6556,13 +6600,7 @@ def donation_requests_view(request):
                     'status': donation.status,
                     'created_at': donation.created_at.isoformat(),
                     'updated_at': donation.updated_at.isoformat(),
-                    'images': [
-                        {
-                            'image_id': img.image_id,
-                            'image_url': img.image.url,
-                            'order': img.order
-                        } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
-                    ],
+                    'images': get_content_images_safe(donation.donation_id, 'donation'),
                     'likes_count': likes.count(),
                     'comments_count': comments.count(),
                     'reposts_count': reposts.count(),
@@ -6629,13 +6667,7 @@ def donation_requests_view(request):
                             'original_post': {
                                 'donation_id': donation.donation_id,
                                 'post_content': donation.description,
-                                'post_images': [
-                                    {
-                                        'image_id': img.image_id,
-                                        'image_url': img.image.url,
-                                        'order': img.order
-                                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
-                                ],
+                                'post_images': get_content_images_safe(donation.donation_id, 'donation'),
                                 'status': donation.status,
                                 'created_at': donation.created_at.isoformat(),
                                 'user': {
@@ -6758,13 +6790,7 @@ def donation_requests_view(request):
                 'status': donation.status,
                 'created_at': donation.created_at.isoformat(),
                 'updated_at': donation.updated_at.isoformat(),
-                'images': [
-                    {
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
-                ],
+                                'images': get_content_images_safe(donation.donation_id, 'donation'),
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
                 'reposts_count': reposts.count(),
@@ -7074,13 +7100,7 @@ def donation_detail_edit_view(request, donation_id):
                 'status': donation.status,
                 'created_at': donation.created_at.isoformat(),
                 'updated_at': donation.updated_at.isoformat(),
-                'images': [
-                    {
-                        'image_id': img.image_id,
-                        'image_url': img.image.url,
-                        'order': img.order
-                    } for img in ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
-                ],
+                                'images': get_content_images_safe(donation.donation_id, 'donation'),
                 'likes_count': likes.count(),
                 'comments_count': comments.count(),
                 'reposts_count': reposts.count(),
