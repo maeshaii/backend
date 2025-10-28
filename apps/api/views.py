@@ -16,7 +16,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -49,6 +49,53 @@ from rest_framework.decorators import api_view
 import tempfile
 from django.http import FileResponse
 from django.db import transaction
+
+# --- Helper Functions ---
+
+def award_engagement_points(user, action_type):
+    """
+    Award engagement points to a user for specific actions.
+    
+    Points awarded:
+    - like: +1 pt
+    - comment: +3 pts
+    - share (repost): +5 pts
+    - reply: +2 pts
+    - post_with_photo: +15 pts
+    
+    Only awards points to Alumni users.
+    """
+    try:
+        # Only award points to Alumni users
+        if not hasattr(user, 'account_type'):
+            return
+        
+        account_type = user.account_type
+        is_alumni = getattr(account_type, 'user', False)
+        
+        if not is_alumni:
+            return
+        
+        # Get or create user points
+        user_points, created = UserPoints.objects.get_or_create(user=user)
+        
+        # Award points based on action type
+        points_map = {
+            'like': 1,
+            'comment': 3,
+            'share': 5,
+            'reply': 2,
+            'post_with_photo': 15
+        }
+        
+        points = points_map.get(action_type, 0)
+        if points > 0:
+            user_points.add_points(action_type, points)
+            logger.info(f"Awarded {points} points to {user.full_name} for {action_type}")
+    
+    except Exception as e:
+        logger.error(f"Error awarding points to user {user.user_id}: {e}")
+
 
 # --- Helpers for Posts ---
 
@@ -1269,16 +1316,20 @@ def import_ojt_view(request):
         except Exception:
             pass
 
-        # OJT-specific required columns: keep Birthdate; Password is optional and can be generated
+        # TWO-STEP IMPORT SUPPORT:
+        # FIRST IMPORT: Only personal info required (no company, no start date)
+        # SECOND IMPORT: Company info provided, start date auto-set to today, end date from send_date
         required_columns = ['CTU_ID', 'First_Name', 'Last_Name', 'Gender']
-        optional_columns = ['Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil_Status', 'Social_Media']
+        optional_columns = ['Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil_Status', 'Social_Media',
+                           'Company Name', 'Company', 'Company_Address', 'Company_Email', 'Company_Contact',
+                           'Contact_Person', 'Position', 'Start_Date', 'End_Date', 'Status']
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             return JsonResponse({
                 'success': False,
                 'message': f'Missing required OJT columns: {", ".join(missing_columns)}'
             }, status=400)
-        # OJT_Company and OJT_Position are now optional
+        print(f"✅ Two-step import enabled: Personal info required, company info optional")
 
         # Create import record
         # Normalize batch_year to a single 4-digit year if possible
@@ -1303,6 +1354,7 @@ def import_ojt_view(request):
 
         created_count = 0
         skipped_count = 0
+        retaking_count = 0  # Count students retaking OJT in a different batch
         errors = []
         exported_passwords = []  # List to collect (username, password) for export
         total_rows = int(getattr(df, 'shape', [0])[0] or 0)
@@ -1366,8 +1418,8 @@ def import_ojt_view(request):
                         ojt_status = 'Completed'
                     elif excel_status.lower() in ['ongoing', 'active', 'in progress']:
                         ojt_status = 'Ongoing'
-                    elif excel_status.lower() in ['incomplete', 'failed', 'dropped']:
-                        ojt_status = 'Incomplete'
+                    elif excel_status.lower() in ['incomplete', 'failed', 'dropped', 'not started']:
+                        ojt_status = 'Not Started'
                     else:
                         ojt_status = excel_status  # Use as-is if not recognized
                     print(f"Row {index+2} - Status from Excel: '{excel_status}' -> Normalized to: '{ojt_status}'")
@@ -1435,32 +1487,85 @@ def import_ojt_view(request):
                 existing_user = User.objects.filter(acc_username=ctu_id).first()
                 if existing_user:
                     try:
-                        print(f"Row {index+2} - User {ctu_id} already exists, updating...")
+                        print(f"Row {index+2} - User {ctu_id} already exists, checking batch year...")
                         
                         # Ensure related models exist
-                        from apps.shared.models import UserProfile, AcademicInfo, OJTInfo, EmploymentHistory
+                        from apps.shared.models import UserProfile, AcademicInfo, OJTInfo, EmploymentHistory, OJTCompanyProfile
                         profile, _ = UserProfile.objects.get_or_create(user=existing_user)
                         academic, _ = AcademicInfo.objects.get_or_create(user=existing_user)
+                        
+                        # CHECK: Is student being imported for a DIFFERENT batch year? (Retaking OJT)
+                        # If yes, delete old OJT data from previous batch and start fresh
+                        old_batch_year = academic.year_graduated
+                        new_batch_year = int(normalized_year) if str(normalized_year).isdigit() else None
+                        
+                        if old_batch_year and new_batch_year and old_batch_year != new_batch_year:
+                            # CHECK: Is student already APPROVED (alumni)? 
+                            # If yes, BLOCK retaking - alumni cannot retake OJT
+                            is_alumni = existing_user.account_type and existing_user.account_type.user == True
+                            
+                            if is_alumni:
+                                # BLOCK: Alumni cannot retake OJT
+                                print(f"Row {index+2} - ⚠️ BLOCKED: Student {ctu_id} is already APPROVED (alumni) in batch {old_batch_year}")
+                                print(f"Row {index+2} - Alumni cannot retake OJT. Skipping import for this user.")
+                                errors.append(f"Row {index+2}: Student {ctu_id} ({first_name} {last_name}) is already APPROVED (alumni) and cannot retake OJT.")
+                                skipped_count += 1
+                                continue  # Skip this student, move to next row
+                            
+                            # Student is NOT alumni (INCOMPLETE or failed) - Allow retaking
+                            print(f"Row {index+2} - RETAKING OJT! Student was in batch {old_batch_year}, now importing for batch {new_batch_year}")
+                            print(f"Row {index+2} - Student is NOT alumni (INCOMPLETE/failed), retaking is allowed.")
+                            print(f"Row {index+2} - Deleting old OJT data from batch {old_batch_year}...")
+                            
+                            # Delete old OJT data
+                            OJTInfo.objects.filter(user=existing_user).delete()
+                            OJTCompanyProfile.objects.filter(user=existing_user).delete()
+                            
+                            # REACTIVATE ACCOUNT: Reset account type to OJT
+                            if not existing_user.account_type:
+                                existing_user.account_type = ojt_account_type
+                                existing_user.save()
+                            else:
+                                # Ensure OJT flag is set
+                                existing_user.account_type.ojt = True
+                                existing_user.account_type.save()
+                                print(f"Row {index+2} - Account reactivated as OJT student")
+                            
+                            retaking_count += 1
+                            print(f"Row {index+2} - Old OJT data deleted. Student will start fresh in batch {new_batch_year}")
+                        
                         # Update section if provided
                         if user_section:
                             academic.section = user_section
                             academic.save()
+                        
                         ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
                         employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
                         
-                        # IMPORTANT: Re-generate password for existing users to ensure they can be exported
-                        existing_user.set_password(password_raw)
-                        existing_user.save()
-                        print(f"Row {index+2} - Reset password for existing user {ctu_id}")
+                        # Check if user has existing company info (to determine if this is 2nd import)
+                        ojt_company_profile = OJTCompanyProfile.objects.filter(user=existing_user).first()
+                        has_existing_company = ojt_company_profile and ojt_company_profile.company_name
                         
-                        # Add to exported passwords for download
-                        exported_passwords.append({
-                            'CTU_ID': ctu_id,
-                            'First_Name': first_name,
-                            'Last_Name': last_name,
-                            'Password': password_raw
-                        })
-                        print(f"Row {index+2} - Added existing user to password export list")
+                        # TWO-STEP IMPORT: Password generation rules
+                        # FIRST IMPORT (no company): Generate password
+                        # SECOND IMPORT (has company): DON'T change password
+                        if not has_existing_company:
+                            # This is FIRST IMPORT - generate password
+                            existing_user.set_password(password_raw)
+                            existing_user.save()
+                            print(f"Row {index+2} - FIRST IMPORT: Generated password for user {ctu_id}")
+                            
+                            # Add to exported passwords for download
+                            exported_passwords.append({
+                                'CTU_ID': ctu_id,
+                                'First_Name': first_name,
+                                'Last_Name': last_name,
+                                'Password': password_raw
+                            })
+                            print(f"Row {index+2} - Added to password export list")
+                        else:
+                            # This is SECOND IMPORT - DON'T change password
+                            print(f"Row {index+2} - SECOND IMPORT: Password NOT changed (keeping existing password)")
 
                         # Update names to match latest import where present
                         if first_name:
@@ -1499,8 +1604,30 @@ def import_ojt_view(request):
                             or row.get('Company')
                             or row.get('Company name current')
                         )
-                        if pd.notna(company_name) and str(company_name).strip():
+                        
+                        # Check if company info is being provided in this import
+                        has_new_company_info = pd.notna(company_name) and str(company_name).strip()
+                        
+                        if has_new_company_info:
                             employment.company_name_current = str(company_name).strip()
+                            
+                            # If this is SECOND import (has new company but didn't have one before)
+                            # Set start date to TODAY automatically
+                            if not has_existing_company:
+                                from django.utils import timezone
+                                ojt_start_date = timezone.now().date()
+                                print(f"Row {index+2} - SECOND IMPORT DETECTED! Auto-setting start_date to TODAY: {ojt_start_date}")
+                                
+                                # Calculate end date from SendDate for this batch
+                                from apps.shared.models import SendDate
+                                send_date_obj = SendDate.objects.filter(
+                                    batch_year=normalized_year,
+                                    coordinator_username=coordinator_username
+                                ).first()
+                                
+                                if send_date_obj and send_date_obj.send_date:
+                                    ojt_end_date = send_date_obj.send_date
+                                    print(f"Row {index+2} - Auto-calculated end_date from SendDate: {ojt_end_date}")
                         
                         # Update company detail fields
                         company_address = row.get('Company_Address')
@@ -1537,36 +1664,41 @@ def import_ojt_view(request):
                         employment.save()
 
                         # Update OJT info (status, dates if parsed)
-                        # Use status from Excel file (defaults to 'Ongoing' if not provided)
-                        ojt_info.ojtstatus = ojt_status
-                        print(f"Row {index+2} - Set existing user status to: '{ojt_status}'")
-                        # Start/End already parsed above if available
+                        # STATUS is ONLY changeable if start_date exists
                         if 'ojt_start_date' in locals() and ojt_start_date:
-                            # model has only end date field; keep for future extension
-                            pass
+                            ojt_info.ojtstatus = ojt_status
+                            print(f"Row {index+2} - Start date exists, status set to: '{ojt_status}'")
+                        else:
+                            # Keep existing status or set to 'Not Started' if no start date
+                            if not ojt_info.ojtstatus:
+                                ojt_info.ojtstatus = 'Not Started'
+                            print(f"Row {index+2} - No start date, status remains: '{ojt_info.ojtstatus}'")
+                        
+                        # Set start/end dates
+                        if 'ojt_start_date' in locals() and ojt_start_date:
+                            ojt_info.ojt_start_date = ojt_start_date
                         if 'ojt_end_date' in locals() and ojt_end_date:
                             ojt_info.ojt_end_date = ojt_end_date
                         ojt_info.save()
                         
                         # Update or create OJT Company Profile
                         try:
-                            from apps.shared.models import OJTCompanyProfile
                             ojt_company_profile, created = OJTCompanyProfile.objects.get_or_create(
                                 user=existing_user,
                                 defaults={
-                                    'company_name': str(company_name).strip() if pd.notna(company_name) and str(company_name).strip() else None,
+                                    'company_name': str(company_name).strip() if has_new_company_info else None,
                                     'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
-                                    'end_date': ojt_end_date,
+                                    'end_date': ojt_end_date if 'ojt_end_date' in locals() else None,
                                 }
                             )
                             
                             if not created:
                                 # Update existing profile
-                                if pd.notna(company_name) and str(company_name).strip():
+                                if has_new_company_info:
                                     ojt_company_profile.company_name = str(company_name).strip()
                                 if 'ojt_start_date' in locals() and ojt_start_date:
                                     ojt_company_profile.start_date = ojt_start_date
-                                if ojt_end_date:
+                                if 'ojt_end_date' in locals() and ojt_end_date:
                                     ojt_company_profile.end_date = ojt_end_date
                             
                             # Update company details
@@ -1593,9 +1725,12 @@ def import_ojt_view(request):
                             print(f"Row {index+2} - Failed to update OJT Company Profile: {e}")
                             pass
 
-                        # Count as created so passwords get downloaded
-                        created_count += 1
-                        print(f"Row {index+2} - Updated existing user, counted as created for password export")
+                        # Count as created ONLY if password was generated (first import)
+                        if not has_existing_company:
+                            created_count += 1
+                            print(f"Row {index+2} - FIRST IMPORT: Counted for password export")
+                        else:
+                            print(f"Row {index+2} - SECOND IMPORT: Updated company info (no password export)")
                         continue
                     except Exception as _e:
                         # Fall through to try creating a new one if update fails
@@ -1669,14 +1804,19 @@ def import_ojt_view(request):
                 )
                 # Create OJT info
                 try:
-                    # Use status from Excel file (defaults to 'Ongoing' if not provided)
+                    # STATUS is ONLY set if start_date exists, otherwise set to 'Not Started'
+                    final_status = ojt_status if ('ojt_start_date' in locals() and ojt_start_date) else 'Not Started'
+                    
                     OJTInfo.objects.create(
                         ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         user=ojt_user,
-                        ojt_end_date=ojt_end_date,
-                        ojtstatus=ojt_status,  # Use status from Excel
+                        ojt_end_date=ojt_end_date if 'ojt_end_date' in locals() else None,
+                        ojtstatus=final_status,
                     )
-                    print(f"Row {index+2} - Created new user with status: '{ojt_status}'")
+                    if 'ojt_start_date' in locals() and ojt_start_date:
+                        print(f"Row {index+2} - Created new user with status: '{final_status}' (start date exists)")
+                    else:
+                        print(f"Row {index+2} - Created new user with status: '{final_status}' (no start date - first import)")
                 except Exception:
                     pass
                 # Create OJT Company Profile
@@ -1743,19 +1883,28 @@ def import_ojt_view(request):
         print(f"🔍 DEBUG: exported_passwords: {exported_passwords}")
         
         # Always return JSON response, but include password data
+        total_processed = created_count + skipped_count
+        second_import_count = total_processed - created_count - skipped_count
+        
         response_data = {
             'success': True,
             'message': f'OJT import completed. Created: {created_count}, Skipped: {skipped_count}',
             'created_count': created_count,
             'skipped_count': skipped_count,
+            'retaking_count': retaking_count,
             'errors': errors[:10],  # Limit errors to first 10
-            'passwords': exported_passwords,  # Include passwords in response
+            'passwords': exported_passwords,  # Include passwords in response (only for first import)
             'sections': detected_sections  # Include detected sections
         }
         
+        if retaking_count > 0:
+            response_data['message'] += f' 🔄 {retaking_count} student(s) retaking OJT (account reactivated, old data cleared).'
+        
         if exported_passwords:
             print(f"🔍 DEBUG: Created {len(exported_passwords)} passwords for export")
-            response_data['message'] += f' {len(exported_passwords)} passwords generated.'
+            response_data['message'] += f' ✅ {len(exported_passwords)} passwords generated (First Import).'
+        else:
+            response_data['message'] += ' ℹ️ No passwords generated (Second Import - company info updated).'
         
         if detected_sections:
             response_data['message'] += f' Detected sections: {", ".join(detected_sections)}'
@@ -1936,7 +2085,8 @@ def ojt_by_year_view(request):
                 )
 
         # Fallbacks to avoid empty UI and help coordinators verify recent imports
-        if not ojt_data.exists():
+        # BUT: Only apply fallback for coordinator requests, NOT for admin requests
+        if not ojt_data.exists() and coordinator_username:
             # 1) Prefer recently created/updated users (likely the ones just imported)
             try:
                 recent_since = timezone.now() - timedelta(days=1)
@@ -2437,11 +2587,15 @@ def coordinator_requests_list_view(request):
             for (y, course), c in by_year_course.items():
                 items.append({'batch_year': y, 'course': course, 'count': c})
 
-        # Fallback: for any batch lacking a Requested import but has Completed users
+        # Fallback: for any batch lacking a Requested import but has Completed users sent to admin
         # BUT only if there's no Approved OJTImport for that batch
         try:
             completed_years_courses = (
-                User.objects.filter(ojt_info__ojtstatus='Completed')
+                User.objects.filter(
+                    ojt_info__ojtstatus='Completed',
+                    ojt_info__is_sent_to_admin=True  # Only include students sent to admin
+                )
+                .exclude(account_type__user=True)  # Exclude alumni
                 .values('academic_info__year_graduated', 'academic_info__program')
                 .annotate()
             )
@@ -2457,13 +2611,18 @@ def coordinator_requests_list_view(request):
                 course = row.get('academic_info__program', '') or 'OJT'  # Default to 'OJT' if empty
                 print(f"DEBUG: Checking completed year {y}, course {course}")
                 if y and (y, course) not in existing_keys and y not in approved_batches:
+                    # Count only students who are completed AND sent to admin (not yet approved)
                     count = User.objects.filter(
                         academic_info__year_graduated=y, 
                         academic_info__program=course,
-                        ojt_info__ojtstatus='Completed'
+                        ojt_info__ojtstatus='Completed',
+                        ojt_info__is_sent_to_admin=True  # Only show students sent to admin
+                    ).exclude(
+                        account_type__user=True  # Exclude alumni (already approved)
                     ).count()
                     print(f"DEBUG: Adding fallback item for year {y}, course {course}, count {count}")
-                    items.append({'batch_year': y, 'course': course, 'count': count})
+                    if count > 0:  # Only add if there are actually students to show
+                        items.append({'batch_year': y, 'course': course, 'count': count})
                 else:
                     print(f"DEBUG: Skipping year {y}, course {course} - existing_keys: {(y, course) in existing_keys}, approved: {y in approved_batches}")
         except Exception as e:
@@ -3524,9 +3683,9 @@ def repost_detail_view(request, repost_id):
             'post_image': (repost.post.post_image.url if getattr(repost.post, 'post_image', None) else None),
             'post_images': [{
                 'image_id': img.image_id,
-                'image_url': build_image_url(img.image, request),
+                'image_url': (build_image_url(img.image, request) or (getattr(img.image, 'url', None) or '')),
                 'order': img.order
-            } for img in repost.post.post_images.all()] if hasattr(repost.post, 'post_images') else [],
+            } for img in repost.post.images.all()],
             'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
         }
     elif repost.forum:
@@ -3544,7 +3703,7 @@ def repost_detail_view(request, repost_id):
             'forum_type': repost.forum.type,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': build_image_url(img.image, request),
+                'image_url': (build_image_url(img.image, request) or (getattr(img.image, 'url', None) or '')),
                 'order': img.order
             } for img in repost.forum.images.all()],
             'created_at': repost.forum.created_at.isoformat() if hasattr(repost.forum, 'created_at') else None,
@@ -3564,7 +3723,7 @@ def repost_detail_view(request, repost_id):
             'status': repost.donation_request.status,
             'images': [{
                 'image_id': img.image_id,
-                'image_url': build_image_url(img.image, request),
+                'image_url': (build_image_url(img.image, request) or (getattr(img.image, 'url', None) or '')),
                 'order': img.order
             } for img in repost.donation_request.images.all()],
             'created_at': repost.donation_request.created_at.isoformat() if hasattr(repost.donation_request, 'created_at') else None,
@@ -3853,6 +4012,9 @@ def post_like_view(request, post_id):
                 }
             )
             if created:
+                # Award engagement points (+1 for like)
+                award_engagement_points(user, 'like')
+                
                 # Create notification for post owner (only if the liker is not the post owner)
                 if user.user_id != post.user.user_id:
                     like_notification = Notification.objects.create(
@@ -4011,6 +4173,9 @@ def post_comments_view(request, post_id):
                 comment_content=data.get('comment_content', ''),
                 date_created=timezone.now()
             )
+            
+            # Award engagement points (+3 for comment)
+            award_engagement_points(user, 'comment')
 
             # Create mention notifications
             create_mention_notifications(
@@ -4089,6 +4254,9 @@ def comment_replies_view(request, comment_id):
                 reply_content=data.get('reply_content', ''),
                 date_created=timezone.now()
             )
+            
+            # Award engagement points (+2 for reply)
+            award_engagement_points(user, 'reply')
             
             # Create mention notifications
             create_mention_notifications(
@@ -4384,6 +4552,9 @@ def post_repost_view(request, post_id):
             repost_date=timezone.now(),
             caption=caption,
         )
+        
+        # Award engagement points (+5 for share/repost)
+        award_engagement_points(user, 'share')
 
         # Create notification for post owner (only if the reposter is not the post owner)
         if user.user_id != post.user.user_id:
@@ -5198,6 +5369,9 @@ def forum_repost_view(request, forum_id):
             caption=caption
         )
         
+        # Award engagement points (+5 for share/repost)
+        award_engagement_points(request.user, 'share')
+        
         # Create notification for forum owner (only if the reposter is not the forum owner)
         if request.user.user_id != forum.user.user_id:
             Notification.objects.create(
@@ -5686,6 +5860,11 @@ def posts_view(request):
             except Exception as e:
                 print(f'Exception in image handling: {e}')
             # --- END IMAGE HANDLING ---
+            
+            # Award engagement points (+15 for post with photo)
+            has_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id).exists()
+            if has_images:
+                award_engagement_points(request.user, 'post_with_photo')
 
             # Get multiple images for response
             post_images = []
@@ -6635,7 +6814,7 @@ def donation_like_view(request, donation_id):
                         user=donation.user,
                         notif_type='like',
                         subject='Donation Liked',
-                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
                         notif_date=timezone.now()
                     )
                     # Broadcast donation like notification in real-time
@@ -6728,7 +6907,7 @@ def donation_comments_view(request, donation_id):
                     user=donation.user,
                     notif_type='comment',
                     subject='Donation Commented',
-                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
                     notif_date=timezone.now()
                 )
                 # Broadcast donation comment notification in real-time
@@ -6831,13 +7010,16 @@ def donation_repost_view(request, donation_id):
             repost_date=timezone.now()
         )
         
+        # Award engagement points (+5 for share/repost)
+        award_engagement_points(request.user, 'share')
+        
         # Create notification for donation owner (only if the reposter is not the donation owner)
         if request.user.user_id != donation.user.user_id:
             notification = Notification.objects.create(
                 user=donation.user,
                 notif_type='repost',
                 subject='Donation Reposted',
-                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
                 notif_date=timezone.now()
             )
             # Broadcast donation repost notification in real-time
@@ -7146,6 +7328,62 @@ def set_send_date_view(request):
             'success': False,
             'message': f'Error setting send date: {str(e)}'
         }, status=500)
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def check_all_sent_status_view(request):
+    """Check if all completed OJT students are already sent to admin for a specific batch"""
+    try:
+        coordinator = request.GET.get('coordinator', '')
+        batch_year = request.GET.get('batch_year', '')
+        
+        # Base query
+        base_query = User.objects.filter(
+            account_type__ojt=True,
+            ojt_info__ojtstatus='Completed'
+        ).exclude(acc_username='coordinator')
+        
+        # Filter by batch year if provided
+        if batch_year and batch_year != 'ALL':
+            try:
+                year = int(batch_year)
+                base_query = base_query.filter(academic_info__year_graduated=year)
+            except (ValueError, TypeError):
+                pass
+        
+        # Count completed students NOT sent to admin
+        completed_not_sent = base_query.filter(
+            ojt_info__is_sent_to_admin=False
+        ).count()
+        
+        # Count completed students already sent
+        completed_sent = base_query.filter(
+            ojt_info__is_sent_to_admin=True
+        ).count()
+        
+        all_sent = (completed_not_sent == 0 and completed_sent > 0)
+        
+        return JsonResponse({
+            'success': True,
+            'all_sent': all_sent,
+            'completed_not_sent': completed_not_sent,
+            'completed_sent': completed_sent,
+            'total_completed': completed_not_sent + completed_sent,
+            'batch_year': batch_year
+        })
+        
+    except Exception as e:
+        logger.error(f"check_all_sent_status_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': str(e)
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
     try:
@@ -7185,4 +7423,521 @@ def get_send_dates_view(request):
         return JsonResponse({
             'success': False,
             'message': f'Error fetching send dates: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def engagement_leaderboard_view(request):
+    """
+    Get engagement points leaderboard for Alumni only.
+    Returns top users ranked by total points.
+    """
+    try:
+        limit = int(request.GET.get('limit', 50))  # Default to top 50
+        user_type = request.GET.get('user_type', 'all')  # Keep for API compatibility but always filter Alumni only
+        
+        # Base query for users with points - ALUMNI ONLY
+        points_query = UserPoints.objects.select_related('user', 'user__profile', 'user__academic_info', 'user__account_type')
+        
+        # Only show Alumni users (removed OJT)
+        points_query = points_query.filter(user__account_type__user=True)
+        
+        # Order by total points descending and limit
+        top_users = points_query.order_by('-total_points')[:limit]
+        
+        leaderboard_data = []
+        for rank, user_points in enumerate(top_users, start=1):
+            user = user_points.user
+            profile = getattr(user, 'profile', None)
+            academic_info = getattr(user, 'academic_info', None)
+            account_type = getattr(user, 'account_type', None)
+            
+            # Determine user type
+            is_ojt = getattr(account_type, 'ojt', False)
+            is_alumni = getattr(account_type, 'user', False)
+            user_role = 'OJT' if is_ojt else 'Alumni' if is_alumni else 'Unknown'
+            
+            leaderboard_data.append({
+                'rank': rank,
+                'user_id': user.user_id,
+                'name': user.full_name,
+                'profile_pic': profile.profile_pic.url if profile and profile.profile_pic else None,
+                'user_type': user_role,
+                'year_graduated': academic_info.year_graduated if academic_info else None,
+                'program': academic_info.program if academic_info else None,
+                'total_points': user_points.total_points,
+                'points_breakdown': {
+                    'likes': {
+                        'points': user_points.points_from_likes,
+                        'count': user_points.like_count
+                    },
+                    'comments': {
+                        'points': user_points.points_from_comments,
+                        'count': user_points.comment_count
+                    },
+                    'shares': {
+                        'points': user_points.points_from_shares,
+                        'count': user_points.share_count
+                    },
+                    'replies': {
+                        'points': user_points.points_from_replies,
+                        'count': user_points.reply_count
+                    },
+                    'posts_with_photos': {
+                        'points': user_points.points_from_posts_with_photos,
+                        'count': user_points.post_with_photo_count
+                    },
+                    'tracker_form': {
+                        'points': user_points.points_from_tracker_form,
+                        'count': user_points.tracker_form_count
+                    }
+                },
+                'last_updated': user_points.updated_at.isoformat()
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'leaderboard': leaderboard_data,
+            'count': len(leaderboard_data),
+            'filter': {
+                'user_type': user_type,
+                'limit': limit
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"engagement_leaderboard_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error fetching leaderboard: {str(e)}'
+        }, status=500)
+
+
+# ============================
+# Reward Inventory API Endpoints
+# ============================
+
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def inventory_items_view(request):
+    """
+    GET: List all inventory items
+    POST: Create a new inventory item (admin only)
+    """
+    try:
+        # Check if user is admin
+        user = request.user
+        if not hasattr(user, 'account_type') or not user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        if request.method == 'GET':
+            # Fetch all inventory items
+            items = RewardInventoryItem.objects.all().order_by('-created_at')
+            
+            items_data = []
+            for item in items:
+                items_data.append({
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat(),
+                    'updated_at': item.updated_at.isoformat()
+                })
+            
+            return JsonResponse({
+                'success': True,
+                'items': items_data,
+                'count': len(items_data)
+            })
+        
+        elif request.method == 'POST':
+            # Create new inventory item
+            data = json.loads(request.body)
+            
+            name = data.get('name', '').strip()
+            item_type = data.get('type', '').strip()
+            quantity = data.get('quantity', 0)
+            value = data.get('value', '').strip()
+            
+            # Validation
+            if not name:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Item name is required'
+                }, status=400)
+            
+            if not item_type:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Item type is required'
+                }, status=400)
+            
+            if not isinstance(quantity, int) or quantity < 1:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Quantity must be at least 1'
+                }, status=400)
+            
+            if not value or value == '0':
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Value is required and cannot be 0'
+                }, status=400)
+            
+            # Create item
+            new_item = RewardInventoryItem.objects.create(
+                name=name,
+                type=item_type,
+                quantity=quantity,
+                value=value
+            )
+            
+            logger.info(f"Admin {user.full_name} created inventory item: {name}")
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Item added successfully',
+                'item': {
+                    'id': new_item.item_id,
+                    'name': new_item.name,
+                    'type': new_item.type,
+                    'quantity': new_item.quantity,
+                    'value': new_item.value,
+                    'created_at': new_item.created_at.isoformat(),
+                    'updated_at': new_item.updated_at.isoformat()
+                }
+            }, status=201)
+    
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"inventory_items_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def inventory_item_detail_view(request, item_id):
+    """
+    PUT: Update an inventory item
+    DELETE: Delete an inventory item
+    (admin only)
+    """
+    try:
+        # Check if user is admin
+        user = request.user
+        if not hasattr(user, 'account_type') or not user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Get item
+        try:
+            item = RewardInventoryItem.objects.get(item_id=item_id)
+        except RewardInventoryItem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Item not found'
+            }, status=404)
+        
+        if request.method == 'PUT':
+            # Update item
+            data = json.loads(request.body)
+            
+            name = data.get('name', '').strip()
+            item_type = data.get('type', '').strip()
+            quantity = data.get('quantity', 0)
+            value = data.get('value', '').strip()
+            
+            # Validation
+            if not name:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Item name is required'
+                }, status=400)
+            
+            if not item_type:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Item type is required'
+                }, status=400)
+            
+            if not isinstance(quantity, int) or quantity < 1:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Quantity must be at least 1'
+                }, status=400)
+            
+            if not value or value == '0':
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Value is required and cannot be 0'
+                }, status=400)
+            
+            # Update fields
+            item.name = name
+            item.type = item_type
+            item.quantity = quantity
+            item.value = value
+            item.save()
+            
+            logger.info(f"Admin {user.full_name} updated inventory item: {name}")
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Item updated successfully',
+                'item': {
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat(),
+                    'updated_at': item.updated_at.isoformat()
+                }
+            })
+        
+        elif request.method == 'DELETE':
+            # Delete item
+            item_name = item.name
+            item.delete()
+            
+            logger.info(f"Admin {user.full_name} deleted inventory item: {item_name}")
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Item deleted successfully'
+            })
+    
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"inventory_item_detail_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def give_reward_view(request):
+    """
+    Give a reward to a user (admin only)
+    Creates a notification for the recipient
+    """
+    try:
+        # Check if user is admin
+        admin_user = request.user
+        if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+        reward_id = data.get('reward_id')
+        
+        if not user_id or not reward_id:
+            return JsonResponse({
+                'success': False,
+                'message': 'User ID and Reward ID are required'
+            }, status=400)
+        
+        # Get recipient user
+        try:
+            recipient = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'User not found'
+            }, status=404)
+        
+        # Get reward item
+        try:
+            reward_item = RewardInventoryItem.objects.get(item_id=reward_id)
+        except RewardInventoryItem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward item not found'
+            }, status=404)
+        
+        # Check if item has stock
+        if reward_item.quantity <= 0:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward item is out of stock'
+            }, status=400)
+        
+        # Extract point value from reward item (e.g., "10 pts" -> 10)
+        import re
+        points_match = re.search(r'(\d+)', reward_item.value)
+        required_points = int(points_match.group(1)) if points_match else 0
+        
+        # Get or create user points
+        user_points, created = UserPoints.objects.get_or_create(user=recipient)
+        
+        # Check if user has enough points
+        if user_points.total_points < required_points:
+            return JsonResponse({
+                'success': False,
+                'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
+            }, status=400)
+        
+        # Deduct points from user
+        user_points.total_points -= required_points
+        user_points.save()
+        
+        # Decrease quantity
+        reward_item.quantity -= 1
+        reward_item.save()
+        
+        # Save to reward history
+        RewardHistory.objects.create(
+            user=recipient,
+            reward_name=reward_item.name,
+            reward_type=reward_item.type,
+            reward_value=reward_item.value,
+            points_deducted=required_points,
+            given_by=admin_user
+        )
+        
+        # Create notification for the user
+        notification = Notification.objects.create(
+            user=recipient,
+            notif_type='Reward',
+            subject=f'🎁 You received a reward!',
+            notifi_content=f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!',
+            notif_date=timezone.now(),
+            is_read=False
+        )
+        
+        # Broadcast notification in real-time
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting reward notification: {e}")
+        
+        logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Reward "{reward_item.name}" successfully given to {recipient.full_name}',
+            'notification_created': True,
+            'points_deducted': required_points,
+            'user_remaining_points': user_points.total_points
+        })
+    
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"give_reward_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def reward_history_view(request):
+    """
+    GET: List all reward history (admin only)
+    Returns list of rewards given to users with user details
+    """
+    try:
+        # Check if user is admin
+        user = request.user
+        if not hasattr(user, 'account_type') or not user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Get limit parameter (default to 50)
+        limit = int(request.GET.get('limit', 50))
+        
+        # Fetch reward history
+        history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
+        
+        history_data = []
+        for entry in history:
+            try:
+                # Get user profile pic
+                profile_pic = None
+                try:
+                    user_profile = UserProfile.objects.filter(user=entry.user).first()
+                    if user_profile and user_profile.profile_pic:
+                        profile_pic = user_profile.profile_pic
+                except Exception as e:
+                    logger.warning(f"Error getting profile pic for user {entry.user.user_id}: {e}")
+                
+                # Get user academic info
+                program = None
+                year_graduated = None
+                try:
+                    academic_info = AcademicInfo.objects.filter(user=entry.user).first()
+                    if academic_info:
+                        program = academic_info.program
+                        year_graduated = academic_info.year_graduated
+                except Exception as e:
+                    logger.warning(f"Error getting academic info for user {entry.user.user_id}: {e}")
+                
+                history_data.append({
+                    'id': entry.history_id,
+                    'user_id': entry.user.user_id,
+                    'user_name': entry.user.full_name,
+                    'profile_pic': profile_pic,
+                    'program': program,
+                    'year_graduated': year_graduated,
+                    'reward_name': entry.reward_name,
+                    'reward_type': entry.reward_type,
+                    'reward_value': entry.reward_value,
+                    'points_deducted': entry.points_deducted,
+                    'given_by': entry.given_by.full_name if entry.given_by else 'System',
+                    'given_at': entry.given_at.isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Error processing reward history entry {entry.history_id}: {e}")
+                continue
+        
+        return JsonResponse({
+            'success': True,
+            'history': history_data,
+            'count': len(history_data)
+        })
+    
+    except Exception as e:
+        import traceback
+        logger.error(f"reward_history_view error: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
         }, status=500)

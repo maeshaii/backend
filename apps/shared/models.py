@@ -575,6 +575,83 @@ class UserInitialPassword(models.Model):
         self.save(update_fields=['exported_at'])
 
 
+class UserPoints(models.Model):
+    """Tracks engagement points for users (alumni and OJT students).
+    
+    Points are awarded for:
+    - Like a post: +1 pt
+    - Comment on a post: +3 pts
+    - Share a post (repost): +5 pts
+    - Reply to a comment: +2 pts
+    - Post with photo: +15 pts
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='points')
+    total_points = models.IntegerField(default=0)
+    
+    # Breakdown by action type
+    points_from_likes = models.IntegerField(default=0)
+    points_from_comments = models.IntegerField(default=0)
+    points_from_shares = models.IntegerField(default=0)
+    points_from_replies = models.IntegerField(default=0)
+    points_from_posts_with_photos = models.IntegerField(default=0)
+    points_from_tracker_form = models.IntegerField(default=0)
+    
+    # Track counts for analytics
+    like_count = models.IntegerField(default=0)
+    comment_count = models.IntegerField(default=0)
+    share_count = models.IntegerField(default=0)
+    reply_count = models.IntegerField(default=0)
+    post_with_photo_count = models.IntegerField(default=0)
+    tracker_form_count = models.IntegerField(default=0)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'shared_userpoints'
+        indexes = [
+            models.Index(fields=['-total_points']),  # For leaderboard queries
+            models.Index(fields=['user']),
+        ]
+        verbose_name = 'User Points'
+        verbose_name_plural = 'User Points'
+    
+    def __str__(self):
+        return f"{self.user.full_name}: {self.total_points} pts"
+    
+    def add_points(self, action_type: str, points: int = 0) -> None:
+        """Add points for a specific action type"""
+        if action_type == 'like':
+            self.points_from_likes += points
+            self.like_count += 1
+        elif action_type == 'comment':
+            self.points_from_comments += points
+            self.comment_count += 1
+        elif action_type == 'share':
+            self.points_from_shares += points
+            self.share_count += 1
+        elif action_type == 'reply':
+            self.points_from_replies += points
+            self.reply_count += 1
+        elif action_type == 'post_with_photo':
+            self.points_from_posts_with_photos += points
+            self.post_with_photo_count += 1
+        elif action_type == 'tracker_form':
+            self.points_from_tracker_form += points
+            self.tracker_form_count += 1
+        
+        # Update total points
+        self.total_points = (
+            self.points_from_likes +
+            self.points_from_comments +
+            self.points_from_shares +
+            self.points_from_replies +
+            self.points_from_posts_with_photos +
+            self.points_from_tracker_form
+        )
+        self.save()
+
+
 # Refactored User Model Components
 class UserProfile(models.Model):
     """Personal and contact information.
@@ -1471,3 +1548,50 @@ class TrackerFileUpload(models.Model):
 # Forum-specific relations (now use shared tables)
 # ==========================
 # ForumRepost has been merged into Repost table
+
+class RewardInventoryItem(models.Model):
+    """Reward inventory items that can be redeemed with engagement points"""
+    item_id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=255)
+    type = models.CharField(max_length=100)  # Gift Card, Certificate, Voucher, Merchandise, etc.
+    quantity = models.IntegerField(default=0)
+    value = models.CharField(max_length=100)  # e.g., "$25", "100 pts"
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'shared_rewardinventoryitem'
+        verbose_name = 'Reward Inventory Item'
+        verbose_name_plural = 'Reward Inventory Items'
+        indexes = [
+            models.Index(fields=['type']),
+            models.Index(fields=['-created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.name} ({self.type}) - Stock: {self.quantity}"
+
+
+class RewardHistory(models.Model):
+    """Track rewards given to users"""
+    history_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='rewards_received')
+    reward_name = models.CharField(max_length=255)
+    reward_type = models.CharField(max_length=100)
+    reward_value = models.CharField(max_length=100)
+    points_deducted = models.IntegerField(default=0)
+    given_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, related_name='rewards_given')
+    given_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'shared_rewardhistory'
+        verbose_name = 'Reward History'
+        verbose_name_plural = 'Reward Histories'
+        ordering = ['-given_at']
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['-given_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.reward_name} given to {self.user.full_name} on {self.given_at.strftime('%Y-%m-%d')}"

@@ -1,1 +1,1 @@
-# Management package for shared app 
+# Management commands package
