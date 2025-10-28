@@ -134,6 +134,11 @@ class Conversation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     is_message_request = models.BooleanField(default=False, help_text="True if this is a message request from non-mutual follow")
+    # Track who initiated a message request so that only the recipient's reply can auto-accept
+    request_initiator = models.ForeignKey(
+        'User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='initiated_message_requests', help_text='User who initiated the message request'
+    )
     
     class Meta:
         ordering = ['-updated_at']

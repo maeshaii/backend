@@ -507,6 +507,22 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			self.channel_name
 		)
 		
+		# Register this connection for global presence/online detection
+		try:
+			from apps.messaging.connection_manager import connection_manager
+			# Use conversation_id = 0 to indicate a non-conversation global connection
+			connection_manager.add_connection(
+				user_id=user_id,
+				conversation_id=0,
+				channel_name=self.channel_name,
+				# Only include JSON-serializable metadata
+				connection_metadata={
+					'ip_address': self.scope.get('client', [None, None])[0],
+				}
+			)
+		except Exception as e:
+			logger.warning(f"Failed to register notification WS in connection manager: {e}")
+
 		# Send connection confirmation
 		await self.send(text_data=json.dumps({
 			'type': 'connection_established',
@@ -525,6 +541,13 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			f"notifications_{user_id}",
 			self.channel_name
 		)
+
+		# Unregister from global presence
+		try:
+			from apps.messaging.connection_manager import connection_manager
+			connection_manager.remove_connection(self.channel_name)
+		except Exception as e:
+			logger.warning(f"Failed to unregister notification WS: {e}")
 		
 		logger.info(f"Notification WebSocket disconnected: user {user_id}")
 

@@ -279,6 +279,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_participant = serializers.SerializerMethodField()
+    is_message_request = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = Conversation
@@ -415,7 +416,8 @@ class CreateConversationSerializer(serializers.ModelSerializer):
             
             # Create conversation with request status
             conversation = Conversation.objects.create(
-                is_message_request=not is_mutual_follow
+                is_message_request=not is_mutual_follow,
+                request_initiator=current_user if not is_mutual_follow else None,
             )
             conversation.participants.set([current_user, other_user])
             

@@ -185,11 +185,20 @@ class MessageListView(generics.ListCreateAPIView):
             # Determine receiver for 1:1 conversations to satisfy legacy non-null column
             receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
             
-            # Convert message request to regular conversation when someone replies
+            # Convert message request to regular conversation only if the non-initiator replies
             if conversation.is_message_request:
-                conversation.is_message_request = False
-                conversation.save()
-                logger.info(f"Converted message request {conversation_id} to regular conversation")
+                try:
+                    initiator_id = getattr(conversation.request_initiator, 'user_id', None)
+                    if not initiator_id or initiator_id != request.user.user_id:
+                        conversation.is_message_request = False
+                        conversation.request_initiator = None
+                        conversation.save(update_fields=['is_message_request', 'request_initiator', 'updated_at'])
+                        logger.info(f"Converted message request {conversation_id} to regular conversation by non-initiator reply")
+                except Exception:
+                    # Fallback: keep previous behavior if field missing
+                    conversation.is_message_request = False
+                    conversation.save(update_fields=['is_message_request', 'updated_at'])
+                    logger.info(f"Converted message request {conversation_id} to regular conversation (fallback)")
             
             # Ensure legacy DB columns are populated (e.g., date_send)
             message = serializer.save(
