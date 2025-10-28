@@ -147,4 +147,13 @@ urlpatterns = [
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
     # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
     
+    # Engagement Points & Leaderboard
+    path('engagement/leaderboard/', views.engagement_leaderboard_view, name='engagement_leaderboard'),
+    
+    # Reward Inventory Management
+    path('inventory/', views.inventory_items_view, name='inventory_items'),
+    path('inventory/<int:item_id>/', views.inventory_item_detail_view, name='inventory_item_detail'),
+    path('rewards/give/', views.give_reward_view, name='give_reward'),
+    path('rewards/history/', views.reward_history_view, name='reward_history'),
+    
 ]

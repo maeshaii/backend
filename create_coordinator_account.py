@@ -31,13 +31,16 @@ def create_coordinator_account():
         else:
             print(f"✅ Using existing coordinator account type")
         
-        # Delete existing coordinator user if present
-        User.objects.filter(acc_username='coordinator').delete()
-        
         # Check if user already exists
         username = 'coordinator'
-        if User.objects.filter(acc_username=username).exists():
-            print(f"❌ User with username '{username}' already exists!")
+        existing_user = User.objects.filter(acc_username=username).first()
+        
+        if existing_user:
+            print(f"ℹ️ Coordinator account already exists!")
+            print(f"   Username: {username}")
+            print(f"   Password: coordiwherenayou2025")
+            print(f"   Status: {existing_user.user_status}")
+            print(f"\n✅ You can login with these credentials.")
             return
         
         # Create the coordinator user with requested password
