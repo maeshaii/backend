@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0097_auto_20251018_2034'),
+        ('shared', '0103_merge_20251021_2330'),
     ]
 
     operations = [

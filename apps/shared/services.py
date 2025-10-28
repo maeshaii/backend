@@ -66,27 +66,52 @@ class UserService:
     @staticmethod
     def update_employment_status(user, employment_data):
         """Update user's employment status"""
-        with transaction.atomic():
-            # Get or create employment record
-            employment, created = EmploymentHistory.objects.get_or_create(user=user)
+        try:
+            print(f"UserService.update_employment_status called with user: {user.user_id}")
+            print(f"Employment data: {employment_data}")
             
-            # Update employment fields
-            for field, value in employment_data.items():
-                setattr(employment, field, value)
-            employment.save()
-            
-            # Update job alignment
-            employment.update_job_alignment()
-            
-            # Update tracker data
-            tracker, created = TrackerData.objects.get_or_create(user=user)
-            tracker.q_company_name = employment.company_name_current
-            tracker.q_current_position = employment.position_current
-            tracker.q_job_sector = employment.sector_current
-            tracker.q_employment_status = 'employed' if employment.company_name_current else 'unemployed'
-            tracker.save()
-            
-            return employment
+            with transaction.atomic():
+                # Get or create employment record
+                employment, created = EmploymentHistory.objects.get_or_create(user=user)
+                print(f"Employment record: {employment}, created: {created}")
+                
+                # Update employment fields
+                for field, value in employment_data.items():
+                    print(f"Setting {field} = {value} (type: {type(value)})")
+                    # Handle date fields specially
+                    if field == 'date_started' and value and isinstance(value, str):
+                        try:
+                            from datetime import datetime
+                            value = datetime.strptime(value, '%Y-%m-%d').date()
+                            print(f"Converted date: {value}")
+                        except (ValueError, TypeError) as e:
+                            print(f"Date conversion error: {e}")
+                            value = None
+                    setattr(employment, field, value)
+                
+                print("Saving employment record...")
+                employment.save()
+                
+                print("Updating job alignment...")
+                # Update job alignment
+                employment.update_job_alignment()
+                
+                print("Updating tracker data...")
+                # Update tracker data
+                tracker, created = TrackerData.objects.get_or_create(user=user)
+                tracker.q_company_name = employment.company_name_current
+                tracker.q_current_position = employment.position_current
+                tracker.q_job_sector = employment.sector_current
+                tracker.q_employment_status = 'employed' if employment.company_name_current else 'unemployed'
+                tracker.save()
+                
+                print("Employment update completed successfully")
+                return employment
+        except Exception as e:
+            print(f"Error in UserService.update_employment_status: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            raise
     
     @staticmethod
     def get_alumni_statistics():

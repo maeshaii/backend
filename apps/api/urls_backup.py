@@ -33,7 +33,6 @@ urlpatterns = [
     # OJT-specific routes for coordinators
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
-    path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
@@ -47,7 +46,6 @@ urlpatterns = [
     path('ojt/coordinator-sections/', get_coordinator_sections_view, name='get_coordinator_sections'),
     path('ojt/available-years/', views.available_years_view, name='available_years'),
     path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
-    path('ojt/get-send-dates/', views.get_send_dates_view, name='get_send_dates'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
     path('users_list_view/', views.users_list_view, name='users_list_view'),
@@ -80,8 +78,6 @@ urlpatterns = [
     path('alumni/<int:user_id>/following/', views.alumni_following_view, name='alumni_following'),
     path('follow/<int:user_id>/', views.follow_user_view, name='follow_user'),
     path('follow/<int:user_id>/status/', views.check_follow_status_view, name='check_follow_status'),
-    path('follow/<int:user_id>/mutual/', views.mutual_follows_view, name='mutual_follows'),
-    path('online-users/', views.online_users_view, name='online_users'),
     path('tracker/accepting/<int:tracker_form_id>/', tracker_accepting_responses_view, name='tracker_accepting_responses'),
     path('tracker/update-accepting/<int:tracker_form_id>/', update_tracker_accepting_responses_view, name='update_tracker_accepting_responses'),
     path('tracker/active-form/', get_active_tracker_form, name='get_active_tracker_form'),
