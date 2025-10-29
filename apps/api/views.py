@@ -302,6 +302,7 @@ def login_view(request):
             'message': 'Login successful',
             'user': {
                 'id': user.user_id,
+                'username': user.acc_username,  # Add username for coordinator identification
                 'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'profile_bio': getattr(profile, 'profile_bio', None) if profile else None,
@@ -375,10 +376,11 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
             'access': str(refresh.access_token),
             'user': {
                 'id': user.user_id,
+                'username': user.acc_username,  # Add username for coordinator identification
                 'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
                 'f_name': user.f_name,
                 'l_name': user.l_name,
-                'acc_username': user.acc_username,
+                'acc_username': user.acc_username,  # Keep for backwards compatibility
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'profile_bio': getattr(profile, 'profile_bio', None) if profile else None,
                 'profile_pic': build_profile_pic_url(user),
@@ -1289,8 +1291,10 @@ def import_ojt_view(request):
         if not file.name.endswith(('.xlsx', '.xls')):
             return JsonResponse({'success': False, 'message': 'Please upload an Excel file (.xlsx or .xls)'}, status=400)
         
-        if not batch_year or not coordinator_username:
-            return JsonResponse({'success': False, 'message': f'Missing required fields - batch_year: {bool(batch_year)}, coordinator_username: {bool(coordinator_username)}'}, status=400)
+        if not coordinator_username:
+            return JsonResponse({'success': False, 'message': 'Missing coordinator username'}, status=400)
+        
+        # batch_year is now optional - will be auto-detected for second imports
 
         # Read Excel file
         try:
@@ -1299,46 +1303,121 @@ def import_ojt_view(request):
         except Exception as e:
             return JsonResponse({'success': False, 'message': f'Error reading Excel file: {str(e)}'}, status=400)
 
+        # Auto-detect batch year: from existing user, Excel column, or current year + 1
+        from datetime import datetime
+        is_second_import = False
+        auto_detected_year = None
+        
+        # Try 1: Check if users already exist (second import - highest priority)
+        if df.shape[0] > 0:
+            first_ctu_id = str(df.iloc[0].get('CTU_ID', '')).strip()
+            if first_ctu_id:
+                existing_user = User.objects.filter(acc_username=first_ctu_id).first()
+                if existing_user and hasattr(existing_user, 'academic_info') and existing_user.academic_info:
+                    is_second_import = True
+                    auto_detected_year = existing_user.academic_info.year_graduated
+                    print(f'🔍 SECOND IMPORT DETECTED! User {first_ctu_id} exists with year {auto_detected_year}')
+        
+        # Try 2: Check if Excel has Batch_Year column (optional override)
+        if not auto_detected_year and 'Batch_Year' in df.columns and df.shape[0] > 0:
+            excel_year = df.iloc[0].get('Batch_Year')
+            if pd.notna(excel_year):
+                try:
+                    auto_detected_year = int(excel_year)
+                    print(f'✓ Batch year detected from Excel Batch_Year column: {auto_detected_year}')
+                except:
+                    pass
+        
+        # Try 3: Use current year + 1 (default for new students)
+        # Logic: If importing in 2025, students graduate in 2026
+        if not auto_detected_year:
+            current_year = datetime.now().year
+            auto_detected_year = current_year + 1
+            print(f'✓ Auto-calculated batch year: Current year ({current_year}) + 1 = {auto_detected_year}')
+        
+        # Set batch_year
+        if not batch_year:
+            batch_year = str(auto_detected_year)
+            print(f'✓ Using batch year: {batch_year}')
+        
         # Auto-detect sections from Excel file
         detected_sections = []
         if 'Section' in df.columns:
             detected_sections = df['Section'].dropna().astype(str).str.strip().unique().tolist()
             detected_sections = [s for s in detected_sections if s and s != '']
-            print(f'OJT IMPORT - DETECTED SECTIONS: {detected_sections}')
+            print(f'OJT IMPORT - DETECTED SECTIONS FROM EXCEL: {detected_sections}')
         else:
-            # If no Section column, create a default section based on batch year
-            detected_sections = [f"{batch_year}-A"]
-            print(f'OJT IMPORT - NO SECTION COLUMN, USING DEFAULT: {detected_sections}')
+            # If no Section column, try to detect from existing students (for second import)
+            print(f'OJT IMPORT - NO SECTION COLUMN, detecting from existing students...')
+            ctu_ids = df['CTU_ID'].dropna().astype(str).str.strip().tolist()
+            existing_sections = User.objects.filter(
+                acc_username__in=ctu_ids,
+                account_type__ojt=True
+            ).select_related('academic_info').values_list('academic_info__section', flat=True).distinct()
+            
+            existing_sections = [s for s in existing_sections if s]
+            
+            if existing_sections:
+                detected_sections = list(existing_sections)
+                print(f'OJT IMPORT - DETECTED SECTIONS FROM EXISTING STUDENTS: {detected_sections}')
+            else:
+                # Brand new import - use "4-A" as default (4th year, section A)
+                detected_sections = ["4-A"]
+                print(f'OJT IMPORT - NEW IMPORT, USING DEFAULT SECTION: 4-A (4th year, section A)')
 
+        # DEBUG: Show exact column names from Excel BEFORE normalization
+        print(f"📋 EXCEL COLUMNS (before normalization): {list(df.columns)}")
+        
         # Normalize flexible header names for common variants
         try:
-            df.rename(columns={
-                'Company Name': 'Company',
-                'company name': 'Company',
-                'company': 'Company',
-                'company_name': 'Company',
-                'OJT_Start_Date': 'Ojt_Start_Date',
-                'OJT_End_Date': 'Ojt_End_Date',
-                'ojt_start_date': 'Ojt_Start_Date',
-                'ojt_end_date': 'Ojt_End_Date',
-                'Start_Date': 'Ojt_Start_Date',
-                'End_Date': 'Ojt_End_Date',
-                'Civil Status': 'Civil_Status',
-                'Social Media': 'Social_Media',
-                'Contact_Person_Name': 'Contact_Person',
-                'Contact_Person_Position': 'Position',
-                'status': 'Status',  # Normalize status column
-                'OJT_Status': 'Status',
-                'ojt_status': 'Status',
-            }, inplace=True)
-        except Exception:
+            # Create a case-insensitive mapping
+            rename_map = {}
+            for col in df.columns:
+                col_lower = str(col).lower().strip()
+                
+                # Company name variants
+                if col_lower in ['company name', 'company_name', 'companyname']:
+                    rename_map[col] = 'Company'
+                # Contact person name variants
+                elif col_lower in ['contact_person_name', 'contact person name', 'contactpersonname', 'contact person']:
+                    rename_map[col] = 'Contact_Person'
+                # Contact person position variants
+                elif col_lower in ['contact_person_position', 'contact person position', 'contactpersonposition', 'position']:
+                    rename_map[col] = 'Position'
+                # Status variants
+                elif col_lower in ['ojt_status', 'ojtstatus', 'ojt status']:
+                    rename_map[col] = 'Status'
+                # Date variants
+                elif col_lower in ['ojt_start_date', 'start_date', 'start date']:
+                    rename_map[col] = 'Ojt_Start_Date'
+                elif col_lower in ['ojt_end_date', 'end_date', 'end date']:
+                    rename_map[col] = 'Ojt_End_Date'
+                # Civil Status
+                elif col_lower == 'civil status':
+                    rename_map[col] = 'Civil_Status'
+                # Social Media
+                elif col_lower == 'social media':
+                    rename_map[col] = 'Social_Media'
+                # Batch Year
+                elif col_lower in ['batch year', 'batch_year', 'year']:
+                    rename_map[col] = 'Batch_Year'
+            
+            if rename_map:
+                print(f"🔄 Renaming columns: {rename_map}")
+                df.rename(columns=rename_map, inplace=True)
+        except Exception as e:
+            print(f"⚠️ Column rename failed: {e}")
             pass
+        
+        # DEBUG: Show column names AFTER normalization
+        print(f"📋 EXCEL COLUMNS (after normalization): {list(df.columns)}")
 
         # TWO-STEP IMPORT SUPPORT:
-        # FIRST IMPORT: Only personal info required (no company, no start date)
-        # SECOND IMPORT: Company info provided, start date auto-set to today, end date from send_date
-        required_columns = ['CTU_ID', 'First_Name', 'Last_Name', 'Gender']
-        optional_columns = ['Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil_Status', 'Social_Media',
+        # FIRST IMPORT: CTU_ID + Personal info (creates users)
+        # SECOND IMPORT: CTU_ID only (updates company info for existing users)
+        # CTU_ID is the ONLY truly required column - system auto-detects if user exists
+        required_columns = ['CTU_ID']
+        optional_columns = ['First_Name', 'Last_Name', 'Gender', 'Password', 'Birthdate', 'Phone_Number', 'Address', 'Civil_Status', 'Social_Media',
                            'Company Name', 'Company', 'Company_Address', 'Company_Email', 'Company_Contact',
                            'Contact_Person', 'Position', 'Start_Date', 'End_Date', 'Status']
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -1347,7 +1426,7 @@ def import_ojt_view(request):
                 'success': False,
                 'message': f'Missing required OJT columns: {", ".join(missing_columns)}'
             }, status=400)
-        print(f"✅ Two-step import enabled: Personal info required, company info optional")
+        print(f"✅ Smart import enabled: CTU_ID required, other fields auto-validated per row")
 
         # Create import record
         # Normalize batch_year to a single 4-digit year if possible
@@ -1372,6 +1451,7 @@ def import_ojt_view(request):
 
         created_count = 0
         skipped_count = 0
+        updating_count = 0  # Count students getting updated (2nd import)
         retaking_count = 0  # Count students retaking OJT in a different batch
         errors = []
         exported_passwords = []  # List to collect (username, password) for export
@@ -1393,10 +1473,24 @@ def import_ojt_view(request):
             try:
                 # --- Field Extraction and Cleaning ---
                 ctu_id = str(row.get('CTU_ID', '')).strip()
+                
+                print(f"\n{'='*80}")
+                print(f"🔍 PROCESSING ROW {index+2} - CTU_ID: {ctu_id}")
+                print(f"{'='*80}")
+                
                 first_name = str(row.get('First_Name', '')).strip()
                 middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
                 last_name = str(row.get('Last_Name', '')).strip()
                 gender_raw = str(row.get('Gender', '')).strip()
+                
+                # DEBUG: Show all available columns and company data
+                print(f"📋 Available columns in this row: {list(row.keys())}")
+                print(f"📦 Company data from Excel:")
+                print(f"   'Company': '{row.get('Company')}' (exists: {'Company' in row})")
+                print(f"   'Company_Address': '{row.get('Company_Address')}' (exists: {'Company_Address' in row})")
+                print(f"   'Company_Email': '{row.get('Company_Email')}' (exists: {'Company_Email' in row})")
+                print(f"   'Company_Contact': '{row.get('Company_Contact')}' (exists: {'Company_Contact' in row})")
+                print(f"👤 Personal data: First='{first_name}', Last='{last_name}', Gender='{gender_raw}'")
                 # Normalize gender values
                 if gender_raw.upper() in ['MALE', 'M']:
                     gender = 'M'
@@ -1478,28 +1572,47 @@ def import_ojt_view(request):
                         ojt_end_date = None
 
                 # --- Validation Check ---
-                required_data = {
-                    "CTU_ID": ctu_id,
-                    "First_Name": first_name,
-                    "Last_Name": last_name,
-                    "Gender": gender
-                }
-                missing_fields = [key for key, value in required_data.items() if not value]
-
-                if missing_fields:
-                    error_msg = f"Row {index + 2}: Missing or invalid required fields - {', '.join(missing_fields)}"
+                # CTU_ID is always required
+                if not ctu_id:
+                    error_msg = f"Row {index + 2}: Missing CTU_ID (required)"
                     print(f"SKIPPING: {error_msg}")
                     errors.append(error_msg)
                     skipped_count += 1
                     continue
+                
+                # Check if user exists - if yes, other fields are optional (update mode)
+                # If no, First_Name, Last_Name, Gender are required (create mode)
+                existing_user_check = User.objects.filter(acc_username=ctu_id).first()
+                
+                print(f"Row {index+2} - CTU_ID: {ctu_id}, User exists: {existing_user_check is not None}")
+                
+                if not existing_user_check:
+                    # NEW USER - require all fields
+                    print(f"Row {index+2} - NEW USER MODE - validating required fields...")
+                    required_data = {
+                        "First_Name": first_name,
+                        "Last_Name": last_name,
+                        "Gender": gender
+                    }
+                    missing_fields = [key for key, value in required_data.items() if not value]
 
-                # --- Gender Validation ---
-                if gender not in ['M', 'F']:
-                    error_msg = f"Row {index + 2}: Gender must be 'M'/'Male' or 'F'/'Female', but was '{gender}'"
-                    print(f"SKIPPING: {error_msg}")
-                    errors.append(error_msg)
-                    skipped_count += 1
-                    continue
+                    if missing_fields:
+                        error_msg = f"Row {index + 2}: New user requires - {', '.join(missing_fields)}"
+                        print(f"SKIPPING: {error_msg}")
+                        errors.append(error_msg)
+                        skipped_count += 1
+                        continue
+
+                    # --- Gender Validation for new users ---
+                    if gender not in ['M', 'F']:
+                        error_msg = f"Row {index + 2}: Gender must be 'M'/'Male' or 'F'/'Female', but was '{gender}' (from raw: '{gender_raw}')"
+                        print(f"SKIPPING: {error_msg}")
+                        errors.append(error_msg)
+                        skipped_count += 1
+                        continue
+                else:
+                    # EXISTING USER - fields are optional, use existing data if not provided
+                    print(f"Row {index+2} - UPDATE MODE ACTIVATED - User {ctu_id} exists, proceeding with company data update...")
 
                 # If a user with this CTU_ID already exists, update academic year/course
                 existing_user = User.objects.filter(acc_username=ctu_id).first()
@@ -1552,49 +1665,55 @@ def import_ojt_view(request):
                             retaking_count += 1
                             print(f"Row {index+2} - Old OJT data deleted. Student will start fresh in batch {new_batch_year}")
                         
-                        # Update section if provided
-                        if user_section:
+                        # Update section ONLY if explicitly provided in Excel (not auto-generated)
+                        # For second imports without Section column, keep existing section
+                        excel_section_provided = 'Section' in row and pd.notna(row.get('Section')) and str(row.get('Section')).strip()
+                        if excel_section_provided:
                             academic.section = user_section
                             academic.save()
+                            print(f"Row {index+2} - Updated section to: {user_section}")
+                        else:
+                            print(f"Row {index+2} - No Section in Excel, keeping existing section: {academic.section}")
                         
                         ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
                         employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
                         
-                        # Check if user has existing company info (to determine if this is 2nd import)
-                        ojt_company_profile = OJTCompanyProfile.objects.filter(user=existing_user).first()
-                        has_existing_company = ojt_company_profile and ojt_company_profile.company_name
+                        # Check if employment already has a company (for detecting first vs second import)
+                        has_existing_company = employment.company_name_current and str(employment.company_name_current).strip()
+                        
+                        # Check if user has initial password record (indicates account was already created)
+                        from apps.shared.models import UserInitialPassword
+                        has_initial_password = UserInitialPassword.objects.filter(user=existing_user).exists()
                         
                         # TWO-STEP IMPORT: Password generation rules
-                        # FIRST IMPORT (no company): Generate password
-                        # SECOND IMPORT (has company): DON'T change password
-                        if not has_existing_company:
-                            # This is FIRST IMPORT - generate password
-                            existing_user.set_password(password_raw)
-                            existing_user.save()
-                            print(f"Row {index+2} - FIRST IMPORT: Generated password for user {ctu_id}")
-                            
-                            # Add to exported passwords for download
-                            exported_passwords.append({
-                                'CTU_ID': ctu_id,
-                                'First_Name': first_name,
-                                'Last_Name': last_name,
-                                'Password': password_raw
-                            })
-                            print(f"Row {index+2} - Added to password export list")
+                        # User ALREADY EXISTS - NEVER regenerate password or add to export
+                        # Only update their information
+                        if has_initial_password:
+                            print(f"Row {index+2} - UPDATE MODE: User exists, password NOT changed (keeping existing password)")
                         else:
-                            # This is SECOND IMPORT - DON'T change password
-                            print(f"Row {index+2} - SECOND IMPORT: Password NOT changed (keeping existing password)")
+                            # Edge case: User exists but has no initial password record (shouldn't happen normally)
+                            print(f"Row {index+2} - WARNING: User exists without initial password record, not regenerating password")
 
-                        # Update names to match latest import where present
+                        # Update names to match latest import where present (only if provided in Excel)
+                        updated = False
                         if first_name:
                             existing_user.f_name = first_name
+                            updated = True
                         if middle_name:
                             existing_user.m_name = middle_name
+                            updated = True
                         if last_name:
                             existing_user.l_name = last_name
-                        if gender:
+                            updated = True
+                        if gender and gender in ['M', 'F']:
                             existing_user.gender = gender
-                        existing_user.save()
+                            updated = True
+                        
+                        if updated:
+                            existing_user.save()
+                            print(f"Row {index+2} - Updated user personal info")
+                        else:
+                            print(f"Row {index+2} - No personal info changes, keeping existing data")
 
                         # Update academic info from batch and course
                         # Save normalized batch year
@@ -1640,26 +1759,26 @@ def import_ojt_view(request):
                                 from apps.shared.models import SendDate
                                 send_date_obj = SendDate.objects.filter(
                                     batch_year=normalized_year,
-                                    coordinator_username=coordinator_username
+                                    coordinator=coordinator_username
                                 ).first()
                                 
                                 if send_date_obj and send_date_obj.send_date:
                                     ojt_end_date = send_date_obj.send_date
                                     print(f"Row {index+2} - Auto-calculated end_date from SendDate: {ojt_end_date}")
                         
-                        # Update company detail fields
+                        # Update company detail fields (after column normalization)
                         company_address = row.get('Company_Address')
                         company_email = row.get('Company_Email')
                         company_contact = row.get('Company_Contact')
-                        contact_person = row.get('Contact_Person')
-                        position = row.get('Position')
+                        contact_person = row.get('Contact_Person')  # Normalized from Contact_Person_Name
+                        position = row.get('Position')  # Normalized from Contact_Person_Position
                         
-                        print(f"Row {index+2} - Company details from Excel:")
-                        print(f"  Company_Address: '{company_address}' (pd.notna: {pd.notna(company_address)})")
-                        print(f"  Company_Email: '{company_email}' (pd.notna: {pd.notna(company_email)})")
-                        print(f"  Company_Contact: '{company_contact}' (pd.notna: {pd.notna(company_contact)})")
-                        print(f"  Contact_Person: '{contact_person}' (pd.notna: {pd.notna(contact_person)})")
-                        print(f"  Position: '{position}' (pd.notna: {pd.notna(position)})")
+                        print(f"Row {index+2} - 📦 Reading company details from normalized columns:")
+                        print(f"  Company_Address: '{company_address}' (notna: {pd.notna(company_address)}, type: {type(company_address)})")
+                        print(f"  Company_Email: '{company_email}' (notna: {pd.notna(company_email)}, type: {type(company_email)})")
+                        print(f"  Company_Contact: '{company_contact}' (notna: {pd.notna(company_contact)}, type: {type(company_contact)})")
+                        print(f"  Contact_Person: '{contact_person}' (notna: {pd.notna(contact_person)}, type: {type(contact_person)})")
+                        print(f"  Position: '{position}' (notna: {pd.notna(position)}, type: {type(position)})")
                         
                         if pd.notna(company_address) and str(company_address).strip():
                             employment.company_address = str(company_address).strip()
@@ -1743,16 +1862,19 @@ def import_ojt_view(request):
                             print(f"Row {index+2} - Failed to update OJT Company Profile: {e}")
                             pass
 
-                        # Count as created ONLY if password was generated (first import)
-                        if not has_existing_company:
-                            created_count += 1
-                            print(f"Row {index+2} - FIRST IMPORT: Counted for password export")
-                        else:
-                            print(f"Row {index+2} - SECOND IMPORT: Updated company info (no password export)")
+                        # User already existed - don't count as "created", just updated
+                        updating_count += 1
+                        print(f"Row {index+2} - ✅ UPDATE COMPLETE: User information updated (updating_count: {updating_count})")
                         continue
                     except Exception as _e:
                         # Fall through to try creating a new one if update fails
-                        print(f"Row {index+2} - failed to update existing user {ctu_id}: {_e}")
+                        import traceback
+                        print(f"Row {index+2} - ❌ EXCEPTION during update for {ctu_id}: {_e}")
+                        print(f"Row {index+2} - Traceback: {traceback.format_exc()}")
+                        print(f"Row {index+2} - Will skip this row due to error")
+                        errors.append(f"Row {index+2}: Update failed for {ctu_id} - {str(_e)}")
+                        skipped_count += 1
+                        continue
 
                 # --- Create OJT user securely ---
                 ojt_user = User.objects.create(
@@ -1906,8 +2028,9 @@ def import_ojt_view(request):
         
         response_data = {
             'success': True,
-            'message': f'OJT import completed. Created: {created_count}, Skipped: {skipped_count}',
+            'message': f'OJT import completed. Created: {created_count}, Updated: {updating_count}, Skipped: {skipped_count}',
             'created_count': created_count,
+            'updating_count': updating_count,
             'skipped_count': skipped_count,
             'retaking_count': retaking_count,
             'errors': errors[:10],  # Limit errors to first 10
@@ -1951,8 +2074,8 @@ def ojt_statistics_view(request):
             if coordinator_username:
                 import_filter = import_filter.filter(coordinator=coordinator_username)
             
-            print(f"🔍 DEBUG: Filtering by coordinator: {coordinator_username}")
-            print(f"🔍 DEBUG: Found {import_filter.count()} import records")
+            print(f"DEBUG: Filtering by coordinator: {coordinator_username}")
+            print(f"DEBUG: Found {import_filter.count()} import records")
             
             # Get unique year+section combinations (don't count duplicates)
             unique_year_sections = {}
@@ -1964,7 +2087,7 @@ def ojt_statistics_view(request):
                     key = (y, section)
                     unique_year_sections[key] = True
             
-            print(f"🔍 DEBUG: Unique year+section combinations from imports: {unique_year_sections.keys()}")
+            print(f"DEBUG: Unique year+section combinations from imports: {unique_year_sections.keys()}")
             
             # ALSO get year+section combinations from actual users in database
             # This ensures we show cards even if import records were deleted
@@ -1990,7 +2113,7 @@ def ojt_statistics_view(request):
                     if year:
                         unique_year_sections[(year, section)] = True
             
-            print(f"🔍 DEBUG: Unique year+section combinations (with users): {unique_year_sections.keys()}")
+            print(f"DEBUG: Unique year+section combinations (with users): {unique_year_sections.keys()}")
             
             # Now count actual OJT users for each year and section (exclude alumni and coordinators)
             for (year, section) in unique_year_sections.keys():
@@ -2009,9 +2132,9 @@ def ojt_statistics_view(request):
                 # Only show cards with actual OJT students (don't count alumni)
                 if ojt_count > 0:
                     year_section_counts[(year, section)] = ojt_count
-                    print(f"🔍 DEBUG: Year {year}, Section {section}: {ojt_count} OJT students")
+                    print(f"DEBUG: Year {year}, Section {section}: {ojt_count} OJT students")
             
-            print(f"🔍 DEBUG: year_section_counts final: {year_section_counts}")
+            print(f"DEBUG: year_section_counts final: {year_section_counts}")
                 
         except Exception as e:
             print(f"DEBUG: Error grouping by section: {e}")
@@ -2056,7 +2179,7 @@ def ojt_by_year_view(request):
 
         # Filter by section if provided
         if section:
-            print(f"🔍 DEBUG: Filtering by section: {section}")
+            print(f"DEBUG: Filtering by section: {section}")
             # Filter by actual section stored in AcademicInfo - ONLY OJT STUDENTS
             ojt_data = (
                 User.objects
@@ -2220,8 +2343,8 @@ def ojt_by_year_view(request):
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
-        print(f"❌ ERROR in ojt_by_year_view: {str(e)}")
-        print(f"❌ TRACEBACK: {error_traceback}")
+        print(f"ERROR in ojt_by_year_view: {str(e)}")
+        print(f"TRACEBACK: {error_traceback}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
@@ -2332,6 +2455,85 @@ def ojt_company_statistics_view(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ojt_students_by_company_view(request):
+    """
+    Returns list of students for a specific company
+    """
+    try:
+        company_name = request.GET.get('company', '')
+        coordinator_username = request.GET.get('coordinator', '')
+        
+        if not company_name:
+            return JsonResponse({'success': False, 'message': 'Company name is required'}, status=400)
+        
+        from apps.shared.models import EmploymentHistory
+        
+        # Get all employment records for this company
+        employment_records = EmploymentHistory.objects.filter(
+            company_name_current__iexact=company_name
+        ).select_related('user', 'user__ojt_info', 'user__academic_info')
+        
+        # Filter by coordinator if provided
+        if coordinator_username:
+            from apps.shared.models import OJTImport
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+            
+            # Get unique year+section combinations
+            year_sections = set()
+            for imp in coordinator_imports:
+                year = getattr(imp, 'batch_year', None)
+                section = getattr(imp, 'section', None)
+                if year:
+                    year_sections.add((year, section))
+            
+            # Filter by coordinator's year+section combinations
+            from django.db.models import Q
+            year_section_filters = Q()
+            for (year, section) in year_sections:
+                if section:
+                    year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                else:
+                    year_section_filters |= Q(user__academic_info__year_graduated=year)
+            
+            if year_section_filters:
+                employment_records = employment_records.filter(year_section_filters)
+        
+        # Build student list
+        students = []
+        for emp in employment_records:
+            user = emp.user
+            ojt_info = getattr(user, 'ojt_info', None)
+            
+            # Only include OJT students (not alumni)
+            if user.account_type and user.account_type.ojt:
+                students.append({
+                    'ctu_id': user.acc_username,
+                    'first_name': user.f_name or '',
+                    'last_name': user.l_name or '',
+                    'company': emp.company_name_current or '',
+                    'company_address': emp.company_address or '',
+                    'company_email': emp.company_email or '',
+                    'company_contact': emp.company_contact or '',
+                    'contact_person': emp.contact_person or '',
+                    'position': emp.position or '',
+                    'status': ojt_info.ojtstatus if ojt_info else 'Not Started'
+                })
+        
+        return JsonResponse({
+            'success': True,
+            'students': students,
+            'count': len(students)
+        })
+        
+    except Exception as e:
+        print(f"Error in ojt_students_by_company_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
 # Update OJT status for a specific user
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -7330,14 +7532,42 @@ def set_send_date_view(request):
             send_date_record.is_processed = False
             send_date_record.save()
         
+        # Update all OJT students' end dates to match the send date
+        # This ensures consistent end dates across the batch
+        try:
+            from apps.shared.models import User, OJTInfo, AcademicInfo
+            
+            # Find all OJT students in this batch year
+            updated_count = 0
+            students = User.objects.filter(
+                account_type__ojt=True,
+                academic_info__year_graduated=batch_year
+            ).select_related('ojt_info', 'academic_info')
+            
+            print(f"🔍 Found {students.count()} OJT students in batch {batch_year}")
+            
+            for student in students:
+                if hasattr(student, 'ojt_info') and student.ojt_info:
+                    # Update the end date to match the scheduled send date
+                    student.ojt_info.ojt_end_date = send_date_obj
+                    student.ojt_info.save()
+                    updated_count += 1
+                    print(f"  ✓ Updated end date for {student.full_name or student.acc_username} to {send_date_obj}")
+            
+            print(f"✅ Updated {updated_count} students' end dates to {send_date_obj}")
+        except Exception as update_error:
+            print(f"⚠️ Warning: Could not update student end dates: {update_error}")
+            # Don't fail the whole operation if this fails
+        
         print(f"✅ Successfully set send date for batch {batch_year}: {send_date_obj}")
         
         return JsonResponse({
             'success': True,
-            'message': f'Send date set successfully for entire batch {batch_year}. On this date, all completed OJT students will be automatically sent to admin.',
+            'message': f'Send date set successfully for entire batch {batch_year}. All student end dates updated to {send_date_obj}. On this date, completed OJT students will be automatically sent to admin.',
             'send_date': send_date,
             'batch_year': batch_year,
-            'scope': 'entire_batch'
+            'scope': 'entire_batch',
+            'students_updated': updated_count if 'updated_count' in locals() else 0
         })
         
     except Exception as e:
@@ -7443,6 +7673,59 @@ def get_send_dates_view(request):
         return JsonResponse({
             'success': False,
             'message': f'Error fetching send dates: {str(e)}'
+        }, status=500)
+
+
+@api_view(['DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def delete_send_date_view(request):
+    """Delete/remove a scheduled send date (idempotent operation)"""
+    try:
+        data = request.data
+        coordinator = data.get('coordinator_username') or data.get('coordinator')
+        batch_year = data.get('batch_year')
+        
+        print(f"🔍 DEBUG delete_send_date_view - coordinator: {coordinator}, batch_year: {batch_year}")
+        
+        if not all([coordinator, batch_year]):
+            return JsonResponse({
+                'success': False,
+                'message': 'Missing required fields - coordinator and batch_year are required'
+            }, status=400)
+        
+        # Delete the send date record (if exists)
+        deleted_count, _ = SendDate.objects.filter(
+            coordinator=coordinator,
+            batch_year=batch_year,
+            section=None,  # None means entire batch
+            is_processed=False
+        ).delete()
+        
+        # Return success regardless of whether records were found (idempotent operation)
+        # This prevents errors when trying to delete already-deleted schedules
+        if deleted_count > 0:
+            print(f"✅ Successfully deleted {deleted_count} send date(s) for batch {batch_year}")
+            return JsonResponse({
+                'success': True,
+                'message': f'Scheduled send date removed successfully for batch {batch_year}',
+                'deleted_count': deleted_count
+            })
+        else:
+            print(f"ℹ️ No send date found for batch {batch_year} (already removed or never existed)")
+            return JsonResponse({
+                'success': True,
+                'message': f'Schedule already removed or does not exist for batch {batch_year}',
+                'deleted_count': 0
+            })
+        
+    except Exception as e:
+        print(f"❌ Error in delete_send_date_view: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'message': f'Error deleting send date: {str(e)}'
         }, status=500)
 
 
