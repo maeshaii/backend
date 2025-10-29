@@ -5990,37 +5990,25 @@ def posts_view(request):
 
                 # Get multiple images for the post
                 post_images = []
+                seen_urls = set()  # Track seen URLs to prevent duplicates
                 try:
                     print(f'Processing images for post {post.post_id}')
-                    if hasattr(post, 'images'):
-                        print(f'Post has images property, count: {post.images.count()}')
-                        for img in post.images.all():
-                            image_url = build_image_url(img.image, request)
+                    # Use direct ContentImage query to avoid duplicates
+                    content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id).order_by('order')
+                    print(f'Direct ContentImage query found {content_images.count()} images')
+                    for img in content_images:
+                        image_url = build_image_url(img.image, request)
+                        # Only add if not seen before
+                        if image_url and image_url not in seen_urls:
+                            seen_urls.add(image_url)
                             print(f'Adding image: {image_url}')
                             post_images.append({
                                 'image_id': img.image_id,
                                 'image_url': image_url,
                                 'order': img.order
                             })
-                    else:
-                        print(f'Post does not have images property')
-                    
-                    # Alternative: Direct ContentImage query (safe if table exists)
-                    try:
-                        content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
-                        print(f'Direct ContentImage query found {content_images.count()} images')
-                        if content_images.count() > 0:
-                            # Don't reset post_images array, append to existing images
-                            for img in content_images:
-                                image_url = build_image_url(img.image, request)
-                                print(f'Adding direct image: {image_url}')
-                                post_images.append({
-                                    'image_id': img.image_id,
-                                    'image_url': image_url,
-                                    'order': img.order
-                                })
-                    except Exception as img_error:
-                        print(f"Warning: ContentImage query failed: {img_error}")
+                        else:
+                            print(f'Skipping duplicate image: {image_url}')
                 except Exception as img_error:
                     print(f"Error processing images for post {post.post_id}: {img_error}")
                     post_images = []  # Ensure post_images is always set
