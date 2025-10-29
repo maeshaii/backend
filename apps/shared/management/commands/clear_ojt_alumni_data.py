@@ -7,6 +7,7 @@ from apps.shared.models import (
     OJTInfo, 
     OJTCompanyProfile, 
     OJTImport,
+    SendDate,
     AcademicInfo,
     UserProfile,
     TrackerData,
@@ -69,6 +70,7 @@ class Command(BaseCommand):
                 ojt_info_count = OJTInfo.objects.all().count()
                 ojt_company_count = OJTCompanyProfile.objects.all().count()
                 ojt_import_count = OJTImport.objects.all().count()
+                send_date_count = SendDate.objects.all().count()
                 
                 OJTInfo.objects.all().delete()
                 self.stdout.write(f'  ✓ Deleted {ojt_info_count} OJT Info records')
@@ -78,6 +80,9 @@ class Command(BaseCommand):
                 
                 OJTImport.objects.all().delete()
                 self.stdout.write(f'  ✓ Deleted {ojt_import_count} OJT Import records')
+                
+                SendDate.objects.all().delete()
+                self.stdout.write(f'  ✓ Deleted {send_date_count} Send Date records')
                 
                 # Delete OJT users and their related data
                 deleted_users = 0

@@ -34,6 +34,7 @@ urlpatterns = [
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
     path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
+    path('ojt/students-by-company/', views.ojt_students_by_company_view, name='ojt_students_by_company'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
@@ -48,6 +49,7 @@ urlpatterns = [
     path('ojt/available-years/', views.available_years_view, name='available_years'),
     path('ojt/set-send-date/', views.set_send_date_view, name='set_send_date'),
     path('ojt/get-send-dates/', views.get_send_dates_view, name='get_send_dates'),
+    path('ojt/delete-send-date/', views.delete_send_date_view, name='delete_send_date'),
     path('ojt/check-all-sent/', views.check_all_sent_status_view, name='check_all_sent_status'),
     # path('download-excel/<str:filename>/', views.download_excel_file, name='download_excel_file'),
     
