@@ -122,6 +122,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://192.168.101.70:8000",
     "http://172.16.59.112:8000",
     "https://simultaneously-wrinkliest-dominik.ngrok-free.dev",
+    "https://laverna-enwrought-rosemary.ngrok-free.dev",
 
     "http://192.168.1.27:8000",
     "http://192.168.1.18:8000",
