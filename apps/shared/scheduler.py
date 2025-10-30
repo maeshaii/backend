@@ -15,6 +15,11 @@ def process_send_dates_job():
     Runs daily to check if any OJT batches should be sent to admin
     """
     try:
+        # Close old database connections to prevent stale connection errors
+        # This is critical for background threads that may hold stale connections
+        from django.db import close_old_connections
+        close_old_connections()
+        
         from django.core.management import call_command
         logger.info("🔄 Running scheduled send dates processing...")
         call_command('process_send_dates')
@@ -23,6 +28,14 @@ def process_send_dates_job():
         logger.error(f"❌ Error in scheduled send dates processing: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        # Always close connections after the job completes
+        # This ensures no stale connections are left open
+        try:
+            from django.db import close_old_connections
+            close_old_connections()
+        except Exception:
+            pass
 
 
 def start_scheduler():
