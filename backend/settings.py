@@ -162,6 +162,16 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'OPTIONS': {
+            # Connection timeout settings to handle stale connections
+            'connect_timeout': 10,
+            # Automatically reconnect if connection is lost
+            'options': '-c statement_timeout=30000',  # 30 second statement timeout
+        },
+        # Connection pooling: use short-lived connections to prevent stale connections
+        # Background threads (like APScheduler) will benefit from this
+        'CONN_MAX_AGE': 60,  # 60 seconds - short enough to avoid stale connections
+        'ATOMIC_REQUESTS': False,
     }
 }
 

@@ -18,6 +18,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        # Ensure fresh database connections (important for background threads)
+        from django.db import close_old_connections
+        close_old_connections()
+        
         dry_run = options['dry_run']
         today = date.today()
         
@@ -76,6 +80,9 @@ class Command(BaseCommand):
             )
         else:
             self.stdout.write(f"\n[DRY RUN] Would process {send_dates.count()} send dates")
+        
+        # Close connections after command completes
+        close_old_connections()
 
     def process_batch(self, send_date_record):
         """Process a single batch - send completed OJT students to admin and mark ongoing as incomplete"""
