@@ -35,6 +35,7 @@ urlpatterns = [
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
     path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
     path('ojt/students-by-company/', views.ojt_students_by_company_view, name='ojt_students_by_company'),
+    path('ojt/students/', views.get_ojt_students_view, name='get_ojt_students'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
     path('ojt/clear/', ojt_clear_view, name='ojt_clear'),
     path('ojt/clear-all/', ojt_clear_all_view, name='ojt_clear_all'),
