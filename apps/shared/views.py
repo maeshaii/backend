@@ -7,10 +7,21 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import get_object_or_404
-from apps.shared.models import EmploymentHistory, User
+from apps.shared.models import EmploymentHistory, User, ReportSettings
 import logging
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.db import transaction
 
 logger = logging.getLogger('apps.shared.views')
+
+
+def parse_boolean(value):
+    """Convert string boolean from FormData to actual boolean"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ('true', '1', 'yes')
+    return False
 
 
 @api_view(['POST'])
@@ -269,4 +280,157 @@ def get_job_autocomplete_suggestions(request):
         logger.error(f"Error getting job autocomplete suggestions: {str(e)}")
         return Response({
             'error': 'Internal server error'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_report_settings_view(request):
+    """
+    Get current report header/footer settings for export generation.
+    Returns the most recently updated report settings.
+    """
+    try:
+        settings_obj = ReportSettings.get_active_settings()
+        
+        if not settings_obj:
+            # Return default settings structure
+            return Response({
+                'success': True,
+                'settings': None,
+                'message': 'No custom settings found. Using defaults.'
+            })
+        
+        # Build response with file URLs
+        from django.conf import settings
+        from django.core.files.storage import default_storage
+        
+        response_data = {
+            'success': True,
+            'settings': {
+                'header_enabled': settings_obj.header_enabled,
+                'header_layout_type': settings_obj.header_layout_type,
+                'left_logo_enabled': settings_obj.left_logo_enabled,
+                'left_logo_url': settings_obj.left_logo.url if settings_obj.left_logo else None,
+                'right_logo_enabled': settings_obj.right_logo_enabled,
+                'right_logo_url': settings_obj.right_logo.url if settings_obj.right_logo else None,
+                'header_line1': settings_obj.header_line1,
+                'header_line2': settings_obj.header_line2,
+                'header_line2_color': settings_obj.header_line2_color,
+                'header_line2_bold': settings_obj.header_line2_bold,
+                'header_line3': settings_obj.header_line3,
+                'header_line4': settings_obj.header_line4,
+                'header_line5': settings_obj.header_line5,
+                'header_line6': settings_obj.header_line6,
+                'header_line6_color': settings_obj.header_line6_color,
+                'header_line6_bold': settings_obj.header_line6_bold,
+                'footer_enabled': settings_obj.footer_enabled,
+                'footer_image_enabled': settings_obj.footer_image_enabled,
+                'footer_image_url': settings_obj.footer_image.url if settings_obj.footer_image else None,
+                'footer_text1': settings_obj.footer_text1,
+                'footer_text2': settings_obj.footer_text2,
+                'signature_enabled': settings_obj.signature_enabled,
+                'prepared_by_name': settings_obj.prepared_by_name,
+                'prepared_by_title': settings_obj.prepared_by_title,
+                'approved_by_name': settings_obj.approved_by_name,
+                'approved_by_title': settings_obj.approved_by_title,
+                'custom_settings': settings_obj.custom_settings,
+                'updated_at': settings_obj.updated_at.isoformat()
+            }
+        }
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting report settings: {str(e)}")
+        return Response({
+            'error': 'Internal server error'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def update_report_settings_view(request):
+    """
+    Update report header/footer settings.
+    Supports file uploads for logos.
+    
+    Expected payload:
+    - All header/footer settings fields
+    - File uploads: left_logo, right_logo, footer_image
+    """
+    try:
+        # Check if user is admin
+        user = request.user
+        if not (hasattr(user, 'account_type') and 
+                (user.account_type.admin if hasattr(user.account_type, 'admin') else False)):
+            return Response({
+                'error': 'Admin access required'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get or create settings object
+        settings_obj = ReportSettings.get_active_settings()
+        if not settings_obj:
+            settings_obj = ReportSettings(created_by=user, updated_by=user)
+        
+        # Update basic fields
+        settings_obj.header_enabled = parse_boolean(request.data.get('header_enabled', True))
+        settings_obj.header_layout_type = request.data.get('header_layout_type', 'three_column')
+        settings_obj.left_logo_enabled = parse_boolean(request.data.get('left_logo_enabled', True))
+        settings_obj.right_logo_enabled = parse_boolean(request.data.get('right_logo_enabled', True))
+        
+        settings_obj.header_line1 = request.data.get('header_line1', '')
+        settings_obj.header_line2 = request.data.get('header_line2', '')
+        settings_obj.header_line2_color = request.data.get('header_line2_color', '#DC143C')
+        settings_obj.header_line2_bold = parse_boolean(request.data.get('header_line2_bold', True))
+        settings_obj.header_line3 = request.data.get('header_line3', '')
+        settings_obj.header_line4 = request.data.get('header_line4', '')
+        settings_obj.header_line5 = request.data.get('header_line5', '')
+        settings_obj.header_line6 = request.data.get('header_line6', '')
+        settings_obj.header_line6_color = request.data.get('header_line6_color', '#DC143C')
+        settings_obj.header_line6_bold = parse_boolean(request.data.get('header_line6_bold', True))
+        
+        settings_obj.footer_enabled = parse_boolean(request.data.get('footer_enabled', True))
+        settings_obj.footer_image_enabled = parse_boolean(request.data.get('footer_image_enabled', True))
+        settings_obj.footer_text1 = request.data.get('footer_text1', '')
+        settings_obj.footer_text2 = request.data.get('footer_text2', '')
+        
+        settings_obj.signature_enabled = parse_boolean(request.data.get('signature_enabled', True))
+        settings_obj.prepared_by_name = request.data.get('prepared_by_name', '')
+        settings_obj.prepared_by_title = request.data.get('prepared_by_title', '')
+        settings_obj.approved_by_name = request.data.get('approved_by_name', '')
+        settings_obj.approved_by_title = request.data.get('approved_by_title', '')
+        
+        # Handle file uploads
+        if 'left_logo' in request.FILES:
+            if settings_obj.left_logo:
+                settings_obj.left_logo.delete()
+            settings_obj.left_logo = request.FILES['left_logo']
+        
+        if 'right_logo' in request.FILES:
+            if settings_obj.right_logo:
+                settings_obj.right_logo.delete()
+            settings_obj.right_logo = request.FILES['right_logo']
+        
+        if 'footer_image' in request.FILES:
+            if settings_obj.footer_image:
+                settings_obj.footer_image.delete()
+            settings_obj.footer_image = request.FILES['footer_image']
+        
+        # Update metadata
+        settings_obj.updated_by = user
+        
+        settings_obj.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Report settings updated successfully',
+            'settings_id': settings_obj.settings_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error updating report settings: {str(e)}")
+        return Response({
+            'error': 'Internal server error',
+            'detail': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

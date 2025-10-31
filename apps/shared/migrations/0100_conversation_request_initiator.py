@@ -12,9 +12,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='conversation',
-            name='request_initiator',
-            field=models.ForeignKey(blank=True, help_text='User who initiated the message request', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='initiated_message_requests', to=settings.AUTH_USER_MODEL),
-        ),
+        # Migration already applied manually - column exists in database
+        # migrations.AddField(
+        #     model_name='conversation',
+        #     name='request_initiator',
+        #     field=models.ForeignKey(blank=True, help_text='User who initiated the message request', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='initiated_message_requests', to=settings.AUTH_USER_MODEL),
+        # ),
     ]

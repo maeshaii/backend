@@ -9,4 +9,8 @@ urlpatterns = [
     
     # Job autocomplete endpoint
     path('job-autocomplete/', views.get_job_autocomplete_suggestions, name='get_job_autocomplete_suggestions'),
+    
+    # Report settings endpoints
+    path('report-settings/', views.get_report_settings_view, name='get_report_settings'),
+    path('report-settings/update/', views.update_report_settings_view, name='update_report_settings'),
 ]
