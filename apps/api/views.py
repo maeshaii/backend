@@ -156,6 +156,9 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                 # Create notification for the mentioned user
                 notification_content = f"{commenter_user.full_name} mentioned you in a comment"
                 
+                # Add actor ID for profile picture
+                notification_content += f"<!--ACTOR_ID:{commenter_user.user_id}-->"
+                
                 # Add post/comment/reply ID for redirection
                 if reply_id:
                     notification_content += f"<!--REPLY_ID:{reply_id}-->"
@@ -195,12 +198,27 @@ def build_profile_pic_url(user):
         pic = getattr(profile, 'profile_pic', None) if profile else None
         if pic:
             url = pic.url
+            # Append last-modified timestamp for cache-busting when available
             try:
                 modified = default_storage.get_modified_time(pic.name)
                 if modified:
-                    return f"{url}?t={int(modified.timestamp())}"
+                    url = f"{url}?t={int(modified.timestamp())}"
             except Exception:
                 pass
+
+            # Ensure we always return an absolute URL
+            try:
+                if not str(url).startswith('http'):
+                    from django.conf import settings
+                    base_url = getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    # Avoid double slashes when concatenating
+                    if base_url.endswith('/') and str(url).startswith('/'):
+                        return f"{base_url[:-1]}{url}"
+                    return f"{base_url}{url}"
+            except Exception:
+                # If anything goes wrong, return the relative URL as a fallback
+                return url
+
             return url
     except Exception:
         pass
@@ -3336,7 +3354,7 @@ def alumni_profile_view(request, user_id):
                 'home_address': user.profile.home_address if hasattr(user, 'profile') and user.profile else '',
                 'social_media': user.profile.social_media if hasattr(user, 'profile') and user.profile else '',
                 'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else '',
-                'profile_pic': user.profile.profile_pic.url if hasattr(user, 'profile') and user.profile and user.profile.profile_pic else None,
+                'profile_pic': build_profile_pic_url(user) if hasattr(user, 'profile') and user.profile else "",
                 'account_type': {
                     'admin': getattr(user.account_type, 'admin', False),
                     'peso': getattr(user.account_type, 'peso', False),
@@ -4164,13 +4182,13 @@ def repost_comments_view(request, repost_id):
                 
                 # Build notification content with appropriate ID based on repost type
                 if repost.post:
-                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->"
                 elif repost.forum:
-                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--FORUM_ID:{repost.forum.forum_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->"
                 elif repost.donation_request:
-                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--DONATION_ID:{repost.donation_request.donation_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->"
                 else:
-                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}-->"
+                    notif_content = f"{request.user.full_name} commented on your {repost_type}<!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->"
                 
                 notification = Notification.objects.create(
                     user=repost.user,
@@ -4416,7 +4434,7 @@ def post_comments_view(request, post_id):
                     user=post.user,
                     notif_type='comment',
                     subject='Post Commented',
-                    notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 
@@ -4498,7 +4516,7 @@ def comment_replies_view(request, comment_id):
                     user=comment.user,
                     notif_type='reply',
                     subject='Comment Replied',
-                    notifi_content=f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}-->",
+                    notifi_content=f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--ACTOR_ID:{user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 
@@ -4787,7 +4805,7 @@ def post_repost_view(request, post_id):
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
-                notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}-->",
+                notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}--><!--ACTOR_ID:{user.user_id}-->",
                 notif_date=timezone.now()
             )
             
@@ -4993,8 +5011,6 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
             # Add author info (hidden metadata)
             content += f"<!--AUTHOR_ID:{post_author.user_id}-->"
             content += f"<!--AUTHOR_NAME:{post_author.full_name}-->"
-            if profile_pic_url:
-                content += f"<!--AUTHOR_PIC:{profile_pic_url}-->"
             
             # Add post link if available
             if post_id:
@@ -5220,7 +5236,15 @@ def forum_list_create_view(request):
                         },
                         # Get repost likes and comments
                         'likes': [{
-                            'user_id': like.user.user_id
+                            'like_id': like.like_id,
+                            'user_id': like.user.user_id,
+                            'user': {
+                                'user_id': like.user.user_id,
+                                'f_name': like.user.f_name,
+                                'm_name': like.user.m_name,
+                                'l_name': like.user.l_name,
+                                'profile_pic': build_profile_pic_url(like.user),
+                            }
                         } for like in Like.objects.filter(repost=r).select_related('user')],
                         'likes_count': Like.objects.filter(repost=r).count(),
                         'comments': [{
@@ -5512,7 +5536,7 @@ def forum_comments_view(request, forum_id):
                     user=forum.user,
                     notif_type='comment',
                     subject='Forum Commented',
-                    notifi_content=f"{request.user.full_name} commented on your forum post<!--FORUM_ID:{forum.forum_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notifi_content=f"{request.user.full_name} commented on your forum post<!--FORUM_ID:{forum.forum_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 
@@ -5608,7 +5632,7 @@ def forum_repost_view(request, forum_id):
                 user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
-                notifi_content=f"{request.user.full_name} reposted your forum post<!--FORUM_ID:{forum.forum_id}-->",
+                notifi_content=f"{request.user.full_name} reposted your forum post<!--FORUM_ID:{forum.forum_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                 notif_date=timezone.now()
             )
             
@@ -6249,6 +6273,18 @@ def posts_view(request):
                         repost_likes = Like.objects.filter(repost=repost).select_related('user')
                         repost_likes_count = repost_likes.count()
                         repost_likes_data = []
+                        for like in repost_likes:
+                            repost_likes_data.append({
+                                'like_id': like.like_id,
+                                'user_id': like.user.user_id,
+                                'user': {
+                                    'user_id': like.user.user_id,
+                                    'f_name': like.user.f_name,
+                                    'm_name': like.user.m_name,
+                                    'l_name': like.user.l_name,
+                                    'profile_pic': build_profile_pic_url(like.user),
+                                }
+                            })
 
                         # Get repost comments count and data
                         repost_comments = Comment.objects.filter(repost=repost).select_related('user')
@@ -6836,8 +6872,16 @@ def donation_requests_view(request):
                             'comments_count': Comment.objects.filter(repost=repost).count(),
                             'likes': [
                                 {
-                                    'user_id': like.user.user_id
-                                } for like in Like.objects.filter(repost=repost)
+                                    'like_id': like.like_id,
+                                    'user_id': like.user.user_id,
+                                    'user': {
+                                        'user_id': like.user.user_id,
+                                        'f_name': like.user.f_name,
+                                        'm_name': like.user.m_name,
+                                        'l_name': like.user.l_name,
+                                        'profile_pic': build_profile_pic_url(like.user),
+                                    }
+                                } for like in Like.objects.filter(repost=repost).select_related('user')
                             ],
                             'comments': [
                                 {
@@ -7123,7 +7167,7 @@ def donation_comments_view(request, donation_id):
                     user=donation.user,
                     notif_type='comment',
                     subject='Donation Commented',
-                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}-->",
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 # Broadcast donation comment notification in real-time
@@ -7235,7 +7279,7 @@ def donation_repost_view(request, donation_id):
                 user=donation.user,
                 notif_type='repost',
                 subject='Donation Reposted',
-                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}-->",
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                 notif_date=timezone.now()
             )
             # Broadcast donation repost notification in real-time
