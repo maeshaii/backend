@@ -13,7 +13,8 @@ from apps.shared.models import (
     TrackerData,
     EmploymentHistory,
     UserPoints,
-    RewardHistory
+    RewardHistory,
+    UserInitialPassword
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ class Command(BaseCommand):
                         TrackerData.objects.filter(user=user).delete()
                         UserPoints.objects.filter(user=user).delete()
                         RewardHistory.objects.filter(user=user).delete()
+                        UserInitialPassword.objects.filter(user=user).delete()
                         
                         # Try to delete user completely
                         try:
@@ -138,6 +140,7 @@ class Command(BaseCommand):
                 employment_count = EmploymentHistory.objects.filter(user__in=alumni_users).count()
                 points_count = UserPoints.objects.filter(user__in=alumni_users).count()
                 reward_history_count = RewardHistory.objects.filter(user__in=alumni_users).count()
+                password_count = UserInitialPassword.objects.filter(user__in=alumni_users).count()
                 
                 # Delete alumni and their related data
                 for user in alumni_users:
@@ -149,6 +152,7 @@ class Command(BaseCommand):
                         EmploymentHistory.objects.filter(user=user).delete()
                         UserPoints.objects.filter(user=user).delete()
                         RewardHistory.objects.filter(user=user).delete()
+                        UserInitialPassword.objects.filter(user=user).delete()
                         
                         # Delete user (may fail due to forum relationships)
                         try:
@@ -167,6 +171,7 @@ class Command(BaseCommand):
                 self.stdout.write(f'  ✓ Deleted {employment_count} Employment History records')
                 self.stdout.write(f'  ✓ Deleted {points_count} User Points records')
                 self.stdout.write(f'  ✓ Deleted {reward_history_count} Reward History records')
+                self.stdout.write(f'  ✓ Deleted {password_count} Initial Password records')
 
             self.stdout.write(self.style.SUCCESS('\n✅ Data deletion completed successfully!'))
             

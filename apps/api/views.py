@@ -1375,11 +1375,32 @@ def import_ojt_view(request):
             for col in df.columns:
                 col_lower = str(col).lower().strip()
                 
+                # First Name variants
+                if col_lower in ['firstname', 'first name']:
+                    rename_map[col] = 'First_Name'
+                # Middle Name variants
+                elif col_lower in ['middlename', 'middle name']:
+                    rename_map[col] = 'Middle_Name'
+                # Last Name variants
+                elif col_lower in ['lastname', 'last name']:
+                    rename_map[col] = 'Last_Name'
+                # Contact Number variants
+                elif col_lower in ['contactno', 'contact no', 'contact_no', 'contact number']:
+                    rename_map[col] = 'Contact_No'
                 # Company name variants
-                if col_lower in ['company name', 'company_name', 'companyname']:
+                elif col_lower in ['company name', 'company_name', 'companyname', 'company']:
                     rename_map[col] = 'Company'
+                # Company Address variants
+                elif col_lower in ['companyaddress', 'company address']:
+                    rename_map[col] = 'Company_Address'
+                # Company Email variants
+                elif col_lower in ['companyemail', 'company email']:
+                    rename_map[col] = 'Company_Email'
+                # Company Contact variants
+                elif col_lower in ['companycontact', 'company contact']:
+                    rename_map[col] = 'Company_Contact'
                 # Contact person name variants
-                elif col_lower in ['contact_person_name', 'contact person name', 'contactpersonname', 'contact person']:
+                elif col_lower in ['contactperson', 'contact_person', 'contact person name', 'contact person']:
                     rename_map[col] = 'Contact_Person'
                 # Contact person position variants
                 elif col_lower in ['contact_person_position', 'contact person position', 'contactpersonposition', 'position']:
@@ -1587,14 +1608,36 @@ def import_ojt_view(request):
                 print(f"Row {index+2} - CTU_ID: {ctu_id}, User exists: {existing_user_check is not None}")
                 
                 if not existing_user_check:
-                    # NEW USER - require all fields
+                    # NEW USER - require all fields (including personal info AND company info)
                     print(f"Row {index+2} - NEW USER MODE - validating required fields...")
-                    required_data = {
-                        "First_Name": first_name,
-                        "Last_Name": last_name,
-                        "Gender": gender
+                    
+                    # Extract additional required fields - Personal Info
+                    birthdate_raw = row.get('Birthdate')
+                    contact_no = str(row.get('Contact_No', '')).strip() if pd.notna(row.get('Contact_No')) else ''
+                    email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else ''
+                    address = str(row.get('Address', '')).strip() if pd.notna(row.get('Address')) else ''
+                    
+                    # Extract required company fields
+                    company_name = str(row.get('Company', '')).strip() if pd.notna(row.get('Company')) else ''
+                    company_address = str(row.get('Company_Address', '')).strip() if pd.notna(row.get('Company_Address')) else ''
+                    company_email = str(row.get('Company_Email', '')).strip() if pd.notna(row.get('Company_Email')) else ''
+                    company_contact = str(row.get('Company_Contact', '')).strip() if pd.notna(row.get('Company_Contact')) else ''
+                    contact_person = str(row.get('Contact_Person', '')).strip() if pd.notna(row.get('Contact_Person')) else ''
+                    position = str(row.get('Position', '')).strip() if pd.notna(row.get('Position')) else ''
+                    
+                    # FIRST IMPORT: Require basic personal info + contact details
+                    # Company info can be added later via second import
+                    required_personal_data = {
+                        "FirstName": first_name,
+                        "LastName": last_name,
+                        "Gender": gender,
+                        "Section": excel_section,
+                        "Birthdate": birthdate_raw if pd.notna(birthdate_raw) else None,
+                        "ContactNo": contact_no,
+                        "Email": email,
+                        "Address": address
                     }
-                    missing_fields = [key for key, value in required_data.items() if not value]
+                    missing_fields = [key for key, value in required_personal_data.items() if not value]
 
                     if missing_fields:
                         error_msg = f"Row {index + 2}: New user requires - {', '.join(missing_fields)}"
@@ -1602,6 +1645,12 @@ def import_ojt_view(request):
                         errors.append(error_msg)
                         skipped_count += 1
                         continue
+                    
+                    # Optional fields (nice to have but not required)
+                    # MiddleName only - all other personal fields are now required
+                    # Company fields are ALL optional for first import
+                    print(f"Row {index+2} - ✅ Required fields validated. Optional field: MiddleName={bool(middle_name)}")
+                    print(f"Row {index+2} - Company info (optional): CompanyName={bool(company_name)}, Address={bool(company_address)}, Email={bool(company_email)}, Contact={bool(company_contact)}, Person={bool(contact_person)}, Position={bool(position)}")
 
                     # --- Gender Validation for new users ---
                     if gender not in ['M', 'F']:
@@ -1610,6 +1659,23 @@ def import_ojt_view(request):
                         errors.append(error_msg)
                         skipped_count += 1
                         continue
+                    
+                    # --- Birthdate Validation (OPTIONAL - only validate if provided) ---
+                    bd = None  # Default to None if not provided
+                    if pd.notna(birthdate_raw):
+                        try:
+                            bd = pd.to_datetime(birthdate_raw, errors='coerce').date()
+                            if bd and (bd.year < 1900 or bd.year > 2020):
+                                error_msg = f"Row {index + 2}: Invalid birthdate '{birthdate_raw}'. Must be between 1900-2020."
+                                print(f"SKIPPING: {error_msg}")
+                                errors.append(error_msg)
+                                skipped_count += 1
+                                continue
+                        except Exception as e:
+                            print(f"Row {index + 2}: WARNING - Could not parse birthdate '{birthdate_raw}', setting to None")
+                            bd = None
+                    else:
+                        print(f"Row {index + 2} - No birthdate provided (optional field)")
                 else:
                     # EXISTING USER - fields are optional, use existing data if not provided
                     print(f"Row {index+2} - UPDATE MODE ACTIVATED - User {ctu_id} exists, proceeding with company data update...")
@@ -2534,6 +2600,63 @@ def ojt_students_by_company_view(request):
         traceback.print_exc()
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+# Get all OJT students for a coordinator (for export to update template)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_ojt_students_view(request):
+    """
+    Returns list of all OJT students for a coordinator
+    Used for exporting student list to fill company info
+    """
+    try:
+        coordinator_username = request.GET.get('coordinator', '')
+        
+        if not coordinator_username:
+            return JsonResponse({'success': False, 'message': 'Coordinator username is required'}, status=400)
+        
+        from apps.shared.models import User, OJTImport, AcademicInfo, OJTInfo
+        
+        # Get all imports by this coordinator
+        coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+        
+        # Get unique year+section combinations
+        year_sections = set()
+        for imp in coordinator_imports:
+            year = getattr(imp, 'batch_year', None)
+            section = getattr(imp, 'section', None)
+            if year and section:
+                year_sections.add((year, section))
+        
+        # Get all OJT users matching these year+section combinations
+        students_data = []
+        for year, section in year_sections:
+            users = User.objects.filter(
+                account_type__ojt=True,
+                academic_info__year_graduated=year,
+                academic_info__section=section
+            ).select_related('ojt_info', 'academic_info')
+            
+            for user in users:
+                students_data.append({
+                    'ctu_id': user.acc_username,
+                    'first_name': user.f_name or '',
+                    'last_name': user.l_name or '',
+                    'section': getattr(user.academic_info, 'section', '') if hasattr(user, 'academic_info') else '',
+                    'status': getattr(user.ojt_info, 'ojtstatus', 'Ongoing') if hasattr(user, 'ojt_info') else 'Ongoing',
+                })
+        
+        return JsonResponse({
+            'success': True,
+            'students': students_data,
+            'count': len(students_data)
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
 # Update OJT status for a specific user
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -2577,21 +2700,58 @@ def ojt_status_update_view(request):
 @permission_classes([IsAuthenticated])
 def ojt_clear_all_view(request):
     try:
-        from apps.shared.models import OJTImport, OJTInfo, AcademicInfo
+        from apps.shared.models import (
+            OJTImport, OJTInfo, AcademicInfo, OJTCompanyProfile,
+            UserProfile, EmploymentHistory, UserInitialPassword, SendDate
+        )
         with transaction.atomic():
             # Identify OJT users
             ojt_users = User.objects.filter(account_type__ojt=True)
-            # Delete OJTInfo for those users
-            OJTInfo.objects.filter(user__in=ojt_users).delete()
-            # Delete AcademicInfo for those users
-            AcademicInfo.objects.filter(user__in=ojt_users).delete()
-            # Optionally delete the users themselves or convert their account type
-            # Here, we delete OJT users completely for a clean re-import
+            user_count = ojt_users.count()
+            
+            print(f"🗑️ Clearing all OJT data for {user_count} OJT users...")
+            
+            # Delete all related data for OJT users
+            ojt_info_count = OJTInfo.objects.filter(user__in=ojt_users).delete()[0]
+            ojt_company_count = OJTCompanyProfile.objects.filter(user__in=ojt_users).delete()[0]
+            academic_count = AcademicInfo.objects.filter(user__in=ojt_users).delete()[0]
+            profile_count = UserProfile.objects.filter(user__in=ojt_users).delete()[0]
+            employment_count = EmploymentHistory.objects.filter(user__in=ojt_users).delete()[0]
+            password_count = UserInitialPassword.objects.filter(user__in=ojt_users).delete()[0]
+            
+            # Delete the OJT users themselves
             ojt_users.delete()
+            
             # Remove import history to hide cards
-            OJTImport.objects.all().delete()
-        return JsonResponse({'success': True, 'message': 'All OJT data cleared successfully'})
+            import_count = OJTImport.objects.all().delete()[0]
+            
+            # Clear all scheduled send dates
+            send_date_count = SendDate.objects.all().delete()[0]
+            
+            print(f"✅ Deleted: {user_count} users, {ojt_info_count} OJT info, {ojt_company_count} company profiles")
+            print(f"   {academic_count} academic records, {profile_count} user profiles")
+            print(f"   {employment_count} employment records, {password_count} passwords")
+            print(f"   {import_count} import records, {send_date_count} send date schedules")
+            
+        return JsonResponse({
+            'success': True, 
+            'message': f'All OJT data cleared successfully! Deleted {user_count} OJT users and all related data.',
+            'deleted_counts': {
+                'users': user_count,
+                'ojt_info': ojt_info_count,
+                'company_profiles': ojt_company_count,
+                'academic_records': academic_count,
+                'user_profiles': profile_count,
+                'employment_records': employment_count,
+                'passwords': password_count,
+                'import_records': import_count,
+                'send_dates': send_date_count
+            }
+        })
     except Exception as e:
+        import traceback
+        print(f"❌ Error clearing OJT data: {str(e)}")
+        print(traceback.format_exc())
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
@@ -7504,6 +7664,22 @@ def set_send_date_view(request):
                 'message': 'Invalid date format. Use YYYY-MM-DD'
             }, status=400)
         
+        # Check if batch has already been processed
+        try:
+            existing_send_date = SendDate.objects.get(
+                coordinator=coordinator,
+                batch_year=batch_year,
+                section=None
+            )
+            if existing_send_date.is_processed:
+                print(f"❌ Batch {batch_year} has already been processed (is_processed=True)")
+                return JsonResponse({
+                    'success': False,
+                    'message': f'Batch {batch_year} has already been processed. Cannot modify send date for completed batches.'
+                }, status=400)
+        except SendDate.DoesNotExist:
+            pass  # No existing record, can proceed
+        
         # Create or update SendDate record for the entire batch (section=None for batch-wide)
         send_date_record, created = SendDate.objects.get_or_create(
             coordinator=coordinator,
@@ -7634,11 +7810,11 @@ def get_send_dates_view(request):
                 'message': 'Coordinator parameter is required'
             }, status=400)
         
-        # Get all unprocessed send dates for this coordinator
+        # Get ALL send dates for this coordinator (both processed and unprocessed)
+        # This allows the frontend to show warnings about already processed batches
         send_dates = SendDate.objects.filter(
-            coordinator=coordinator,
-            is_processed=False
-        ).order_by('send_date')
+            coordinator=coordinator
+        ).order_by('-is_processed', 'send_date')  # Processed first, then by date
         
         scheduled_dates = []
         for sd in send_dates:
@@ -7647,8 +7823,12 @@ def get_send_dates_view(request):
                 'batch_year': sd.batch_year,
                 'section': sd.section,
                 'send_date': sd.send_date.strftime('%Y-%m-%d'),
+                'is_processed': sd.is_processed,
+                'processed_at': sd.processed_at.strftime('%Y-%m-%d %H:%M:%S') if sd.processed_at else None,
                 'created_at': sd.created_at.strftime('%Y-%m-%d %H:%M:%S')
             })
+        
+        print(f"📋 Found {len(scheduled_dates)} send dates (processed: {sum(1 for sd in scheduled_dates if sd['is_processed'])}, unprocessed: {sum(1 for sd in scheduled_dates if not sd['is_processed'])})")
         
         return JsonResponse({
             'success': True,
