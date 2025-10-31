@@ -8,6 +8,8 @@ from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 from django.utils import timezone
 from apps.shared.models import Notification
+from apps.shared.models import User
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class NotificationBroadcaster:
                 'is_read': notification.is_read,
                 'timestamp': timezone.now().isoformat()
             }
+            # Prepare notification data
             
             # Broadcast to user's notification channel
             group_name = f"notifications_{notification.user.user_id}"

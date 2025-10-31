@@ -5011,8 +5011,6 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
             # Add author info (hidden metadata)
             content += f"<!--AUTHOR_ID:{post_author.user_id}-->"
             content += f"<!--AUTHOR_NAME:{post_author.full_name}-->"
-            if profile_pic_url:
-                content += f"<!--AUTHOR_PIC:{profile_pic_url}-->"
             
             # Add post link if available
             if post_id:
@@ -5238,7 +5236,15 @@ def forum_list_create_view(request):
                         },
                         # Get repost likes and comments
                         'likes': [{
-                            'user_id': like.user.user_id
+                            'like_id': like.like_id,
+                            'user_id': like.user.user_id,
+                            'user': {
+                                'user_id': like.user.user_id,
+                                'f_name': like.user.f_name,
+                                'm_name': like.user.m_name,
+                                'l_name': like.user.l_name,
+                                'profile_pic': build_profile_pic_url(like.user),
+                            }
                         } for like in Like.objects.filter(repost=r).select_related('user')],
                         'likes_count': Like.objects.filter(repost=r).count(),
                         'comments': [{
@@ -6267,6 +6273,18 @@ def posts_view(request):
                         repost_likes = Like.objects.filter(repost=repost).select_related('user')
                         repost_likes_count = repost_likes.count()
                         repost_likes_data = []
+                        for like in repost_likes:
+                            repost_likes_data.append({
+                                'like_id': like.like_id,
+                                'user_id': like.user.user_id,
+                                'user': {
+                                    'user_id': like.user.user_id,
+                                    'f_name': like.user.f_name,
+                                    'm_name': like.user.m_name,
+                                    'l_name': like.user.l_name,
+                                    'profile_pic': build_profile_pic_url(like.user),
+                                }
+                            })
 
                         # Get repost comments count and data
                         repost_comments = Comment.objects.filter(repost=repost).select_related('user')
@@ -6854,8 +6872,16 @@ def donation_requests_view(request):
                             'comments_count': Comment.objects.filter(repost=repost).count(),
                             'likes': [
                                 {
-                                    'user_id': like.user.user_id
-                                } for like in Like.objects.filter(repost=repost)
+                                    'like_id': like.like_id,
+                                    'user_id': like.user.user_id,
+                                    'user': {
+                                        'user_id': like.user.user_id,
+                                        'f_name': like.user.f_name,
+                                        'm_name': like.user.m_name,
+                                        'l_name': like.user.l_name,
+                                        'profile_pic': build_profile_pic_url(like.user),
+                                    }
+                                } for like in Like.objects.filter(repost=repost).select_related('user')
                             ],
                             'comments': [
                                 {
