@@ -126,7 +126,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
 
 # Utility: build profile_pic URL with cache-busting when possible
-def create_mention_notifications(content, commenter_user, post_id=None, comment_id=None, reply_id=None, forum_id=None, donation_id=None):
+def create_mention_notifications(content, commenter_user, post_id=None, comment_id=None, reply_id=None, forum_id=None, donation_id=None, repost_id=None):
     """Create notifications for users mentioned in content"""
     import re
     from apps.shared.models import Notification
@@ -165,6 +165,10 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                 
                 if comment_id:
                     notification_content += f"<!--COMMENT_ID:{comment_id}-->"
+                
+                # Add repost ID if present
+                if repost_id:
+                    notification_content += f"<!--REPOST_ID:{repost_id}-->"
                 
                 # Add forum, donation, or post ID (in priority order)
                 if forum_id:
@@ -3567,61 +3571,146 @@ def alumni_profile_view(request, user_id):
 def alumni_employment_view(request, user_id):
     """Get and update alumni employment data."""
     try:
-        from apps.shared.models import User, EmploymentHistory
+        from apps.shared.models import User, EmploymentHistory, TrackerData
         from apps.shared.services import UserService
         
         user = User.objects.get(user_id=user_id)
+        
+        # Determine account type
+        is_alumni = user.account_type.user if hasattr(user.account_type, 'user') else False
+        is_ojt = user.account_type.ojt if hasattr(user.account_type, 'ojt') else False
         
         if request.method == 'GET':
             # Get employment data
             employment_data = UserService.get_user_with_related_data(user_id)
             employment = employment_data.get('employment')
+            academic_info = employment_data.get('academic_info')
+            tracker_data = employment_data.get('tracker_data')
             
-            if employment:
+            # For OJT accounts, return only EmploymentHistory fields (no Part III/IV questions)
+            if is_ojt and employment:
                 return JsonResponse({
-                    # Basic employment info - correctly mapped to model fields
+                    'account_type': 'ojt',
+                    # Basic employment info from EmploymentHistory only
                     'organization_name': employment.company_name_current or '',
                     'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
                     'position': employment.position_current or '',
-                    'employment_status': employment.employment_duration_current or '',
-                    'company_address': employment.company_address or '',
                     'sector': employment.sector_current or '',
-                    
-                    # Additional employment details
+                    'scope_current': employment.scope_current or '',
                     'employment_duration_current': employment.employment_duration_current or '',
                     'salary_current': employment.salary_current or '',
-                    'scope_current': employment.scope_current or '',
+                    'company_address': employment.company_address or '',
                     'company_email': employment.company_email or '',
                     'company_contact': employment.company_contact or '',
                     'contact_person': employment.contact_person or '',
                     'position_alt': employment.position or '',
-                    
-                    # Job alignment info
-                    'job_alignment_status': employment.job_alignment_status or '',
-                    'job_alignment_category': employment.job_alignment_category or '',
-                    'job_alignment_title': employment.job_alignment_title or '',
-                    'job_alignment_suggested_program': employment.job_alignment_suggested_program or '',
-                    'job_alignment_original_program': employment.job_alignment_original_program or '',
-                    
-                    # Status flags
+                    # Additional EmploymentHistory fields
+                    'awards_recognition_current': employment.awards_recognition_current or '',
                     'self_employed': employment.self_employed,
                     'high_position': employment.high_position,
                     'absorbed': employment.absorbed,
-                    
-                    # Awards and recognition
-                    'awards_recognition_current': employment.awards_recognition_current or '',
-                    'supporting_document_current': employment.supporting_document_current or '',
-                    'supporting_document_awards_recognition': employment.supporting_document_awards_recognition or '',
-                    
-                    # Unemployment
-                    'unemployment_reason': employment.unemployment_reason or '',
-                    
-                    # Timestamps
-                    'created_at': employment.created_at.strftime('%Y-%m-%d %H:%M:%S') if employment.created_at else '',
-                    'updated_at': employment.updated_at.strftime('%Y-%m-%d %H:%M:%S') if employment.updated_at else ''
+                    'has_employment_data': bool(employment.company_name_current and employment.company_name_current.strip() != '')
                 })
-            else:
-                return JsonResponse({
+            
+            # For Alumni accounts, check TrackerData
+            if is_alumni:
+                # Check if user has TrackerData
+                has_tracker_data = False
+                tracker = None
+                try:
+                    tracker = TrackerData.objects.get(user=user)
+                    has_tracker_data = bool(tracker.q_company_name or tracker.q_current_position or tracker.q_employment_status)
+                except TrackerData.DoesNotExist:
+                    has_tracker_data = False
+                    tracker = None
+                
+                if employment:
+                    response_data = {
+                        # Basic employment info - correctly mapped to model fields
+                        'organization_name': employment.company_name_current or '',
+                        'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
+                        'position': employment.position_current or '',
+                        'employment_status': employment.employment_duration_current or '',
+                        'company_address': employment.company_address or '',
+                        'sector': employment.sector_current or '',
+                        
+                        # Additional employment details
+                        'employment_duration_current': employment.employment_duration_current or '',
+                        'salary_current': employment.salary_current or '',
+                        'scope_current': employment.scope_current or '',
+                        'company_email': employment.company_email or '',
+                        'company_contact': employment.company_contact or '',
+                        'contact_person': employment.contact_person or '',
+                        'position_alt': employment.position or '',
+                        
+                        # Job alignment info
+                        'job_alignment_status': employment.job_alignment_status or '',
+                        'job_alignment_category': employment.job_alignment_category or '',
+                        'job_alignment_title': employment.job_alignment_title or '',
+                        'job_alignment_suggested_program': employment.job_alignment_suggested_program or '',
+                        'job_alignment_original_program': employment.job_alignment_original_program or '',
+                        
+                        # Status flags
+                        'self_employed': employment.self_employed,
+                        'high_position': employment.high_position,
+                        'absorbed': employment.absorbed,
+                        
+                        # Awards and recognition
+                        'awards_recognition_current': employment.awards_recognition_current or '',
+                        'supporting_document_current': employment.supporting_document_current or '',
+                        'supporting_document_awards_recognition': employment.supporting_document_awards_recognition or '',
+                        
+                        # Unemployment
+                        'unemployment_reason': employment.unemployment_reason or '',
+                        
+                        # Timestamps
+                        'created_at': employment.created_at.strftime('%Y-%m-%d %H:%M:%S') if employment.created_at else '',
+                        'updated_at': employment.updated_at.strftime('%Y-%m-%d %H:%M:%S') if employment.updated_at else '',
+                        
+                        # Part III: Employment Status fields
+                        # Use TrackerData fields if available (they have the actual dropdown values), otherwise fall back to EmploymentHistory
+                        'employment_type': tracker.q_employment_type if tracker else '',  # Will be set from self_employed or tracker if needed
+                        'current_employment_status': tracker.q_employment_permanent if tracker and tracker.q_employment_permanent else (employment.employment_duration_current or ''),
+                        'current_company_name': employment.company_name_current or (tracker.q_company_name if tracker else ''),
+                        'current_position': employment.position_current or (tracker.q_current_position if tracker else ''),
+                        'current_sector': tracker.q_sector_current if tracker and tracker.q_sector_current else (employment.sector_current or ''),
+                        'current_scope': tracker.q_scope_current if tracker and tracker.q_scope_current else (employment.scope_current or ''),
+                        'employment_duration': tracker.q_employment_duration if tracker and tracker.q_employment_duration else (employment.employment_duration_current or ''),
+                        'salary_range': tracker.q_salary_range if tracker and tracker.q_salary_range else (employment.salary_current or ''),
+                        'received_awards': tracker.q_awards_received if tracker and tracker.q_awards_received else (employment.awards_recognition_current or ''),
+                        'awards_supporting_doc': employment.supporting_document_awards_recognition or '',
+                        'employment_supporting_doc': employment.supporting_document_current or '',
+                        'employment_sector': employment.sector_current or '',
+                        
+                        # Part IV: Further Study fields (from AcademicInfo)
+                        'study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
+                        'post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
+                        'institution_name': academic_info.q_institution_name or '' if academic_info else '',
+                        'units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
+                        # Also include with q_ prefix for compatibility
+                        'q_study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
+                        'q_post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
+                        'q_institution_name': academic_info.q_institution_name or '' if academic_info else '',
+                        'q_units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
+                        # Account type and tracker data status
+                        'account_type': 'alumni',
+                        'has_tracker_data': has_tracker_data
+                    }
+                    
+                    # Set employment_type based on tracker data first, then self_employed flag
+                    if tracker and tracker.q_employment_type:
+                        response_data['employment_type'] = tracker.q_employment_type
+                    elif employment.self_employed:
+                        response_data['employment_type'] = 'Self-employed'
+                    else:
+                        response_data['employment_type'] = 'Employed by a company/organization'
+                    
+                    return JsonResponse(response_data)
+                else:
+                    # No employment but might have tracker data
+                    return JsonResponse({
+                        'account_type': 'alumni',
+                        'has_tracker_data': has_tracker_data,
                     'organization_name': '',
                     'date_hired': '',
                     'position': '',
@@ -3649,11 +3738,80 @@ def alumni_employment_view(request, user_id):
                     'unemployment_reason': '',
                     'created_at': '',
                     'updated_at': ''
+                    })
+            else:
+                # OJT without employment - return empty EmploymentHistory fields only
+                return JsonResponse({
+                    'account_type': 'ojt',
+                    'has_employment_data': False,
+                    'organization_name': '',
+                    'date_hired': '',
+                    'position': '',
+                    'sector': '',
+                    'scope_current': '',
+                    'employment_duration_current': '',
+                    'salary_current': '',
+                    'company_address': '',
+                    'company_email': '',
+                    'company_contact': '',
+                    'contact_person': '',
+                    'position_alt': '',
+                    'awards_recognition_current': '',
+                    'self_employed': False,
+                    'high_position': False,
+                    'absorbed': False
                 })
                 
         elif request.method == 'PUT':
             data = json.loads(request.body)
             
+            # For OJT accounts, only update EmploymentHistory fields (no Part III/IV)
+            if is_ojt:
+                employment, created = EmploymentHistory.objects.get_or_create(user=user)
+                
+                # Update only EmploymentHistory fields (no Part III/IV mapping)
+                if 'organization_name' in data:
+                    employment.company_name_current = data.get('organization_name', '')
+                if 'date_hired' in data:
+                    date_started = None
+                    if data.get('date_hired'):
+                        try:
+                            from datetime import datetime
+                            date_started = datetime.strptime(data['date_hired'], '%Y-%m-%d').date()
+                        except (ValueError, TypeError):
+                            date_started = None
+                    employment.date_started = date_started
+                if 'position' in data:
+                    employment.position_current = data.get('position', '')
+                if 'sector' in data:
+                    employment.sector_current = data.get('sector', '')
+                if 'scope_current' in data:
+                    employment.scope_current = data.get('scope_current', '')
+                if 'employment_duration_current' in data:
+                    employment.employment_duration_current = data.get('employment_duration_current', '')
+                if 'salary_current' in data:
+                    employment.salary_current = data.get('salary_current', '')
+                if 'company_address' in data:
+                    employment.company_address = data.get('company_address', '')
+                if 'company_email' in data:
+                    employment.company_email = data.get('company_email', '')
+                if 'company_contact' in data:
+                    employment.company_contact = data.get('company_contact', '')
+                if 'contact_person' in data:
+                    employment.contact_person = data.get('contact_person', '')
+                if 'position_alt' in data:
+                    employment.position = data.get('position_alt', '')
+                if 'awards_recognition_current' in data:
+                    employment.awards_recognition_current = data.get('awards_recognition_current', '')
+                
+                employment.save()
+                
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Employment data updated successfully'
+                })
+            
+            # For Alumni accounts, handle Part III/IV fields mapping
             # Handle date parsing
             date_started = None
             if data.get('date_hired'):
@@ -3664,20 +3822,102 @@ def alumni_employment_view(request, user_id):
                     # If date parsing fails, set to None
                     date_started = None
             
+            # Handle study start date parsing for Part IV
+            study_start_date = None
+            if data.get('study_start_date'):
+                try:
+                    from datetime import datetime
+                    study_start_date = datetime.strptime(data.get('study_start_date'), '%Y-%m-%d').date()
+                except (ValueError, TypeError):
+                    study_start_date = None
+            
+            # Handle unemployment reasons - save to TrackerData
+            if data.get('unemployment_reason') or data.get('q_unemployment_reason'):
+                unemployment_reasons = data.get('unemployment_reason') or data.get('q_unemployment_reason', [])
+                # Ensure it's a list
+                if isinstance(unemployment_reasons, str):
+                    import json
+                    try:
+                        unemployment_reasons = json.loads(unemployment_reasons)
+                    except:
+                        unemployment_reasons = [unemployment_reasons]
+                
+                # Update TrackerData with unemployment reasons
+                tracker_data, created = TrackerData.objects.get_or_create(user=user)
+                tracker_data.q_unemployment_reason = unemployment_reasons if isinstance(unemployment_reasons, list) else [unemployment_reasons]
+                tracker_data.q_employment_status = 'unemployed'
+                tracker_data.save()
+                
+                # Clear employment history if unemployed
+                if hasattr(user, 'employment'):
+                    employment = user.employment
+                    employment.company_name_current = ''
+                    employment.position_current = ''
+                    employment.save()
+                
+                return JsonResponse({'success': True, 'message': 'Unemployment information saved successfully'})
+            
             # Map frontend fields to backend model fields
             employment_data = {
-                'company_name_current': data.get('organization_name', ''),
+                'company_name_current': data.get('organization_name', '') or data.get('current_company_name', ''),
                 'date_started': date_started,
-                'position_current': data.get('position', ''),
-                'employment_duration_current': data.get('employment_status', ''),
+                'position_current': data.get('position', '') or data.get('current_position', ''),
+                'employment_duration_current': data.get('employment_status', '') or data.get('current_employment_status', '') or data.get('employment_duration', ''),
                 'company_address': data.get('company_address', ''),
-                'sector_current': data.get('sector', '')
+                'sector_current': data.get('sector', '') or data.get('current_sector', '') or data.get('employment_sector', ''),
+                'scope_current': data.get('scope_current', '') or data.get('current_scope', ''),
+                'salary_current': data.get('salary_current', '') or data.get('salary_range', ''),
+                'awards_recognition_current': data.get('awards_recognition_current', '') or data.get('received_awards', ''),
+                'supporting_document_current': data.get('supporting_document_current', '') or data.get('employment_supporting_doc', ''),
+                'supporting_document_awards_recognition': data.get('supporting_document_awards_recognition', '') or data.get('awards_supporting_doc', '')
             }
             
             # Update employment using service
             try:
+                from apps.shared.models import AcademicInfo
                 employment = UserService.update_employment_status(user, employment_data)
-                return JsonResponse({'message': 'Employment details updated successfully'})
+                
+                # Update Part IV: Further Study fields in AcademicInfo
+                academic_info, created = AcademicInfo.objects.get_or_create(user=user)
+                if data.get('study_start_date') or data.get('q_study_start_date'):
+                    academic_info.q_study_start_date = study_start_date or (academic_info.q_study_start_date if hasattr(academic_info, 'q_study_start_date') else None)
+                if data.get('post_graduate_degree') or data.get('q_post_graduate_degree'):
+                    academic_info.q_post_graduate_degree = data.get('post_graduate_degree') or data.get('q_post_graduate_degree', '')
+                if data.get('institution_name') or data.get('q_institution_name'):
+                    academic_info.q_institution_name = data.get('institution_name') or data.get('q_institution_name', '')
+                if data.get('units_obtained') or data.get('q_units_obtained'):
+                    academic_info.q_units_obtained = data.get('units_obtained') or data.get('q_units_obtained', '')
+                academic_info.save()
+                
+                # Update TrackerData with dropdown values from Part III
+                tracker_data, created = TrackerData.objects.get_or_create(user=user)
+                tracker_data.q_employment_status = 'employed'
+                
+                # Update Part III dropdown fields in TrackerData
+                if data.get('employment_type'):
+                    tracker_data.q_employment_type = data.get('employment_type')
+                if data.get('current_employment_status'):
+                    tracker_data.q_employment_permanent = data.get('current_employment_status')
+                if data.get('current_company_name'):
+                    tracker_data.q_company_name = data.get('current_company_name')
+                if data.get('current_position'):
+                    tracker_data.q_current_position = data.get('current_position')
+                if data.get('current_sector'):
+                    tracker_data.q_sector_current = data.get('current_sector')
+                if data.get('current_scope'):
+                    tracker_data.q_scope_current = data.get('current_scope')
+                if data.get('employment_duration'):
+                    tracker_data.q_employment_duration = data.get('employment_duration')
+                if data.get('salary_range'):
+                    tracker_data.q_salary_range = data.get('salary_range')
+                if data.get('received_awards'):
+                    tracker_data.q_awards_received = data.get('received_awards')
+                
+                if not data.get('unemployment_reason') and not data.get('q_unemployment_reason'):
+                    tracker_data.q_unemployment_reason = None
+                tracker_data.save()
+                
+                return JsonResponse({'success': True, 'message': 'Employment details updated successfully'})
             except Exception as service_error:
                 print(f"Error in UserService.update_employment_status: {service_error}")
                 import traceback
@@ -4158,6 +4398,7 @@ def repost_detail_view(request, repost_id):
             'comment_id': c.comment_id,
             'comment_content': c.comment_content,
             'date_created': c.date_created.isoformat() if c.date_created else None,
+            'replies_count': Reply.objects.filter(comment=c).count(),
             'user': {
                 'user_id': c.user.user_id,
                 'f_name': c.user.f_name,
@@ -4323,23 +4564,41 @@ def repost_comments_view(request, repost_id):
                 date_created=timezone.now()
             )
             
-            # Create mention notifications
+            # Determine repost type and original content info
+            if repost.donation_request:
+                repost_type = "donation repost"
+                repost_forum_id = None
+                repost_donation_id = repost.donation_request.donation_id
+                repost_post_id = None
+            elif repost.forum:
+                repost_type = "forum repost"
+                repost_forum_id = repost.forum.forum_id
+                repost_donation_id = None
+                repost_post_id = None
+            elif repost.post:
+                repost_type = "repost"
+                repost_forum_id = None
+                repost_donation_id = None
+                repost_post_id = repost.post.post_id
+            else:
+                repost_type = "repost"
+                repost_forum_id = None
+                repost_donation_id = None
+                repost_post_id = None
+            
+            # Create mention notifications with repost context
             create_mention_notifications(
                 content,
                 request.user,
-                comment_id=comment.comment_id
+                comment_id=comment.comment_id,
+                post_id=repost_post_id,
+                forum_id=repost_forum_id,
+                donation_id=repost_donation_id,
+                repost_id=repost.repost_id
             )
             
             # Create notification for repost owner
             if request.user.user_id != repost.user.user_id:
-                # Determine repost type
-                if repost.donation_request:
-                    repost_type = "donation repost"
-                elif repost.forum:
-                    repost_type = "forum repost"
-                else:
-                    repost_type = "repost"
-                
                 # Build notification content with appropriate ID based on repost type
                 if repost.post:
                     notif_content = f"{request.user.full_name} commented on your {repost_type}<!--POST_ID:{repost.post.post_id}--><!--REPOST_ID:{repost.repost_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->"
@@ -4620,7 +4879,7 @@ def post_comments_view(request, post_id):
 def comment_replies_view(request, comment_id):
     """Handle replies to comments"""
     try:
-        comment = Comment.objects.get(comment_id=comment_id)
+        comment = Comment.objects.select_related('post', 'forum', 'repost', 'donation_request').get(comment_id=comment_id)
         
         if request.method == "GET":
             # Get replies for the comment
@@ -4661,22 +4920,67 @@ def comment_replies_view(request, comment_id):
             # Award engagement points (+2 for reply)
             award_engagement_points(user, 'reply')
             
+            # Determine context info for notifications (post, forum, donation, or repost)
+            reply_post_id = None
+            reply_forum_id = None
+            reply_donation_id = None
+            reply_repost_id = None
+            
+            if comment.post:
+                reply_post_id = comment.post.post_id
+            elif comment.forum:
+                reply_forum_id = comment.forum.forum_id
+            elif comment.donation_request:
+                reply_donation_id = comment.donation_request.donation_id
+            elif comment.repost:
+                reply_repost_id = comment.repost.repost_id
+                # Also get the original content ID from the repost
+                if comment.repost.post:
+                    reply_post_id = comment.repost.post.post_id
+                elif comment.repost.forum:
+                    reply_forum_id = comment.repost.forum.forum_id
+                elif comment.repost.donation_request:
+                    reply_donation_id = comment.repost.donation_request.donation_id
+            
             # Create mention notifications
             create_mention_notifications(
                 data.get('reply_content', ''),
                 user,
-                post_id=comment.post.post_id if comment.post else None,
+                post_id=reply_post_id,
+                forum_id=reply_forum_id,
+                donation_id=reply_donation_id,
                 comment_id=comment.comment_id,
-                reply_id=reply.reply_id
+                reply_id=reply.reply_id,
+                repost_id=reply_repost_id
             )
             
             # Create notification for comment owner
             if user.user_id != comment.user.user_id:
+                # Build notification content based on comment context
+                if comment.repost:
+                    # Comment is on a repost - include REPOST_ID
+                    if comment.repost.post:
+                        notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--POST_ID:{comment.repost.post.post_id}--><!--REPOST_ID:{comment.repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
+                    elif comment.repost.forum:
+                        notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--FORUM_ID:{comment.repost.forum.forum_id}--><!--REPOST_ID:{comment.repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
+                    elif comment.repost.donation_request:
+                        notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--DONATION_ID:{comment.repost.donation_request.donation_id}--><!--REPOST_ID:{comment.repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
+                    else:
+                        notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--REPOST_ID:{comment.repost.repost_id}--><!--ACTOR_ID:{user.user_id}-->"
+                elif comment.post:
+                    notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--POST_ID:{comment.post.post_id}--><!--ACTOR_ID:{user.user_id}-->"
+                elif comment.forum:
+                    notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--FORUM_ID:{comment.forum.forum_id}--><!--ACTOR_ID:{user.user_id}-->"
+                elif comment.donation_request:
+                    notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--DONATION_ID:{comment.donation_request.donation_id}--><!--ACTOR_ID:{user.user_id}-->"
+                else:
+                    notif_content = f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--ACTOR_ID:{user.user_id}-->"
+                
                 notification = Notification.objects.create(
                     user=comment.user,
                     notif_type='reply',
                     subject='Comment Replied',
-                    notifi_content=f"{user.full_name} replied to your comment<!--COMMENT_ID:{comment.comment_id}--><!--REPLY_ID:{reply.reply_id}--><!--ACTOR_ID:{user.user_id}-->",
+                    notifi_content=notif_content,
                     notif_date=timezone.now()
                 )
                 
@@ -5788,7 +6092,7 @@ def forum_repost_view(request, forum_id):
         
         # Create notification for forum owner (only if the reposter is not the forum owner)
         if request.user.user_id != forum.user.user_id:
-            Notification.objects.create(
+            forum_repost_notification = Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
                 subject='Forum Reposted',
