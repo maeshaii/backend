@@ -381,7 +381,11 @@ def search_users(request):
         Q(f_name__icontains=query) |
         Q(l_name__icontains=query) |
         Q(acc_username__icontains=query),
-        Q(account_type__user=True) | Q(account_type__ojt=True),
+        Q(account_type__user=True) | 
+        Q(account_type__ojt=True) | 
+        Q(account_type__admin=True) | 
+        Q(account_type__peso=True) | 
+        Q(account_type__coordinator=True),
         user_status='active',
     ).exclude(user_id=request.user.user_id).distinct()[:10]
     from apps.shared.serializers import UserSerializer

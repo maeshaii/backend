@@ -163,7 +163,7 @@ class UserService:
                 Q(l_name__icontains=query) |
                 Q(acc_username__icontains=query) |
                 Q(profile__email__icontains=query) |
-                Q(academic_info__course__icontains=query)
+                Q(academic_info__program__icontains=query)
             )
         
         if filters:
@@ -171,7 +171,7 @@ class UserService:
                 queryset = queryset.filter(academic_info__year_graduated=filters['year_graduated'])
             
             if 'course' in filters:
-                queryset = queryset.filter(academic_info__course__icontains=filters['course'])
+                queryset = queryset.filter(academic_info__program__icontains=filters['course'])
             
             if 'employment_status' in filters:
                 queryset = queryset.filter(tracker_data__q_employment_status=filters['employment_status'])

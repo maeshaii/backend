@@ -347,11 +347,17 @@ class CreateConversationSerializer(serializers.ModelSerializer):
         if len(users) != len(value):
             raise serializers.ValidationError("Some users do not exist.")
         
-        # Check if users have messaging access (regular user or ojt)
+        # Check if users have messaging access (alumni, ojt, admin, peso, or coordinator)
         invalid_users = []
         for user in users:
             account_type = user.account_type
-            if not (getattr(account_type, 'user', False) or getattr(account_type, 'ojt', False)):
+            if not (
+                getattr(account_type, 'user', False) or 
+                getattr(account_type, 'ojt', False) or 
+                getattr(account_type, 'admin', False) or 
+                getattr(account_type, 'peso', False) or 
+                getattr(account_type, 'coordinator', False)
+            ):
                 invalid_users.append(user.full_name)
         
         if invalid_users:
@@ -365,6 +371,27 @@ class CreateConversationSerializer(serializers.ModelSerializer):
         # Ensure at least one participant id is provided via either field
         if not attrs.get('participant_ids') and not attrs.get('participant_id'):
             raise serializers.ValidationError({'participant_ids': 'Provide participant_id or participant_ids.'})
+        
+        # If participant_id is provided, validate it here (since validate_participant_ids only runs for participant_ids)
+        if attrs.get('participant_id') and not attrs.get('participant_ids'):
+            participant_id = attrs.get('participant_id')
+            try:
+                user = User.objects.get(user_id=participant_id)
+                account_type = user.account_type
+                # Check if user has messaging access (alumni, ojt, admin, peso, or coordinator)
+                if not (
+                    getattr(account_type, 'user', False) or 
+                    getattr(account_type, 'ojt', False) or 
+                    getattr(account_type, 'admin', False) or 
+                    getattr(account_type, 'peso', False) or 
+                    getattr(account_type, 'coordinator', False)
+                ):
+                    raise serializers.ValidationError(
+                        {'participant_id': f'User {user.full_name} does not have messaging access.'}
+                    )
+            except User.DoesNotExist:
+                raise serializers.ValidationError({'participant_id': 'User does not exist.'})
+        
         return attrs
     
     def create(self, validated_data):
@@ -399,6 +426,21 @@ class CreateConversationSerializer(serializers.ModelSerializer):
         if len(other_users) == 1:
             other_user = other_users[0]
             
+            # Admin and Peso users should receive direct messages (not message requests)
+            # Allow direct messaging if either user is admin or peso
+            other_is_official = getattr(other_user.account_type, 'admin', False) or getattr(other_user.account_type, 'peso', False)
+            current_is_official = getattr(current_user.account_type, 'admin', False) or getattr(current_user.account_type, 'peso', False)
+            
+            # If either user is admin/peso, create direct conversation (not message request)
+            if other_is_official or current_is_official:
+                conversation = Conversation.objects.create(
+                    is_message_request=False,
+                    request_initiator=None,
+                )
+                conversation.participants.set([current_user, other_user])
+                return conversation
+            
+            # For regular users, check mutual follow
             # Check if current user follows other user
             current_follows_other = Follow.objects.filter(
                 follower=current_user,

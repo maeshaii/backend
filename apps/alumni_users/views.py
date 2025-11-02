@@ -180,7 +180,7 @@ def alumni_detail_view(request, user_id):
             'profile_bio': user.profile.profile_bio if hasattr(user, 'profile') and user.profile else None,
             'middle_name': get_field('m_name', 'middle name'),
             'last_name': get_field('l_name', 'last name'),
-            'course': getattr(academic_info, 'course', None) if academic_info else get_field('course', 'course'),
+            'course': getattr(academic_info, 'program', None) if academic_info else get_field('program', 'course', 'program'),
             # Always prefer academic_info.year_graduated for batch
             'batch': batch_year if batch_year is not None else get_field('year_graduated', 'batch', 'year graduated'),
             'status': get_field('user_status', 'status'),
