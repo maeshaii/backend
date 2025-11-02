@@ -1549,7 +1549,7 @@ def import_ojt_view(request):
                 account_type__ojt=True,
                 user_status__iexact='Active',
                 academic_info__isnull=False  # Ensure academic_info exists
-            ).select_related('academic_info')
+            ).select_related('academic_info', 'ojt_info')
             
             # Filter by coordinator's old year+section combinations
             year_section_filters = Q()
@@ -1563,15 +1563,78 @@ def import_ojt_view(request):
                 old_batch_users = old_batch_users.filter(year_section_filters)
         
         # Step 3: Deactivate students NOT in the new import
+        # Special rule: If OJT status is "Incomplete", deactivation is based on the NEW batch's send date
+        # (SendDate is already imported at the top of the file)
+        
+        # Check if new batch has a send date set
+        new_batch_send_date = None
+        try:
+            # Try to find send date for the new batch
+            new_batch_send_date_obj = SendDate.objects.filter(
+                coordinator=coordinator_username,
+                batch_year=normalized_year
+            ).first()
+            
+            if new_batch_send_date_obj and new_batch_send_date_obj.send_date:
+                new_batch_send_date = new_batch_send_date_obj.send_date
+                print(f"📅 New batch ({normalized_year}) has send date: {new_batch_send_date}")
+            else:
+                print(f"📅 New batch ({normalized_year}) has no send date set")
+        except Exception as e:
+            print(f"⚠️ Could not check send date for new batch: {e}")
+        
         for old_user in old_batch_users:
             old_ctu_id = old_user.acc_username
             
             if old_ctu_id not in new_import_ctu_ids:
-                # Student not in new import - deactivate them
-                old_user.user_status = 'Inactive'
-                old_user.save(update_fields=['user_status'])
-                deactivated_count += 1
-                print(f"🔴 Deactivated old batch student: {old_ctu_id} (not in new import)")
+                # Check OJT status before deactivating
+                should_deactivate = True
+                skip_reason = None
+                
+                # Get OJT info if exists
+                try:
+                    # Use select_related to efficiently get OJT info if it exists
+                    ojt_info = getattr(old_user, 'ojt_info', None)
+                    ojt_status = ojt_info.ojtstatus if ojt_info and ojt_info.ojtstatus else None
+                    
+                    # If OJT status is "Incomplete", check if new batch send date has passed
+                    # Keep incomplete students active until new batch send date is overdue
+                    if ojt_status and str(ojt_status).strip().lower() in ['incomplete', 'in complete']:
+                        if new_batch_send_date:
+                            # Check if send date has passed (is overdue)
+                            today = timezone.now().date()
+                            if today < new_batch_send_date:
+                                # Send date has NOT passed yet - DO NOT deactivate incomplete students
+                                should_deactivate = False
+                                days_until_due = (new_batch_send_date - today).days
+                                skip_reason = f"OJT status is Incomplete and new batch ({normalized_year}) send date ({new_batch_send_date}) is not yet due ({days_until_due} days remaining) - will keep active"
+                                print(f"🟡 Skipping deactivation for {old_ctu_id}: {skip_reason}")
+                            else:
+                                # Send date has passed (overdue) - deactivate incomplete students
+                                should_deactivate = True
+                                days_overdue = (today - new_batch_send_date).days
+                                print(f"⚠️ OJT status is Incomplete and new batch ({normalized_year}) send date ({new_batch_send_date}) is overdue ({days_overdue} days) - will deactivate {old_ctu_id}")
+                        else:
+                            # New batch has no send date - proceed with normal deactivation
+                            print(f"⚠️ OJT status is Incomplete but new batch ({normalized_year}) has no send date - will deactivate {old_ctu_id}")
+                            should_deactivate = True
+                    else:
+                        # OJT status is not "Incomplete" - proceed with normal deactivation
+                        should_deactivate = True
+                except Exception as e:
+                    # If error accessing OJT info, proceed with normal deactivation
+                    print(f"⚠️ Could not check OJT status for {old_ctu_id}: {e}")
+                    should_deactivate = True
+                
+                if should_deactivate:
+                    # Student not in new import - deactivate them
+                    old_user.user_status = 'Inactive'
+                    old_user.save(update_fields=['user_status'])
+                    deactivated_count += 1
+                    print(f"🔴 Deactivated old batch student: {old_ctu_id} (not in new import)")
+                else:
+                    # Skip deactivation due to incomplete OJT status
+                    print(f"🟡 Skipped deactivation for {old_ctu_id}: {skip_reason}")
             else:
                 # Student IS in new import - ensure they're active (will be updated)
                 if old_user.user_status != 'Active':
@@ -1986,7 +2049,7 @@ def import_ojt_view(request):
                             ojt_company_profile, created = OJTCompanyProfile.objects.get_or_create(
                                 user=existing_user,
                                 defaults={
-                                    'company_name': str(company_name).strip() if has_new_company_info else None,
+                                    'company_name': str(company_name).strip().upper() if has_new_company_info else None,
                                     'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
                                     'end_date': ojt_end_date if 'ojt_end_date' in locals() else None,
                                 }
@@ -1995,7 +2058,7 @@ def import_ojt_view(request):
                             if not created:
                                 # Update existing profile
                                 if has_new_company_info:
-                                    ojt_company_profile.company_name = str(company_name).strip()
+                                    ojt_company_profile.company_name = str(company_name).strip().upper()
                                 if 'ojt_start_date' in locals() and ojt_start_date:
                                     ojt_company_profile.start_date = ojt_start_date
                                 if 'ojt_end_date' in locals() and ojt_end_date:
@@ -2127,7 +2190,7 @@ def import_ojt_view(request):
                     from apps.shared.models import OJTCompanyProfile
                     ojt_company_kwargs = {
                         'user': ojt_user,
-                        'company_name': str(company_name_new).strip() if pd.notna(company_name_new) and str(company_name_new).strip() else None,
+                        'company_name': str(company_name_new).strip().upper() if pd.notna(company_name_new) and str(company_name_new).strip() else None,
                         'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
                         'end_date': ojt_end_date,
                     }
@@ -2858,6 +2921,7 @@ def get_ojt_students_view(request):
     """
     try:
         coordinator_username = request.GET.get('coordinator', '')
+        section_filter = request.GET.get('section', '')  # Optional section filter
         
         if not coordinator_username:
             return JsonResponse({'success': False, 'message': 'Coordinator username is required'}, status=400)
@@ -2878,10 +2942,15 @@ def get_ojt_students_view(request):
         # Get all OJT users matching these year+section combinations
         students_data = []
         for year, section in year_sections:
+            # Filter by section if provided
+            if section_filter and section != section_filter:
+                continue
+                
             users = User.objects.filter(
                 account_type__ojt=True,
                 academic_info__year_graduated=year,
-                academic_info__section=section
+                academic_info__section=section,
+                user_status__iexact='Active'  # Only active students
             ).select_related('ojt_info', 'academic_info')
             
             for user in users:
@@ -3416,7 +3485,6 @@ def approve_ojt_to_alumni_view(request):
                 'message': f'No completed OJT students found for year {year_int}'
             }, status=400)
 
-        passwords = []
         approved_count = 0
         batch_created = False
         errors = []
@@ -3449,13 +3517,11 @@ def approve_ojt_to_alumni_view(request):
             for user in completed_ojt_users:
                 try:
                     print(f"processing user_id={user.user_id} username={user.acc_username}")
-                    # Generate password
-                    password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
                     
-                    # Update user to alumni account type
+                    # Update user to alumni account type (keep existing password)
                     user.account_type = alumni_type
                     user.user_status = 'active'
-                    user.acc_password = make_password(password)
+                    # Do NOT update password - keep the existing OJT password
                     user.save()
 
                     # Clear sent to admin flag since user is now approved
@@ -3463,15 +3529,7 @@ def approve_ojt_to_alumni_view(request):
                         user.ojt_info.is_sent_to_admin = False
                         user.ojt_info.save()
 
-                    # Store initial password for export
-                    # Set is_active=True so users get forced to change password on first login
-                    UserInitialPassword.objects.update_or_create(
-                        user=user,
-                        defaults={
-                                'password_encrypted': password,
-                            'is_active': True  # Force password change for security
-                        }
-                    )
+                    # Do NOT create/update UserInitialPassword - keep existing password
 
                     # Ensure academic info year_graduated is set
                     if hasattr(user, 'academic_info') and user.academic_info:
@@ -3489,12 +3547,7 @@ def approve_ojt_to_alumni_view(request):
                         }
                     )
 
-                    passwords.append({
-                        'user_id': user.user_id,
-                        'username': user.acc_username,
-                        'password': password,
-                        'name': f"{user.f_name} {user.l_name}"
-                    })
+                    # Do NOT include password in response - user keeps existing password
 
                     approved_count += 1
                 except Exception as conv_e:
@@ -3508,7 +3561,7 @@ def approve_ojt_to_alumni_view(request):
             'year': year_int,
             'batch_created': batch_created,
             'batch_year': str(year_int),
-            'passwords': passwords,
+            'message': f'Successfully approved {approved_count} OJT student(s) to alumni. They keep their existing passwords.',
             'errors': errors
         }, status=200 if approved_count > 0 else 400)
 
@@ -3591,24 +3644,13 @@ def approve_individual_ojt_to_alumni_view(request):
 
             batch_created = not existing_alumni
 
-            # Generate password
-            password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
-            
-            # Update user to alumni account type
+            # Update user to alumni account type (keep existing password)
             user.account_type = alumni_type
             user.user_status = 'active'
-            user.acc_password = make_password(password)
+            # Do NOT update password - keep the existing OJT password
             user.save()
 
-            # Store initial password for export
-            # Set is_active=True so users get forced to change password on first login
-            UserInitialPassword.objects.update_or_create(
-                user=user,
-                defaults={
-                    'password_encrypted': password,  # Store plaintext for now, will be encrypted
-                    'is_active': True  # Force password change for security
-                }
-            )
+            # Do NOT create/update UserInitialPassword - keep existing password
 
             # Ensure academic info year_graduated is set
             if hasattr(user, 'academic_info') and user.academic_info:
@@ -3632,12 +3674,7 @@ def approve_individual_ojt_to_alumni_view(request):
             'year': batch_year,
             'batch_created': batch_created,
             'batch_year': str(batch_year),
-            'passwords': [{
-                'user_id': user.user_id,
-                'username': user.acc_username,
-                'password': password,
-                'name': f"{user.f_name} {user.m_name or ''} {user.l_name}"
-            }]
+            'message': 'Successfully approved OJT student to alumni. User keeps existing password.'
         })
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
