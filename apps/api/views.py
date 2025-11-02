@@ -2241,7 +2241,8 @@ def import_ojt_view(request):
             'reactivated_count': reactivated_count,  # Students reactivated (same CTU_ID)
             'errors': errors[:10],  # Limit errors to first 10
             'passwords': exported_passwords,  # Include passwords in response (only for first import)
-            'sections': detected_sections  # Include detected sections
+            'sections': detected_sections,  # Include detected sections
+            'batch_year': normalized_year  # Include batch year for filename generation
         }
         
         if retaking_count > 0:
