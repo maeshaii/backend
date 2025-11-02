@@ -3571,7 +3571,7 @@ def alumni_profile_view(request, user_id):
 def alumni_employment_view(request, user_id):
     """Get and update alumni employment data."""
     try:
-        from apps.shared.models import User, EmploymentHistory, TrackerData
+        from apps.shared.models import User, EmploymentHistory, TrackerData, OJTCompanyProfile
         from apps.shared.services import UserService
         
         user = User.objects.get(user_id=user_id)
@@ -3587,29 +3587,38 @@ def alumni_employment_view(request, user_id):
             academic_info = employment_data.get('academic_info')
             tracker_data = employment_data.get('tracker_data')
             
-            # For OJT accounts, return only EmploymentHistory fields (no Part III/IV questions)
-            if is_ojt and employment:
+            # For OJT accounts, return data from OJTCompanyProfile
+            if is_ojt:
+                # Get OJT company profile
+                ojt_company_profile = None
+                try:
+                    ojt_company_profile = OJTCompanyProfile.objects.get(user=user)
+                except OJTCompanyProfile.DoesNotExist:
+                    ojt_company_profile = None
+                
                 return JsonResponse({
                     'account_type': 'ojt',
-                    # Basic employment info from EmploymentHistory only
-                    'organization_name': employment.company_name_current or '',
-                    'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
-                    'position': employment.position_current or '',
-                    'sector': employment.sector_current or '',
-                    'scope_current': employment.scope_current or '',
-                    'employment_duration_current': employment.employment_duration_current or '',
-                    'salary_current': employment.salary_current or '',
-                    'company_address': employment.company_address or '',
-                    'company_email': employment.company_email or '',
-                    'company_contact': employment.company_contact or '',
-                    'contact_person': employment.contact_person or '',
-                    'position_alt': employment.position or '',
+                    # Basic employment info from OJTCompanyProfile
+                    'organization_name': ojt_company_profile.company_name or '' if ojt_company_profile else '',
+                    'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment and employment.date_started else '',
+                    'position': employment.position_current or '' if employment else '',
+                    'sector': employment.sector_current or '' if employment else '',
+                    'scope_current': employment.scope_current or '' if employment else '',
+                    'employment_duration_current': employment.employment_duration_current or '' if employment else '',
+                    'salary_current': employment.salary_current or '' if employment else '',
+                    'company_address': ojt_company_profile.company_address or '' if ojt_company_profile else '',
+                    'company_email': ojt_company_profile.company_email or '' if ojt_company_profile else '',
+                    'company_contact': ojt_company_profile.company_contact or '' if ojt_company_profile else '',
+                    'contact_person': ojt_company_profile.contact_person or '' if ojt_company_profile else '',
+                    'position_alt': ojt_company_profile.position or '' if ojt_company_profile else '',
+                    # Start date from OJTCompanyProfile
+                    'ojt_start_date': ojt_company_profile.start_date.strftime('%Y-%m-%d') if ojt_company_profile and ojt_company_profile.start_date else '',
                     # Additional EmploymentHistory fields
-                    'awards_recognition_current': employment.awards_recognition_current or '',
-                    'self_employed': employment.self_employed,
-                    'high_position': employment.high_position,
-                    'absorbed': employment.absorbed,
-                    'has_employment_data': bool(employment.company_name_current and employment.company_name_current.strip() != '')
+                    'awards_recognition_current': employment.awards_recognition_current or '' if employment else '',
+                    'self_employed': employment.self_employed if employment else False,
+                    'high_position': employment.high_position if employment else False,
+                    'absorbed': employment.absorbed if employment else False,
+                    'has_employment_data': bool(ojt_company_profile and ojt_company_profile.company_name and ojt_company_profile.company_name.strip() != '')
                 })
             
             # For Alumni accounts, check TrackerData
@@ -5668,6 +5677,7 @@ def forum_list_create_view(request):
                     'likes': [{
                         'user_id': l.user.user_id,
                         'f_name': l.user.f_name,
+                        'm_name': l.user.m_name,
                         'l_name': l.user.l_name,
                         'profile_pic': build_profile_pic_url(l.user),
                         'initials': None if build_profile_pic_url(l.user) else (
@@ -5733,6 +5743,7 @@ def forum_list_create_view(request):
                             'user': {
                                 'user_id': f.user.user_id,
                                 'f_name': f.user.f_name,
+                                'm_name': f.user.m_name,
                                 'l_name': f.user.l_name,
                                 'profile_pic': build_profile_pic_url(f.user),
                             }
@@ -5741,6 +5752,7 @@ def forum_list_create_view(request):
                     'user': {
                         'user_id': f.user.user_id,
                         'f_name': f.user.f_name,
+                        'm_name': f.user.m_name,
                         'l_name': f.user.l_name,
                         'profile_pic': build_profile_pic_url(f.user),
                     }
@@ -5816,6 +5828,7 @@ def forum_detail_edit_view(request, forum_id):
                 'likes': [{
                     'user_id': l.user.user_id,
                     'f_name': l.user.f_name,
+                    'm_name': l.user.m_name,
                     'l_name': l.user.l_name,
                     'profile_pic': build_profile_pic_url(l.user),
                     'initials': None if build_profile_pic_url(l.user) else (
@@ -5830,6 +5843,7 @@ def forum_detail_edit_view(request, forum_id):
                     'user': {
                         'user_id': c.user.user_id,
                         'f_name': c.user.f_name,
+                        'm_name': c.user.m_name,
                         'l_name': c.user.l_name,
                         'profile_pic': build_profile_pic_url(c.user),
                     }
@@ -5841,6 +5855,7 @@ def forum_detail_edit_view(request, forum_id):
                     'user': {
                         'user_id': r.user.user_id,
                         'f_name': r.user.f_name,
+                        'm_name': r.user.m_name,
                         'l_name': r.user.l_name,
                         'profile_pic': build_profile_pic_url(r.user),
                     },
@@ -5853,6 +5868,7 @@ def forum_detail_edit_view(request, forum_id):
                         'user': {
                             'user_id': forum.user.user_id,
                             'f_name': forum.user.f_name,
+                            'm_name': forum.user.m_name,
                             'l_name': forum.user.l_name,
                             'profile_pic': build_profile_pic_url(forum.user),
                         }
@@ -5861,6 +5877,7 @@ def forum_detail_edit_view(request, forum_id):
                 'user': {
                     'user_id': forum.user.user_id,
                     'f_name': forum.user.f_name,
+                    'm_name': forum.user.m_name,
                     'l_name': forum.user.l_name,
                     'profile_pic': build_profile_pic_url(forum.user),
                 }

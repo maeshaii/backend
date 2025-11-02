@@ -45,7 +45,7 @@ class Migration(migrations.Migration):
                     sql=(
                         "DO $$ BEGIN "
                         "IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'shared_rewardhistory_given_idx') THEN "
-                        "CREATE INDEX shared_rewardhistory_given_idx ON shared_rewardhistory ((-extract(epoch from given_at))); "
+                        "CREATE INDEX shared_rewardhistory_given_idx ON shared_rewardhistory (given_at DESC); "
                         "END IF; END $$;"
                     ),
                     reverse_sql=(
