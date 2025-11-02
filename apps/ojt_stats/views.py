@@ -16,6 +16,7 @@ from statistics import mean
 from django.utils import timezone
 from datetime import datetime, timedelta
 import json
+from apps.shared.utils.stats import safe_mode_related, safe_mean_related
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def ojt_statistics_view(request):
 		if year and year != 'ALL':
 			ojt_qs = ojt_qs.filter(academic_info__year_graduated=year)
 		if course and course != 'ALL':
-			ojt_qs = ojt_qs.filter(academic_info__course=course)
+			ojt_qs = ojt_qs.filter(academic_info__program=course)
 		status_counts = Counter(ojt_qs.values_list('ojtstatus', flat=True))
 		year_counts = Counter(User.objects.filter(account_type__ojt=True).values_list('academic_info__year_graduated', flat=True))
 		filtered_year_counts = {y: c for y, c in year_counts.items() if y is not None}
@@ -112,7 +113,7 @@ def generate_ojt_statistics_view(request):
 		if year and year != 'ALL':
 			ojt_qs = ojt_qs.filter(academic_info__year_graduated=year)
 		if course and course != 'ALL':
-			ojt_qs = ojt_qs.filter(academic_info__course=course)
+			ojt_qs = ojt_qs.filter(academic_info__program=course)
 		total_ojt = ojt_qs.count()
 		if stats_type == 'ALL':
 			status_counts = Counter(ojt_qs.values_list('ojtstatus', flat=True))
@@ -127,11 +128,11 @@ def generate_ojt_statistics_view(request):
 				'completion_rate': completed_rate,
 				'ongoing_rate': ongoing_rate,
 				'incomplete_rate': incomplete_rate,
-				'most_common_course': safe_mode(ojt_qs, 'academic_info__course'),
-				'most_common_section': safe_mode(ojt_qs, 'academic_info__section'),
+				'most_common_course': safe_mode_related(ojt_qs, 'academic_info__program'),
+				'most_common_section': safe_mode_related(ojt_qs, 'academic_info__section'),
 				'most_common_gender': safe_mode(ojt_qs, 'gender'),
-				'most_common_civil_status': safe_mode(ojt_qs, 'profile__civil_status'),
-				'average_age': safe_mean(ojt_qs, 'profile__age'),
+				'most_common_civil_status': safe_mode_related(ojt_qs, 'profile__civil_status'),
+				'average_age': safe_mean_related(ojt_qs, 'profile__age'),
 				'year': year,
 				'course': course
 			})
@@ -164,21 +165,21 @@ def generate_ojt_statistics_view(request):
 				'total_ojt': total_ojt,
 				'completed': {
 					'count': completed_students.count(),
-					'most_common_course': safe_mode(completed_students, 'course'),
-					'most_common_section': safe_mode(completed_students, 'section'),
-					'most_common_school': safe_mode(completed_students, 'school_name'),
+					'most_common_course': safe_mode_related(completed_students, 'academic_info__program'),
+					'most_common_section': safe_mode_related(completed_students, 'academic_info__section'),
+					'most_common_school': safe_mode_related(completed_students, 'academic_info__school_name'),
 				},
 				'ongoing': {
 					'count': ongoing_students.count(),
-					'most_common_course': safe_mode(ongoing_students, 'course'),
-					'most_common_section': safe_mode(ongoing_students, 'section'),
-					'most_common_school': safe_mode(ongoing_students, 'school_name'),
+					'most_common_course': safe_mode_related(ongoing_students, 'academic_info__program'),
+					'most_common_section': safe_mode_related(ongoing_students, 'academic_info__section'),
+					'most_common_school': safe_mode_related(ongoing_students, 'academic_info__school_name'),
 				},
 				'incomplete': {
 					'count': incomplete_students.count(),
-					'most_common_course': safe_mode(incomplete_students, 'course'),
-					'most_common_section': safe_mode(incomplete_students, 'section'),
-					'most_common_school': safe_mode(incomplete_students, 'school_name'),
+					'most_common_course': safe_mode_related(incomplete_students, 'academic_info__program'),
+					'most_common_section': safe_mode_related(incomplete_students, 'academic_info__section'),
+					'most_common_school': safe_mode_related(incomplete_students, 'academic_info__school_name'),
 				},
 				'year': year,
 				'course': course
@@ -206,7 +207,7 @@ def generate_ojt_statistics_view(request):
 						'percentage': round((total_incomplete / total_ojt * 100), 2) if total_ojt > 0 else 0
 					}
 				},
-				'most_common_course': safe_mode(ojt_qs, 'academic_info__course'),
+				'most_common_course': safe_mode_related(ojt_qs, 'academic_info__program'),
 				'year': year,
 				'course': course
 			})
@@ -237,7 +238,7 @@ def export_detailed_ojt_data(request):
 		if year and year != 'ALL':
 			ojt_qs = ojt_qs.filter(academic_info__year_graduated=year)
 		if course and course != 'ALL':
-			ojt_qs = ojt_qs.filter(academic_info__course=course)
+			ojt_qs = ojt_qs.filter(academic_info__program=course)
 		if status_filter and status_filter != 'ALL':
 			ojt_qs = ojt_qs.filter(ojtstatus=status_filter)
 		export_data = []

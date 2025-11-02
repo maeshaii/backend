@@ -371,7 +371,7 @@ def generate_statistics_view(request):
                     'position': employment.position_current if employment else None,
                     'company': employment.company_name_current if employment else None,
                     'sector': employment.sector_current if employment else None,
-                    'course': academic.course if academic else None,
+                    'course': academic.program if academic else None,
                     'year_graduated': academic.year_graduated if academic else None,
                     'email': profile.email if profile else None,
                     'phone': profile.phone_num if profile else None,
@@ -487,7 +487,7 @@ def export_detailed_alumni_data(request):
                     'Gender': alumni.gender,
                     'Birthdate': str(profile.birthdate) if profile and profile.birthdate else '',
                     'Year_Graduated': getattr(academic_info, 'year_graduated', None) if academic_info else None,
-                    'Program': getattr(academic_info, 'course', None) if academic_info else None,
+                    'Program': getattr(academic_info, 'program', None) if academic_info else None,
                     'Section': getattr(academic_info, 'section', None) if academic_info else '',
                     'Status': alumni.user_status,
                     'Phone_Number': getattr(profile, 'phone_num', None) if profile else None,
@@ -512,10 +512,14 @@ def export_detailed_alumni_data(request):
                     'Profile_Bio': getattr(profile, 'profile_bio', None) if profile else None,
                     'Profile_Resume': safe_file_field(getattr(profile, 'profile_resume', None)) if profile else '',
                 }
-                # Add tracker answers
+                # Add tracker answers and submission date
                 tracker_responses = TrackerResponse.objects.filter(user=alumni).order_by('-submitted_at')
                 latest_tracker = tracker_responses.first() if tracker_responses.exists() else None
                 tracker_answers = latest_tracker.answers if latest_tracker and latest_tracker.answers else {}
+                
+                # Add tracker submission date for quarterly calculations
+                data['Tracker_Submission_Date'] = latest_tracker.submitted_at.strftime('%Y-%m-%d') if latest_tracker and latest_tracker.submitted_at else ''
+                
                 for qid, qtext in tracker_questions.items():
                     answer = tracker_answers.get(str(qid)) or tracker_answers.get(qid)
                     if isinstance(answer, list):

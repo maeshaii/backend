@@ -42,7 +42,7 @@ def list_ojt_users(request):
         if year and year != 'ALL':
             ojt_users = ojt_users.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
-            ojt_users = ojt_users.filter(academic_info__course=course)
+            ojt_users = ojt_users.filter(academic_info__program=course)
         if status and status != 'ALL':
             ojt_users = ojt_users.filter(ojt_info__ojtstatus=status)
         if search:
@@ -70,7 +70,7 @@ def list_ojt_users(request):
                 'middle_name': user.m_name,
                 'last_name': user.l_name,
                 'email': getattr(profile, 'email', None) if profile else None,
-                'course': getattr(academic, 'course', None) if academic else None,
+                'course': getattr(academic, 'program', None) if academic else None,
                 'section': getattr(academic, 'section', None) if academic else None,
                 'year_graduated': getattr(academic, 'year_graduated', None) if academic else None,
                 'ojt_status': getattr(ojtinfo, 'ojtstatus', None) if ojtinfo else None,
@@ -131,7 +131,7 @@ def get_ojt_user_details(request, user_id):
             'Social_Media': getattr(profile, 'social_media', None) if profile else None,
             'Email': getattr(profile, 'email', None) if profile else None,
             'Address': getattr(profile, 'address', None) if profile else None,
-            'Course': getattr(academic, 'course', None) if academic else None,
+            'Course': getattr(academic, 'program', None) if academic else None,
             'Ojt_Start_Date': getattr(ojtinfo, 'ojt_start_date', None) if ojtinfo else None,
             'Ojt_End_Date': getattr(ojtinfo, 'ojt_end_date', None) if ojtinfo else None,
             'Status': getattr(ojtinfo, 'ojtstatus', None) if ojtinfo else None,
@@ -355,12 +355,12 @@ def ojt_users_summary(request):
         if year and year != 'ALL':
             ojt_users = ojt_users.filter(academic_info__year_graduated=year)
         if course and course != 'ALL':
-            ojt_users = ojt_users.filter(academic_info__course=course)
+            ojt_users = ojt_users.filter(academic_info__program=course)
         
         # Calculate statistics
         total_users = ojt_users.count()
         status_counts = ojt_users.values('ojt_info__ojtstatus').annotate(count=models.Count('ojt_info__ojtstatus'))
-        course_counts = ojt_users.values('academic_info__course').annotate(count=models.Count('academic_info__course'))
+        course_counts = ojt_users.values('academic_info__program').annotate(count=models.Count('academic_info__program'))
         year_counts = ojt_users.values('academic_info__year_graduated').annotate(count=models.Count('academic_info__year_graduated'))
         
         return JsonResponse({
