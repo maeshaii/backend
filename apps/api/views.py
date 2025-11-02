@@ -1477,6 +1477,8 @@ def import_ojt_view(request):
         errors = []
         exported_passwords = []  # List to collect (username, password) for export
         total_rows = int(getattr(df, 'shape', [0])[0] or 0)
+        deactivated_count = 0  # Count old batch students deactivated
+        reactivated_count = 0  # Count students reactivated (same CTU_ID in new batch)
 
         # Ensure OJT account type exists for new OJT users
         try:
@@ -1489,6 +1491,79 @@ def import_ojt_view(request):
             )
         except Exception:
             ojt_account_type = None
+        
+        # ===== NEW BATCH IMPORT LOGIC =====
+        # Step 1: Get all CTU_IDs from the new import
+        new_import_ctu_ids = set()
+        for idx, row in df.iterrows():
+            ctu_id = str(row.get('CTU_ID', '')).strip()
+            if ctu_id:
+                new_import_ctu_ids.add(ctu_id)
+        print(f"📋 New import contains {len(new_import_ctu_ids)} unique CTU_IDs")
+        
+        # Step 2: Find all existing OJT students from old batches for this coordinator
+        from django.db.models import Q
+        from apps.shared.models import AcademicInfo
+        
+        # Get all import records by this coordinator (except current batch)
+        old_imports = OJTImport.objects.filter(
+            coordinator=coordinator_username
+        ).exclude(batch_year=normalized_year)
+        
+        # Get year+section combinations from old imports
+        old_year_sections = set()
+        for imp in old_imports:
+            year = getattr(imp, 'batch_year', None)
+            section = getattr(imp, 'section', None)
+            if year:
+                old_year_sections.add((year, section))
+        
+        # Find all OJT students from old batches (only if old imports exist)
+        old_batch_users = User.objects.none()  # Start with empty queryset
+        
+        if old_year_sections:
+            # Find all OJT students from old batches
+            old_batch_users = User.objects.filter(
+                account_type__ojt=True,
+                user_status__iexact='Active',
+                academic_info__isnull=False  # Ensure academic_info exists
+            ).select_related('academic_info')
+            
+            # Filter by coordinator's old year+section combinations
+            year_section_filters = Q()
+            for year, section in old_year_sections:
+                if section:
+                    year_section_filters |= Q(academic_info__year_graduated=year, academic_info__section=section)
+                else:
+                    year_section_filters |= Q(academic_info__year_graduated=year)
+            
+            if year_section_filters:
+                old_batch_users = old_batch_users.filter(year_section_filters)
+        
+        # Step 3: Deactivate students NOT in the new import
+        for old_user in old_batch_users:
+            old_ctu_id = old_user.acc_username
+            
+            if old_ctu_id not in new_import_ctu_ids:
+                # Student not in new import - deactivate them
+                old_user.user_status = 'Inactive'
+                old_user.save(update_fields=['user_status'])
+                deactivated_count += 1
+                print(f"🔴 Deactivated old batch student: {old_ctu_id} (not in new import)")
+            else:
+                # Student IS in new import - ensure they're active (will be updated)
+                if old_user.user_status != 'Active':
+                    old_user.user_status = 'Active'
+                    old_user.save(update_fields=['user_status'])
+                    reactivated_count += 1
+                    print(f"🟢 Reactivated student: {old_ctu_id} (in new import)")
+        
+        print(f"📊 Batch import summary:")
+        print(f"   - Deactivated {deactivated_count} old batch students")
+        print(f"   - Reactivated {reactivated_count} students (will be updated)")
+        print(f"   - Processing {len(new_import_ctu_ids)} students from new import")
+        # ===== END NEW BATCH IMPORT LOGIC =====
+        
         for index, row in df.iterrows():
             print(f"--- Processing Row {index+2} ---")
             try:
@@ -2094,11 +2169,13 @@ def import_ojt_view(request):
         
         response_data = {
             'success': True,
-            'message': f'OJT import completed. Created: {created_count}, Updated: {updating_count}, Skipped: {skipped_count}',
+            'message': f'OJT import completed. Created: {created_count}, Updated: {updating_count}, Skipped: {skipped_count}, Deactivated: {deactivated_count}',
             'created_count': created_count,
             'updating_count': updating_count,
             'skipped_count': skipped_count,
             'retaking_count': retaking_count,
+            'deactivated_count': deactivated_count,  # Old batch students deactivated
+            'reactivated_count': reactivated_count,  # Students reactivated (same CTU_ID)
             'errors': errors[:10],  # Limit errors to first 10
             'passwords': exported_passwords,  # Include passwords in response (only for first import)
             'sections': detected_sections  # Include detected sections
@@ -2188,7 +2265,8 @@ def ojt_statistics_view(request):
                 ojt_count = User.objects.filter(
                     academic_info__year_graduated=year,
                     academic_info__section=section,
-                    account_type__ojt=True  # Only count OJT students, not alumni
+                    account_type__ojt=True,  # Only count OJT students, not alumni
+                    user_status__iexact='Active'  # Only count active students
                 ).exclude(
                     acc_username='coordinator'  # Exclude coordinator users
                 ).exclude(
@@ -2537,12 +2615,18 @@ def ojt_students_by_company_view(request):
         
         from apps.shared.models import EmploymentHistory
         
-        # Get all employment records for this company
-        employment_records = EmploymentHistory.objects.filter(
-            company_name_current__iexact=company_name
-        ).select_related('user', 'user__ojt_info', 'user__academic_info')
+        print(f"🔍 Looking for company: '{company_name}'")
+        print(f"🔍 Coordinator: '{coordinator_username}'")
         
-        # Filter by coordinator if provided
+        # Get all employment records for this company (without filtering by active status)
+        all_employment_records = EmploymentHistory.objects.filter(
+            company_name_current__iexact=company_name
+        ).select_related('user', 'user__ojt_info', 'user__academic_info', 'user__account_type')
+        
+        print(f"📊 Found {all_employment_records.count()} total EmploymentHistory records for company '{company_name}'")
+        
+        # Filter by coordinator if provided (only for active students list)
+        employment_records = all_employment_records
         if coordinator_username:
             from apps.shared.models import OJTImport
             coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
@@ -2566,15 +2650,16 @@ def ojt_students_by_company_view(request):
             
             if year_section_filters:
                 employment_records = employment_records.filter(year_section_filters)
+                print(f"📊 After coordinator filter: {employment_records.count()} records")
         
-        # Build student list
+        # Build student list (only active OJT students)
         students = []
         for emp in employment_records:
             user = emp.user
             ojt_info = getattr(user, 'ojt_info', None)
             
-            # Only include OJT students (not alumni)
-            if user.account_type and user.account_type.ojt:
+            # Only include active OJT students (not alumni)
+            if user.account_type and user.account_type.ojt and (not hasattr(user, 'user_status') or getattr(user, 'user_status', '').lower() == 'active'):
                 students.append({
                     'ctu_id': user.acc_username,
                     'first_name': user.f_name or '',
@@ -2587,12 +2672,153 @@ def ojt_students_by_company_view(request):
                     'position': emp.position or '',
                     'status': ojt_info.ojtstatus if ojt_info else 'Not Started'
                 })
+                print(f"✅ Added student: {user.acc_username} with company data")
         
-        return JsonResponse({
+        print(f"📊 Active students found: {len(students)}")
+        
+        # Get company profile information (even if no active students)
+        company_profile = None
+        from apps.shared.models import OJTCompanyProfile
+        from django.db.models import Q
+        
+        print(f"🔍 Building company profile...")
+        
+        # First, try to get from active students (if any)
+        if students and len(students) > 0:
+            company_profile = {
+                'company_name': students[0].get('company', company_name),
+                'company_address': students[0].get('company_address', '') or '',
+                'company_email': students[0].get('company_email', '') or '',
+                'company_contact': students[0].get('company_contact', '') or '',
+                'contact_person': students[0].get('contact_person', '') or '',
+                'position': students[0].get('position', '') or ''
+            }
+            print(f"✅ Got company profile from active students: {company_profile}")
+        
+        # If no profile from active students, try OJTCompanyProfile
+        if not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact')):
+            company_profiles = OJTCompanyProfile.objects.filter(
+                company_name__iexact=company_name
+            ).select_related('user', 'user__academic_info')
+            
+            # Filter by coordinator if provided
+            if coordinator_username:
+                from apps.shared.models import OJTImport
+                coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+                
+                # Get unique year+section combinations
+                year_sections = set()
+                for imp in coordinator_imports:
+                    year = getattr(imp, 'batch_year', None)
+                    section = getattr(imp, 'section', None)
+                    if year:
+                        year_sections.add((year, section))
+                
+                # Filter by coordinator's year+section combinations
+                year_section_filters = Q()
+                for year, section in year_sections:
+                    if section:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                    else:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year)
+                
+                if year_section_filters:
+                    company_profiles = company_profiles.filter(year_section_filters)
+            
+            # Get the first company profile with the most complete information
+            for profile in company_profiles:
+                if profile.company_address or profile.company_email or profile.company_contact or profile.contact_person:
+                    company_profile = {
+                        'company_name': profile.company_name or company_name,
+                        'company_address': profile.company_address or '',
+                        'company_email': profile.company_email or '',
+                        'company_contact': profile.company_contact or '',
+                        'contact_person': profile.contact_person or '',
+                        'position': profile.position or ''
+                    }
+                    break
+        
+        # If still no profile, try EmploymentHistory (even for inactive students)
+        if not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact') and not company_profile.get('contact_person')):
+            print(f"🔍 No profile from active students, searching ALL EmploymentHistory records...")
+            
+            # Use the all_employment_records we already fetched (includes inactive users)
+            print(f"📊 Checking {all_employment_records.count()} EmploymentHistory records...")
+            
+            # Try to find one with company details
+            for idx, emp_record in enumerate(all_employment_records):
+                print(f"   Record {idx+1}: user={emp_record.user.acc_username}, address={bool(emp_record.company_address)}, email={bool(emp_record.company_email)}, contact={bool(emp_record.company_contact)}, person={bool(emp_record.contact_person)}")
+                if emp_record.company_address or emp_record.company_email or emp_record.company_contact or emp_record.contact_person:
+                    company_profile = {
+                        'company_name': emp_record.company_name_current or company_name,
+                        'company_address': emp_record.company_address or '',
+                        'company_email': emp_record.company_email or '',
+                        'company_contact': emp_record.company_contact or '',
+                        'contact_person': emp_record.contact_person or '',
+                        'position': emp_record.position or ''
+                    }
+                    print(f"✅ Found company profile from EmploymentHistory record {idx+1}: {company_profile}")
+                    break
+            
+            # If still nothing, just get the first one (even if empty)
+            if (not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact'))) and all_employment_records.exists():
+                first_emp = all_employment_records.first()
+                company_profile = {
+                    'company_name': first_emp.company_name_current or company_name,
+                    'company_address': first_emp.company_address or '',
+                    'company_email': first_emp.company_email or '',
+                    'company_contact': first_emp.company_contact or '',
+                    'contact_person': first_emp.contact_person or '',
+                    'position': first_emp.position or ''
+                }
+                print(f"⚠️ Using first EmploymentHistory record (may be empty): {company_profile}")
+        
+        # If still no profile, create empty structure
+        if not company_profile:
+            company_profile = {
+                'company_name': company_name,
+                'company_address': '',
+                'company_email': '',
+                'company_contact': '',
+                'contact_person': '',
+                'position': ''
+            }
+        
+        # Debug logging
+        print(f"📊 Company Profile Final Result for '{company_name}':")
+        print(f"   - Students found: {len(students)}")
+        print(f"   - Company profile: {company_profile}")
+        print(f"   - Has address: {bool(company_profile.get('company_address'))}")
+        print(f"   - Has email: {bool(company_profile.get('company_email'))}")
+        print(f"   - Has contact: {bool(company_profile.get('company_contact'))}")
+        print(f"   - Has contact person: {bool(company_profile.get('contact_person'))}")
+        
+        # Ensure company_profile is always a dict, never None
+        if company_profile is None:
+            company_profile = {
+                'company_name': company_name,
+                'company_address': '',
+                'company_email': '',
+                'company_contact': '',
+                'contact_person': '',
+                'position': ''
+            }
+        
+        response_data = {
             'success': True,
             'students': students,
-            'count': len(students)
-        })
+            'count': len(students),
+            'company_profile': company_profile  # Always include company profile
+        }
+        
+        print(f"📤 PRE-RESPONSE CHECK:")
+        print(f"   - response_data keys: {list(response_data.keys())}")
+        print(f"   - company_profile in response_data: {'company_profile' in response_data}")
+        print(f"   - company_profile value: {response_data.get('company_profile')}")
+        print(f"   - company_profile type: {type(response_data.get('company_profile'))}")
+        print(f"📤 Sending response with company_profile: {response_data['company_profile']}")
+        
+        return JsonResponse(response_data, safe=False)
         
     except Exception as e:
         print(f"Error in ojt_students_by_company_view: {str(e)}")
