@@ -438,20 +438,25 @@ def update_tracker_accepting_responses_view(request, tracker_form_id):
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def get_active_tracker_form(request):
-    form = TrackerForm.objects.order_by('-id').first()  # Fixed: use 'id' instead of 'tracker_form_id'
-    if form:
-        return JsonResponse({'tracker_form_id': form.pk})
-    
-    # If no TrackerForm exists, create one automatically
+    # Check if TrackerForm with id=1 exists (required by constraint)
     try:
-        default_form = TrackerForm.objects.create(
-            title="CTU MAIN ALUMNI TRACKER",
-            description="Default tracker form for CTU alumni",
-            accepting_responses=True
-        )
-        return JsonResponse({'tracker_form_id': default_form.pk})
-    except Exception as e:
-        return JsonResponse({'tracker_form_id': None, 'error': str(e)}, status=500)
+        form = TrackerForm.objects.get(pk=1)
+        return JsonResponse({'tracker_form_id': form.pk})
+    except TrackerForm.DoesNotExist:
+        # If no TrackerForm exists, create one with id=1 (required by constraint)
+        try:
+            default_form = TrackerForm.objects.create(
+                id=1,  # Explicitly set id=1 to satisfy the CheckConstraint
+                title="CTU MAIN ALUMNI TRACKER",
+                description="Default tracker form for CTU alumni",
+                accepting_responses=True
+            )
+            return JsonResponse({'tracker_form_id': default_form.pk})
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            traceback.print_exc()
+            return JsonResponse({'tracker_form_id': None, 'error': error_msg}, status=500)
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])

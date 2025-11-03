@@ -43,7 +43,7 @@ def categorize_job(job_title):
     Categorize a job title into one or more programs based on keywords.
     Returns list of program codes: ['BSIT', 'BSIS', 'BIT-CT']
     """
-    shipped_lower = job_title.lower()
+    title_lower = job_title.lower()
     programs = []
     
     # BSIT - Information Technology (software, networks, databases, programming)
@@ -83,7 +83,7 @@ def categorize_job(job_title):
     
     # If no match, try to make intelligent guess based on common patterns
     if not programs:
-        if 'manager' in title_lower or 'director children_title_lower:
+        if 'manager' in title_lower or 'director' in title_lower:
             programs.append('BSIS')  # Management roles → BSIS
         elif 'tech' in title_lower:
             programs.append('BIT-CT')  # Generic tech → BIT-CT
