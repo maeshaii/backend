@@ -342,16 +342,14 @@ def submit_tracker_response_view(request):
         # Legacy direct writes to `User` have been removed.
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().
 
-        # Award engagement points for completing tracker form (+30 pts for Alumni only)
+        # Award engagement points for completing tracker form (configurable points for Alumni only)
         if user.account_type and user.account_type.user:  # Check if Alumni
             try:
-                from apps.shared.models import UserPoints
-                user_points, created = UserPoints.objects.get_or_create(user=user)
-                # Award 30 points for completing tracker form
-                user_points.add_points('tracker_form', 30)
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info(f"Awarded 30 points to {user.f_name} {user.l_name} for completing tracker form")
+                from apps.shared.models import UserPoints, EngagementPointsSettings
+                from apps.api.views import award_engagement_points
+                
+                # Use the award_engagement_points function which handles settings
+                award_engagement_points(user, 'tracker_form')
             except Exception as e:
                 import logging
                 logger = logging.getLogger(__name__)
