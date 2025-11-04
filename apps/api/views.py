@@ -9386,6 +9386,65 @@ def reward_requests_list_view(request):
         }, status=500)
 
 
+def get_business_days_after(start_date, days):
+    """
+    Calculate expiration date excluding weekends and holidays.
+    Returns a datetime that is 'days' business days after start_date.
+    """
+    from datetime import date
+    
+    # Philippine holidays (common national holidays)
+    # Format: (month, day) - year-specific holidays would need to be updated annually
+    philippine_holidays = [
+        # Fixed holidays
+        (1, 1),   # New Year's Day
+        (2, 25),  # EDSA Revolution Anniversary
+        (4, 9),   # Day of Valor (Araw ng Kagitingan)
+        (5, 1),   # Labor Day
+        (6, 12),  # Independence Day
+        (8, 21),  # Ninoy Aquino Day
+        (8, 26),  # National Heroes Day (last Monday of August, but fixed as 26th for simplicity)
+        (11, 30), # Bonifacio Day
+        (12, 25), # Christmas Day
+        (12, 30), # Rizal Day
+        # Add more holidays as needed
+    ]
+    
+    # Extract date from timezone-aware or naive datetime
+    if hasattr(start_date, 'date'):
+        current_date = start_date.date()
+        original_time = start_date.time()
+        is_timezone_aware = timezone.is_aware(start_date)
+    else:
+        current_date = start_date
+        original_time = datetime.min.time()
+        is_timezone_aware = False
+    
+    business_days_added = 0
+    check_date = current_date
+    
+    while business_days_added < days:
+        check_date += timedelta(days=1)
+        
+        # Skip weekends (Saturday = 5, Sunday = 6)
+        if check_date.weekday() >= 5:
+            continue
+        
+        # Skip holidays
+        is_holiday = (check_date.month, check_date.day) in philippine_holidays
+        if is_holiday:
+            continue
+        
+        business_days_added += 1
+    
+    # Convert back to datetime, preserving timezone awareness
+    result_datetime = datetime.combine(check_date, original_time)
+    if is_timezone_aware:
+        result_datetime = timezone.make_aware(result_datetime)
+    
+    return result_datetime
+
+
 @api_view(['POST'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -9430,9 +9489,10 @@ def approve_reward_request_view(request, request_id):
         reward_request.approved_at = timezone.now()
         reward_request.approved_by = admin_user
         
-        # Handle voucher expiration (5 days)
+        # Handle voucher expiration (5 business days, excluding weekends and holidays)
         if is_voucher:
-            reward_request.expires_at = timezone.now() + timedelta(days=5)
+            approval_date = timezone.now()
+            reward_request.expires_at = get_business_days_after(approval_date, 5)
             voucher_code = data.get('voucher_code')
             if voucher_code:
                 reward_request.voucher_code = voucher_code
@@ -9460,7 +9520,7 @@ def approve_reward_request_view(request, request_id):
         if reward_request.voucher_code:
             notification_content += f'Voucher code: {reward_request.voucher_code}. '
         if is_voucher:
-            notification_content += f'Please claim it within 5 days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
+            notification_content += f'Please claim it within 5 business days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
         else:
             notification_content += 'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office.'
         
@@ -9469,6 +9529,8 @@ def approve_reward_request_view(request, request_id):
         notification_content += f'<!--AUTHOR_NAME:{admin_user.full_name}-->'
         if admin_profile_pic:
             notification_content += f'<!--AUTHOR_PIC:{admin_profile_pic}-->'
+        # Add reward request ID for direct navigation to reward details
+        notification_content += f'<!--REQUEST_ID:{request_id}-->'
         
         notification = Notification.objects.create(
             user=reward_request.user,
@@ -9621,6 +9683,8 @@ def claim_reward_request_view(request, request_id):
             notification_message += f'Voucher code: {reward_request.voucher_code}. '
         if reward_request.notes:
             notification_message += reward_request.notes
+        # Add reward request ID for direct navigation to reward details
+        notification_message += f'<!--REQUEST_ID:{request_id}-->'
         
         notification = Notification.objects.create(
             user=reward_user,
