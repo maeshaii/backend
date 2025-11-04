@@ -9462,7 +9462,7 @@ def approve_reward_request_view(request, request_id):
         if is_voucher:
             notification_content += f'Please claim it within 5 days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
         else:
-            notification_content += 'Click "Claim" to confirm your reward. Then pick it up in person at the CTU office.'
+            notification_content += 'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office.'
         
         # Add admin info to notification content for profile picture display
         notification_content += f'<!--AUTHOR_ID:{admin_user.user_id}-->'
@@ -9513,8 +9513,11 @@ def approve_reward_request_view(request, request_id):
 @permission_classes([IsAuthenticated])
 def claim_reward_request_view(request, request_id):
     """
-    User claims a reward after admin approval
+    User claims a reward after admin approval, OR admin releases merchandise
     THIS is where points and inventory get deducted
+    
+    For vouchers: User clicks "Claim" after admin approval
+    For merchandise: Admin clicks "Release" after marking as ready_for_pickup
     """
     try:
         user = request.user
@@ -9528,12 +9531,17 @@ def claim_reward_request_view(request, request_id):
                 'message': 'Reward request not found'
             }, status=404)
         
-        # Verify this request belongs to the user
-        if reward_request.user.user_id != user.user_id:
-            return JsonResponse({
-                'success': False,
-                'message': 'Unauthorized access'
-            }, status=403)
+        # Check if user is admin releasing merchandise
+        is_admin = hasattr(user, 'account_type') and user.account_type.admin
+        is_merchandise = reward_request.reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
+        
+        # Verify this request belongs to the user, OR admin is releasing merchandise
+        if not is_admin or not is_merchandise:
+            if reward_request.user.user_id != user.user_id:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Unauthorized access'
+                }, status=403)
         
         # Check if request is approved or ready for pickup
         if reward_request.status not in ['approved', 'ready_for_pickup']:
@@ -9566,8 +9574,12 @@ def claim_reward_request_view(request, request_id):
                 'message': 'Reward item is out of stock'
             }, status=400)
         
+        # For admin releasing merchandise, use the reward request user's points
+        # For regular users claiming, use their own points
+        reward_user = reward_request.user if (is_admin and is_merchandise) else user
+        
         # Get user points and verify they still have enough
-        user_points, created = UserPoints.objects.get_or_create(user=user)
+        user_points, created = UserPoints.objects.get_or_create(user=reward_user)
         if user_points.total_points < reward_request.points_cost:
             return JsonResponse({
                 'success': False,
@@ -9588,22 +9600,33 @@ def claim_reward_request_view(request, request_id):
         # Create reward history entry (this is what appears in reward history)
         # Use approved_by if available, otherwise use the admin who approved (or system)
         reward_history = RewardHistory.objects.create(
-            user=user,
+            user=reward_user,
             reward_name=reward_item.name,
             reward_type=reward_item.type,
             reward_value=reward_item.value,
             points_deducted=reward_request.points_cost,
-            given_by=reward_request.approved_by  # Admin who approved the request
+            given_by=reward_request.approved_by if reward_request.approved_by else user  # Admin who approved/released
         )
         
-        logger.info(f"Reward history entry created: {reward_history.history_id} for user {user.full_name} - {reward_item.name}")
+        logger.info(f"Reward history entry created: {reward_history.history_id} for user {reward_user.full_name} - {reward_item.name}")
         
-        # Create notification for user
+        # Create notification for the reward user (not the admin)
+        notification_message = f'Congratulations! '
+        if is_admin and is_merchandise:
+            notification_message += f'Your merchandise "{reward_item.name}" has been released by admin. '
+        else:
+            notification_message += f'You have successfully claimed "{reward_item.name}". '
+        notification_message += f'{reward_request.points_cost} points have been deducted from your account. '
+        if reward_request.voucher_code:
+            notification_message += f'Voucher code: {reward_request.voucher_code}. '
+        if reward_request.notes:
+            notification_message += reward_request.notes
+        
         notification = Notification.objects.create(
-            user=user,
+            user=reward_user,
             notif_type='Reward',
-            subject=f'🎉 Reward Claimed Successfully!',
-            notifi_content=f'Congratulations! You have successfully claimed "{reward_item.name}". {reward_request.points_cost} points have been deducted from your account. {f"Voucher code: {reward_request.voucher_code}. " if reward_request.voucher_code else ""}{reward_request.notes if reward_request.notes else ""}',
+            subject=f'🎉 Reward {"Released" if (is_admin and is_merchandise) else "Claimed"} Successfully!',
+            notifi_content=notification_message,
             notif_date=timezone.now(),
             is_read=False
         )
@@ -9615,11 +9638,14 @@ def claim_reward_request_view(request, request_id):
         except Exception as e:
             logger.error(f"Error broadcasting notification: {e}")
         
-        logger.info(f"User {user.full_name} claimed reward request {request_id}")
+        if is_admin and is_merchandise:
+            logger.info(f"Admin {user.full_name} released merchandise reward request {request_id} for user {reward_user.full_name}")
+        else:
+            logger.info(f"User {user.full_name} claimed reward request {request_id}")
         
         return JsonResponse({
             'success': True,
-            'message': f'Reward "{reward_item.name}" claimed successfully!',
+            'message': f'Reward "{reward_item.name}" {"released" if (is_admin and is_merchandise) else "claimed"} successfully!',
             'points_deducted': reward_request.points_cost,
             'remaining_points': user_points.total_points,
             'voucher_code': reward_request.voucher_code if reward_request.voucher_code else None
