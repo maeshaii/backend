@@ -106,7 +106,8 @@ def tracker_responses_view(request):
             responses.append({
                 'user_id': user.user_id,
                 'name': f'{user.f_name} {user.l_name}',
-                'answers': merged_answers
+                'answers': merged_answers,
+                'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
             })
         return JsonResponse({'success': True, 'responses': responses})
     except Exception as e:

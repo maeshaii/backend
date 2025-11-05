@@ -602,3 +602,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'count': event['count']
 		}))
 		logger.info(f"NotificationConsumer: Sent count update to WebSocket client")
+
+	async def points_update(self, event):
+		"""Handle points update from group"""
+		logger.info(f"NotificationConsumer: Received points_update event: {event}")
+		await self.send(text_data=json.dumps({
+			'type': 'points_update',
+			'points': event['points']
+		}))
+		logger.info(f"NotificationConsumer: Sent points update to WebSocket client")

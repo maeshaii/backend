@@ -104,6 +104,62 @@ def award_engagement_points(user, action_type):
         if points > 0:
             user_points.add_points(action_type, points)
             logger.info(f"Awarded {points} points to {user.full_name} for {action_type}")
+            
+            # Broadcast points update via WebSocket for real-time updates
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_points_update
+                from django.db.models import Q
+                
+                # Get updated points data directly from database
+                user_points.refresh_from_db()
+                
+                # Calculate rank
+                higher_points_count = UserPoints.objects.filter(
+                    Q(user__account_type__user=True) | Q(user__account_type__ojt=True),
+                    total_points__gt=user_points.total_points
+                ).count()
+                rank = higher_points_count + 1
+                
+                # Build points breakdown
+                points_breakdown = {
+                    'likes': {
+                        'points': user_points.points_from_likes,
+                        'count': user_points.like_count
+                    },
+                    'comments': {
+                        'points': user_points.points_from_comments,
+                        'count': user_points.comment_count
+                    },
+                    'shares': {
+                        'points': user_points.points_from_shares,
+                        'count': user_points.share_count
+                    },
+                    'replies': {
+                        'points': user_points.points_from_replies,
+                        'count': user_points.reply_count
+                    },
+                    'posts': {
+                        'points': user_points.points_from_posts,
+                        'count': user_points.post_count
+                    },
+                    'posts_with_photos': {
+                        'points': user_points.points_from_posts_with_photos,
+                        'count': user_points.post_with_photo_count
+                    },
+                    'tracker_form': {
+                        'points': user_points.points_from_tracker_form,
+                        'count': user_points.tracker_form_count
+                    }
+                }
+                
+                broadcast_points_update(user.user_id, {
+                    'user_id': user.user_id,
+                    'total_points': user_points.total_points,
+                    'rank': rank,
+                    'points_breakdown': points_breakdown
+                })
+            except Exception as e:
+                logger.error(f"Error broadcasting points update for user {user.user_id}: {e}")
     
     except Exception as e:
         logger.error(f"Error awarding points to user {user.user_id}: {e}")
@@ -8644,40 +8700,39 @@ def engagement_leaderboard_view(request):
 @permission_classes([IsAuthenticated])
 def engagement_points_settings_view(request):
     """
-    GET: Get current engagement points settings.
-    POST: Update engagement points settings.
-    Admin only.
+    GET: Get current engagement points settings (accessible to all authenticated users).
+    POST: Update engagement points settings (admin only).
     """
     try:
-        # Check if user is admin
-        user = request.user
-        if not (hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)):
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
         from apps.shared.models import EngagementPointsSettings
         settings = EngagementPointsSettings.get_settings()
         
-        # Handle GET request
+        # Handle GET request - accessible to all authenticated users
         if request.method == 'GET':
             return JsonResponse({
                 'success': True,
                 'settings': {
                     'enabled': settings.enabled,
-                    'like': settings.like_points,
-                    'comment': settings.comment_points,
-                    'share': settings.share_points,
-                    'reply': settings.reply_points,
-                    'post': settings.post_points,
-                    'post_with_photo': settings.post_with_photo_points,
-                    'tracker_form': settings.tracker_form_points
+                    'like_points': settings.like_points,
+                    'comment_points': settings.comment_points,
+                    'share_points': settings.share_points,
+                    'reply_points': settings.reply_points,
+                    'post_points': settings.post_points,
+                    'post_with_photo_points': settings.post_with_photo_points,
+                    'tracker_form_points': settings.tracker_form_points
                 }
             })
         
-        # Handle POST request
+        # Handle POST request - admin only
         elif request.method == 'POST':
+            # Check if user is admin
+            user = request.user
+            if not (hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Admin access required'
+                }, status=403)
+            
             # Update settings from request data
             data = request.data
             
@@ -8984,6 +9039,7 @@ def give_reward_view(request):
         data = json.loads(request.body)
         user_id = data.get('user_id')
         reward_id = data.get('reward_id')
+        is_tracker_reward = data.get('is_tracker_reward', False)  # Optional parameter
         
         if not user_id or not reward_id:
             return JsonResponse({
@@ -9024,16 +9080,18 @@ def give_reward_view(request):
         # Get or create user points
         user_points, created = UserPoints.objects.get_or_create(user=recipient)
         
-        # Check if user has enough points
-        if user_points.total_points < required_points:
-            return JsonResponse({
-                'success': False,
-                'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
-            }, status=400)
-        
-        # Deduct points from user
-        user_points.total_points -= required_points
-        user_points.save()
+        # For tracker rewards, skip point deduction (admin reward, not point redemption)
+        if not is_tracker_reward:
+            # Check if user has enough points (only for regular rewards)
+            if user_points.total_points < required_points:
+                return JsonResponse({
+                    'success': False,
+                    'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
+                }, status=400)
+            
+            # Deduct points from user (only for regular rewards)
+            user_points.total_points -= required_points
+            user_points.save()
         
         # Decrease quantity
         reward_item.quantity -= 1
@@ -9045,16 +9103,25 @@ def give_reward_view(request):
             reward_name=reward_item.name,
             reward_type=reward_item.type,
             reward_value=reward_item.value,
-            points_deducted=required_points,
+            points_deducted=0 if is_tracker_reward else required_points,  # No points deducted for tracker rewards
             given_by=admin_user
         )
         
         # Create notification for the user
+        if is_tracker_reward:
+            # Custom notification message for tracker form rewards (no points deducted)
+            notification_content = f'🎉 You are lucky! As a token of appreciation for cooperating and answering the tracker form, you have been chosen to receive a reward. Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}). No points were deducted - this is a special reward from the admin. Thank you for your participation!'
+            notification_subject = '🎁 Token of Appreciation - Tracker Form Response!'
+        else:
+            # Standard notification message for regular rewards (points deducted)
+            notification_content = f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!'
+            notification_subject = '🎁 You received a reward!'
+        
         notification = Notification.objects.create(
             user=recipient,
             notif_type='Reward',
-            subject=f'🎁 You received a reward!',
-            notifi_content=f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!',
+            subject=notification_subject,
+            notifi_content=notification_content,
             notif_date=timezone.now(),
             is_read=False
         )
@@ -9066,13 +9133,16 @@ def give_reward_view(request):
         except Exception as e:
             logger.error(f"Error broadcasting reward notification: {e}")
         
-        logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
+        if is_tracker_reward:
+            logger.info(f"Admin {admin_user.full_name} gave tracker reward '{reward_item.name}' to {recipient.full_name} (no points deducted)")
+        else:
+            logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
         
         return JsonResponse({
             'success': True,
             'message': f'Reward "{reward_item.name}" successfully given to {recipient.full_name}',
             'notification_created': True,
-            'points_deducted': required_points,
+            'points_deducted': 0 if is_tracker_reward else required_points,
             'user_remaining_points': user_points.total_points
         })
     
@@ -9109,8 +9179,19 @@ def reward_history_view(request):
         # Get limit parameter (default to 50)
         limit = int(request.GET.get('limit', 50))
         
+        # Get filter parameter for tracker rewards (points_deducted = 0)
+        tracker_only = request.GET.get('tracker_only', 'false').lower() == 'true'
+        
         # Fetch reward history
-        history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
+        if tracker_only:
+            # Filter for tracker rewards: points_deducted = 0 AND given_by is an admin
+            # Tracker rewards are rewards given by admin for answering tracker form (no points deducted)
+            history = RewardHistory.objects.select_related('user', 'given_by').filter(
+                points_deducted=0,
+                given_by__isnull=False
+            ).order_by('-given_at')[:limit]
+        else:
+            history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
         
         history_data = []
         for entry in history:
@@ -9218,6 +9299,22 @@ def request_reward_view(request):
             return JsonResponse({
                 'success': False,
                 'message': f'Insufficient points. Required: {required_points}, Available: {user_points.total_points}'
+            }, status=400)
+        
+        # Check if user has already requested a reward this month (limit: 1 per month)
+        now = timezone.now()
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Count reward requests in current month (any status)
+        monthly_requests = RewardRequest.objects.filter(
+            user=user,
+            requested_at__gte=start_of_month
+        ).count()
+        
+        if monthly_requests >= 1:
+            return JsonResponse({
+                'success': False,
+                'message': 'You can only request 1 reward per month. Please wait until next month to request another reward.'
             }, status=400)
         
         # Create pending reward request (NO points or inventory deduction yet)
