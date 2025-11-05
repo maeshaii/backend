@@ -59,7 +59,8 @@ def award_engagement_points(user, action_type):
     Award engagement points to a user for specific actions.
     
     Points are configurable via EngagementPointsSettings model.
-    Only awards points to Alumni users.
+    Awards points to Alumni and OJT users.
+    OJT users cannot receive tracker_form points since they can't answer the tracker.
     """
     try:
         # Get points settings
@@ -70,14 +71,19 @@ def award_engagement_points(user, action_type):
         if not settings.enabled:
             return
         
-        # Only award points to Alumni users
+        # Only award points to Alumni or OJT users
         if not hasattr(user, 'account_type'):
             return
         
         account_type = user.account_type
         is_alumni = getattr(account_type, 'user', False)
+        is_ojt = getattr(account_type, 'ojt', False)
         
-        if not is_alumni:
+        if not (is_alumni or is_ojt):
+            return
+        
+        # OJT users cannot receive tracker_form points
+        if is_ojt and action_type == 'tracker_form':
             return
         
         # Get or create user points
@@ -3792,6 +3798,8 @@ def alumni_profile_view(request, user_id):
                     'peso': getattr(user.account_type, 'peso', False),
                     'ccict': getattr(user.account_type, 'ccict', False),
                     'user': getattr(user.account_type, 'user', False),
+                    'ojt': getattr(user.account_type, 'ojt', False),
+                    'coordinator': getattr(user.account_type, 'coordinator', False),
                 }
             }
             return JsonResponse(profile_data)
@@ -8537,18 +8545,20 @@ def delete_send_date_view(request):
 @permission_classes([IsAuthenticated])
 def engagement_leaderboard_view(request):
     """
-    Get engagement points leaderboard for Alumni only.
+    Get engagement points leaderboard for Alumni and OJT users.
     Returns top users ranked by total points.
     """
     try:
         limit = int(request.GET.get('limit', 50))  # Default to top 50
-        user_type = request.GET.get('user_type', 'all')  # Keep for API compatibility but always filter Alumni only
+        user_type = request.GET.get('user_type', 'all')  # Keep for API compatibility
         
-        # Base query for users with points - ALUMNI ONLY
+        # Base query for users with points - ALUMNI and OJT users
         points_query = UserPoints.objects.select_related('user', 'user__profile', 'user__academic_info', 'user__account_type')
         
-        # Only show Alumni users (removed OJT)
-        points_query = points_query.filter(user__account_type__user=True)
+        # Include both Alumni and OJT users
+        points_query = points_query.filter(
+            Q(user__account_type__user=True) | Q(user__account_type__ojt=True)
+        )
         
         # Order by total points descending and limit
         top_users = points_query.order_by('-total_points')[:limit]
@@ -9234,7 +9244,7 @@ def request_reward_view(request):
         try:
             admin_users = User.objects.filter(account_type__admin=True)
             for admin in admin_users:
-                Notification.objects.create(
+                notification = Notification.objects.create(
                     user=admin,
                     notif_type='Reward Request',
                     subject=f'🎁 New Reward Request',
@@ -9242,6 +9252,12 @@ def request_reward_view(request):
                     notif_date=timezone.now(),
                     is_read=False
                 )
+                # Broadcast notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting reward request notification: {e}")
         except Exception as e:
             logger.error(f"Error creating admin notifications: {e}")
         
