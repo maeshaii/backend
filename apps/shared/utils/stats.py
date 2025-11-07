@@ -6,6 +6,8 @@ and support related field paths via double-underscore notation.
 OPTIMIZED: Uses database aggregation where possible instead of Python loops.
 """
 
+import re
+
 from collections import Counter
 from statistics import mean
 from django.db.models import Q, Count, Avg, FloatField
@@ -116,26 +118,43 @@ def convert_salary_range_to_number(salary_str):
 	"""Convert salary range strings to numerical values for averaging."""
 	if not salary_str or not isinstance(salary_str, str):
 		return None
-	
+
 	salary_str = salary_str.strip().lower()
-	
-	# Handle categorical salary ranges
-	if 'below' in salary_str and '5000' in salary_str:
-		return 2500  # Midpoint of 0-5000
-	elif '5001' in salary_str and '10000' in salary_str:
-		return 7500  # Midpoint of 5001-10000
-	elif '10001' in salary_str and '20000' in salary_str:
-		return 15000  # Midpoint of 10001-20000
-	elif '20001' in salary_str and '30000' in salary_str:
-		return 25000  # Midpoint of 20001-30000
-	elif 'above' in salary_str and '30000' in salary_str:
-		return 35000  # Conservative estimate for 30000+
-	
-	# Handle numerical formats
-	try:
-		cleaned = salary_str.replace(',', '').replace(' ', '')
-		return float(cleaned)
-	except:
+	if not salary_str:
 		return None
+
+	# Remove common currency symbols/labels for easier matching
+	mapped = salary_str
+	for token in ['php', '₱', 'php:', 'php -', 'php-']:
+		mapped = mapped.replace(token, '')
+	mapped = mapped.strip()
+
+	# Quick exit for non-disclosed style values
+	if any(flag in mapped for flag in ['not disclosed', 'undisclosed', 'n/a', 'na', 'none']):
+		return None
+
+	normalized = mapped.replace(',', '')
+
+	# Handle categorical salary ranges with textual cues
+	if 'below' in normalized and '5000' in normalized:
+		return 2500  # Midpoint of 0-5000
+	if '5001' in normalized and '10000' in normalized:
+		return 7500  # Midpoint of 5001-10000
+	if '10001' in normalized and '20000' in normalized:
+		return 15000  # Midpoint of 10001-20000
+	if '20001' in normalized and '30000' in normalized:
+		return 25000  # Midpoint of 20001-30000
+	if 'above' in normalized and '30000' in normalized:
+		return 35000  # Conservative estimate for 30000+
+
+	# Extract numeric values (handles ranges like 5001 - 10000)
+	matches = re.findall(r'\d+(?:\.\d+)?', normalized)
+	if not matches:
+		return None
+
+	numbers = [float(val) for val in matches]
+	if len(numbers) >= 2:
+		return round((numbers[0] + numbers[1]) / 2, 2)
+	return round(numbers[0], 2)
 
 

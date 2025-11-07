@@ -1655,12 +1655,12 @@ class ReportSettings(models.Model):
     
     class Meta:
         db_table = 'shared_reportsettings'
-        verbose_name = 'Report Settings'
-        verbose_name_plural = 'Report Settings'
+        verbose_name = 'Header/Footer Settings'
+        verbose_name_plural = 'Header/Footer Settings'
         ordering = ['-updated_at']
     
     def __str__(self):
-        return f"Report Settings (Updated: {self.updated_at.strftime('%Y-%m-%d %H:%M:%S')})"
+        return f"Header/Footer Settings (Updated: {self.updated_at.strftime('%Y-%m-%d %H:%M:%S')})"
     
     @classmethod
     def get_active_settings(cls):
