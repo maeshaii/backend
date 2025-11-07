@@ -93,6 +93,33 @@ class NotificationBroadcaster:
         except Exception as e:
             logger.error(f"Error broadcasting notification count to user {user_id}: {e}")
     
+    def broadcast_points_update(self, user_id, points_data):
+        """
+        Broadcast points update to user.
+        
+        Args:
+            user_id: User ID to broadcast to
+            points_data: Points data dictionary
+        """
+        try:
+            if not self.channel_layer:
+                logger.warning("Channel layer not available for points broadcasting")
+                return
+            
+            # Broadcast points update
+            async_to_sync(self.channel_layer.group_send)(
+                f"notifications_{user_id}",
+                {
+                    'type': 'points_update',
+                    'points': points_data
+                }
+            )
+            
+            logger.info(f"Broadcasted points update to user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error broadcasting points update to user {user_id}: {e}")
+    
     def broadcast_multiple_notifications(self, notifications):
         """
         Broadcast multiple notifications to their respective users.
@@ -132,11 +159,12 @@ def broadcast_notification_count(user_id, count):
     notification_broadcaster.broadcast_notification_count(user_id, count)
 
 
-def broadcast_multiple_notifications(notifications):
+def broadcast_points_update(user_id, points_data):
     """
-    Convenience function to broadcast multiple notifications.
+    Convenience function to broadcast points update.
     
     Args:
-        notifications: List of Notification instances
+        user_id: User ID
+        points_data: Points data dictionary
     """
-    notification_broadcaster.broadcast_multiple_notifications(notifications)
+    notification_broadcaster.broadcast_points_update(user_id, points_data)

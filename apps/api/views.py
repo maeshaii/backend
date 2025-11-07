@@ -18,7 +18,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -58,42 +58,108 @@ def award_engagement_points(user, action_type):
     """
     Award engagement points to a user for specific actions.
     
-    Points awarded:
-    - like: +1 pt
-    - comment: +3 pts
-    - share (repost): +5 pts
-    - reply: +2 pts
-    - post_with_photo: +15 pts
-    
-    Only awards points to Alumni users.
+    Points are configurable via EngagementPointsSettings model.
+    Awards points to Alumni and OJT users.
+    OJT users cannot receive tracker_form points since they can't answer the tracker.
     """
     try:
-        # Only award points to Alumni users
+        # Get points settings
+        from apps.shared.models import EngagementPointsSettings
+        settings = EngagementPointsSettings.get_settings()
+        
+        # Check if points system is enabled
+        if not settings.enabled:
+            return
+        
+        # Only award points to Alumni or OJT users
         if not hasattr(user, 'account_type'):
             return
         
         account_type = user.account_type
         is_alumni = getattr(account_type, 'user', False)
+        is_ojt = getattr(account_type, 'ojt', False)
         
-        if not is_alumni:
+        if not (is_alumni or is_ojt):
+            return
+        
+        # OJT users cannot receive tracker_form points
+        if is_ojt and action_type == 'tracker_form':
             return
         
         # Get or create user points
         user_points, created = UserPoints.objects.get_or_create(user=user)
         
-        # Award points based on action type
+        # Award points based on action type using settings from database
         points_map = {
-            'like': 1,
-            'comment': 3,
-            'share': 5,
-            'reply': 2,
-            'post_with_photo': 15
+            'like': settings.like_points,
+            'comment': settings.comment_points,
+            'share': settings.share_points,
+            'reply': settings.reply_points,
+            'post': settings.post_points,
+            'post_with_photo': settings.post_with_photo_points,
+            'tracker_form': settings.tracker_form_points
         }
         
         points = points_map.get(action_type, 0)
         if points > 0:
             user_points.add_points(action_type, points)
             logger.info(f"Awarded {points} points to {user.full_name} for {action_type}")
+            
+            # Broadcast points update via WebSocket for real-time updates
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_points_update
+                from django.db.models import Q
+                
+                # Get updated points data directly from database
+                user_points.refresh_from_db()
+                
+                # Calculate rank
+                higher_points_count = UserPoints.objects.filter(
+                    Q(user__account_type__user=True) | Q(user__account_type__ojt=True),
+                    total_points__gt=user_points.total_points
+                ).count()
+                rank = higher_points_count + 1
+                
+                # Build points breakdown
+                points_breakdown = {
+                    'likes': {
+                        'points': user_points.points_from_likes,
+                        'count': user_points.like_count
+                    },
+                    'comments': {
+                        'points': user_points.points_from_comments,
+                        'count': user_points.comment_count
+                    },
+                    'shares': {
+                        'points': user_points.points_from_shares,
+                        'count': user_points.share_count
+                    },
+                    'replies': {
+                        'points': user_points.points_from_replies,
+                        'count': user_points.reply_count
+                    },
+                    'posts': {
+                        'points': user_points.points_from_posts,
+                        'count': user_points.post_count
+                    },
+                    'posts_with_photos': {
+                        'points': user_points.points_from_posts_with_photos,
+                        'count': user_points.post_with_photo_count
+                    },
+                    'tracker_form': {
+                        'points': user_points.points_from_tracker_form,
+                        'count': user_points.tracker_form_count
+                    }
+                }
+                
+                broadcast_points_update(user.user_id, {
+                    'user_id': user.user_id,
+                    'total_points': user_points.total_points,
+                    'rank': rank,
+                    'points_breakdown': points_breakdown
+                })
+            except Exception as e:
+                logger.error(f"Error broadcasting points update for user {user.user_id}: {e}")
     
     except Exception as e:
         logger.error(f"Error awarding points to user {user.user_id}: {e}")
@@ -3788,6 +3854,8 @@ def alumni_profile_view(request, user_id):
                     'peso': getattr(user.account_type, 'peso', False),
                     'ccict': getattr(user.account_type, 'ccict', False),
                     'user': getattr(user.account_type, 'user', False),
+                    'ojt': getattr(user.account_type, 'ojt', False),
+                    'coordinator': getattr(user.account_type, 'coordinator', False),
                 }
             }
             return JsonResponse(profile_data)
@@ -6860,7 +6928,7 @@ def posts_view(request):
                 print(f'Exception in image handling: {e}')
             # --- END IMAGE HANDLING ---
             
-            # Award engagement points (+15 for post with photo)
+            # Award engagement points (for post with or without photo)
             has_images = False
             try:
                 has_images = ContentImage.objects.filter(content_type='post', content_id=new_post.post_id).exists()
@@ -6869,6 +6937,8 @@ def posts_view(request):
             
             if has_images:
                 award_engagement_points(request.user, 'post_with_photo')
+            else:
+                award_engagement_points(request.user, 'post')
 
             # Get multiple images for response
             post_images = []
@@ -8531,18 +8601,20 @@ def delete_send_date_view(request):
 @permission_classes([IsAuthenticated])
 def engagement_leaderboard_view(request):
     """
-    Get engagement points leaderboard for Alumni only.
+    Get engagement points leaderboard for Alumni and OJT users.
     Returns top users ranked by total points.
     """
     try:
         limit = int(request.GET.get('limit', 50))  # Default to top 50
-        user_type = request.GET.get('user_type', 'all')  # Keep for API compatibility but always filter Alumni only
+        user_type = request.GET.get('user_type', 'all')  # Keep for API compatibility
         
-        # Base query for users with points - ALUMNI ONLY
+        # Base query for users with points - ALUMNI and OJT users
         points_query = UserPoints.objects.select_related('user', 'user__profile', 'user__academic_info', 'user__account_type')
         
-        # Only show Alumni users (removed OJT)
-        points_query = points_query.filter(user__account_type__user=True)
+        # Include both Alumni and OJT users
+        points_query = points_query.filter(
+            Q(user__account_type__user=True) | Q(user__account_type__ojt=True)
+        )
         
         # Order by total points descending and limit
         top_users = points_query.order_by('-total_points')[:limit]
@@ -8585,6 +8657,10 @@ def engagement_leaderboard_view(request):
                         'points': user_points.points_from_replies,
                         'count': user_points.reply_count
                     },
+                    'posts': {
+                        'points': getattr(user_points, 'points_from_posts', 0),
+                        'count': getattr(user_points, 'post_count', 0)
+                    },
                     'posts_with_photos': {
                         'points': user_points.points_from_posts_with_photos,
                         'count': user_points.post_with_photo_count
@@ -8616,6 +8692,105 @@ def engagement_leaderboard_view(request):
 
 
 # ============================
+# Engagement Points Settings API Endpoints
+# ============================
+
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def engagement_points_settings_view(request):
+    """
+    GET: Get current engagement points settings (accessible to all authenticated users).
+    POST: Update engagement points settings (admin only).
+    """
+    try:
+        from apps.shared.models import EngagementPointsSettings
+        settings = EngagementPointsSettings.get_settings()
+        
+        # Handle GET request - accessible to all authenticated users
+        if request.method == 'GET':
+            return JsonResponse({
+                'success': True,
+                'settings': {
+                    'enabled': settings.enabled,
+                    'like_points': settings.like_points,
+                    'comment_points': settings.comment_points,
+                    'share_points': settings.share_points,
+                    'reply_points': settings.reply_points,
+                    'post_points': settings.post_points,
+                    'post_with_photo_points': settings.post_with_photo_points,
+                    'tracker_form_points': settings.tracker_form_points
+                }
+            })
+        
+        # Handle POST request - admin only
+        elif request.method == 'POST':
+            # Check if user is admin
+            user = request.user
+            if not (hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Admin access required'
+                }, status=403)
+            
+            # Update settings from request data
+            data = request.data
+            
+            if 'enabled' in data:
+                settings.enabled = bool(data['enabled'])
+            
+            if 'like' in data:
+                settings.like_points = int(data['like'])
+            
+            if 'comment' in data:
+                settings.comment_points = int(data['comment'])
+            
+            if 'share' in data:
+                settings.share_points = int(data['share'])
+            
+            if 'reply' in data:
+                settings.reply_points = int(data['reply'])
+            
+            if 'post' in data:
+                settings.post_points = int(data['post'])
+            
+            if 'post_with_photo' in data:
+                settings.post_with_photo_points = int(data['post_with_photo'])
+            
+            if 'tracker_form' in data:
+                settings.tracker_form_points = int(data['tracker_form'])
+            
+            settings.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Points settings updated successfully',
+                'settings': {
+                    'enabled': settings.enabled,
+                    'like': settings.like_points,
+                    'comment': settings.comment_points,
+                    'share': settings.share_points,
+                    'reply': settings.reply_points,
+                    'post': settings.post_points,
+                    'post_with_photo': settings.post_with_photo_points,
+                    'tracker_form': settings.tracker_form_points
+                }
+            })
+        
+    except ValueError as e:
+        return JsonResponse({
+            'success': False,
+            'message': f'Invalid value: {str(e)}'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"engagement_points_settings_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+# ============================
 # Reward Inventory API Endpoints
 # ============================
 
@@ -8624,17 +8799,12 @@ def engagement_leaderboard_view(request):
 @permission_classes([IsAuthenticated])
 def inventory_items_view(request):
     """
-    GET: List all inventory items
+    GET: List all inventory items (users can view available items, admin can see all)
     POST: Create a new inventory item (admin only)
     """
     try:
-        # Check if user is admin
         user = request.user
-        if not hasattr(user, 'account_type') or not user.account_type.admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
+        is_admin = hasattr(user, 'account_type') and user.account_type.admin
         
         if request.method == 'GET':
             # Fetch all inventory items
@@ -8642,6 +8812,10 @@ def inventory_items_view(request):
             
             items_data = []
             for item in items:
+                # Users can only see items with quantity > 0
+                if not is_admin and item.quantity <= 0:
+                    continue
+                    
                 items_data.append({
                     'id': item.item_id,
                     'name': item.name,
@@ -8657,6 +8831,13 @@ def inventory_items_view(request):
                 'items': items_data,
                 'count': len(items_data)
             })
+        
+        # POST method requires admin access
+        if not is_admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
         
         elif request.method == 'POST':
             # Create new inventory item
@@ -8858,6 +9039,7 @@ def give_reward_view(request):
         data = json.loads(request.body)
         user_id = data.get('user_id')
         reward_id = data.get('reward_id')
+        is_tracker_reward = data.get('is_tracker_reward', False)  # Optional parameter
         
         if not user_id or not reward_id:
             return JsonResponse({
@@ -8898,16 +9080,18 @@ def give_reward_view(request):
         # Get or create user points
         user_points, created = UserPoints.objects.get_or_create(user=recipient)
         
-        # Check if user has enough points
-        if user_points.total_points < required_points:
-            return JsonResponse({
-                'success': False,
-                'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
-            }, status=400)
-        
-        # Deduct points from user
-        user_points.total_points -= required_points
-        user_points.save()
+        # For tracker rewards, skip point deduction (admin reward, not point redemption)
+        if not is_tracker_reward:
+            # Check if user has enough points (only for regular rewards)
+            if user_points.total_points < required_points:
+                return JsonResponse({
+                    'success': False,
+                    'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
+                }, status=400)
+            
+            # Deduct points from user (only for regular rewards)
+            user_points.total_points -= required_points
+            user_points.save()
         
         # Decrease quantity
         reward_item.quantity -= 1
@@ -8919,16 +9103,25 @@ def give_reward_view(request):
             reward_name=reward_item.name,
             reward_type=reward_item.type,
             reward_value=reward_item.value,
-            points_deducted=required_points,
+            points_deducted=0 if is_tracker_reward else required_points,  # No points deducted for tracker rewards
             given_by=admin_user
         )
         
         # Create notification for the user
+        if is_tracker_reward:
+            # Custom notification message for tracker form rewards (no points deducted)
+            notification_content = f'🎉 You are lucky! As a token of appreciation for cooperating and answering the tracker form, you have been chosen to receive a reward. Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}). No points were deducted - this is a special reward from the admin. Thank you for your participation!'
+            notification_subject = '🎁 Token of Appreciation - Tracker Form Response!'
+        else:
+            # Standard notification message for regular rewards (points deducted)
+            notification_content = f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!'
+            notification_subject = '🎁 You received a reward!'
+        
         notification = Notification.objects.create(
             user=recipient,
             notif_type='Reward',
-            subject=f'🎁 You received a reward!',
-            notifi_content=f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!',
+            subject=notification_subject,
+            notifi_content=notification_content,
             notif_date=timezone.now(),
             is_read=False
         )
@@ -8940,13 +9133,16 @@ def give_reward_view(request):
         except Exception as e:
             logger.error(f"Error broadcasting reward notification: {e}")
         
-        logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
+        if is_tracker_reward:
+            logger.info(f"Admin {admin_user.full_name} gave tracker reward '{reward_item.name}' to {recipient.full_name} (no points deducted)")
+        else:
+            logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
         
         return JsonResponse({
             'success': True,
             'message': f'Reward "{reward_item.name}" successfully given to {recipient.full_name}',
             'notification_created': True,
-            'points_deducted': required_points,
+            'points_deducted': 0 if is_tracker_reward else required_points,
             'user_remaining_points': user_points.total_points
         })
     
@@ -8983,8 +9179,19 @@ def reward_history_view(request):
         # Get limit parameter (default to 50)
         limit = int(request.GET.get('limit', 50))
         
+        # Get filter parameter for tracker rewards (points_deducted = 0)
+        tracker_only = request.GET.get('tracker_only', 'false').lower() == 'true'
+        
         # Fetch reward history
-        history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
+        if tracker_only:
+            # Filter for tracker rewards: points_deducted = 0 AND given_by is an admin
+            # Tracker rewards are rewards given by admin for answering tracker form (no points deducted)
+            history = RewardHistory.objects.select_related('user', 'given_by').filter(
+                points_deducted=0,
+                given_by__isnull=False
+            ).order_by('-given_at')[:limit]
+        else:
+            history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
         
         history_data = []
         for entry in history:
@@ -8994,7 +9201,7 @@ def reward_history_view(request):
                 try:
                     user_profile = UserProfile.objects.filter(user=entry.user).first()
                     if user_profile and user_profile.profile_pic:
-                        profile_pic = user_profile.profile_pic
+                        profile_pic = user_profile.profile_pic.url if user_profile.profile_pic else None
                 except Exception as e:
                     logger.warning(f"Error getting profile pic for user {entry.user.user_id}: {e}")
                 
@@ -9037,6 +9244,644 @@ def reward_history_view(request):
         import traceback
         logger.error(f"reward_history_view error: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def request_reward_view(request):
+    """
+    User requests a reward (self-service redemption)
+    Creates a pending request WITHOUT deducting points or inventory
+    Points and inventory will be deducted when user actually claims after admin approval
+    """
+    try:
+        user = request.user
+        data = json.loads(request.body)
+        reward_id = data.get('reward_id')
+        
+        if not reward_id:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward ID is required'
+            }, status=400)
+        
+        # Get reward item
+        try:
+            reward_item = RewardInventoryItem.objects.get(item_id=reward_id)
+        except RewardInventoryItem.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward item not found'
+            }, status=404)
+        
+        # Check if item has stock
+        if reward_item.quantity <= 0:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward item is out of stock'
+            }, status=400)
+        
+        # Extract point value from reward item (e.g., "10 pts" -> 10)
+        import re
+        points_match = re.search(r'(\d+)', reward_item.value)
+        required_points = int(points_match.group(1)) if points_match else 0
+        
+        # Get user points
+        user_points, created = UserPoints.objects.get_or_create(user=user)
+        
+        # Check if user has enough points (but don't deduct yet)
+        if user_points.total_points < required_points:
+            return JsonResponse({
+                'success': False,
+                'message': f'Insufficient points. Required: {required_points}, Available: {user_points.total_points}'
+            }, status=400)
+        
+        # Check if user has already requested a reward this month (limit: 1 per month)
+        now = timezone.now()
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Count reward requests in current month (any status)
+        monthly_requests = RewardRequest.objects.filter(
+            user=user,
+            requested_at__gte=start_of_month
+        ).count()
+        
+        if monthly_requests >= 1:
+            return JsonResponse({
+                'success': False,
+                'message': 'You can only request 1 reward per month. Please wait until next month to request another reward.'
+            }, status=400)
+        
+        # Create pending reward request (NO points or inventory deduction yet)
+        reward_request = RewardRequest.objects.create(
+            user=user,
+            reward_item=reward_item,
+            status='pending',
+            points_cost=required_points
+        )
+        
+        # Determine message based on reward type
+        is_voucher = reward_item.type.lower() in ['voucher', 'gift card', 'giftcard', 'coupon']
+        is_merchandise = reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
+        
+        confirmation_message = ""
+        if is_voucher:
+            confirmation_message = "Please expect a reply from us regarding your reward request."
+        elif is_merchandise:
+            confirmation_message = "Please note that this reward must be claimed in person at the CTU office."
+        else:
+            confirmation_message = "Your reward request has been submitted and is pending approval."
+        
+        # Create notification for admin
+        try:
+            admin_users = User.objects.filter(account_type__admin=True)
+            for admin in admin_users:
+                notification = Notification.objects.create(
+                    user=admin,
+                    notif_type='Reward Request',
+                    subject=f'🎁 New Reward Request',
+                    notifi_content=f'{user.full_name} has requested to claim "{reward_item.name}" ({reward_item.value}). Points required: {required_points}. Please review and approve.',
+                    notif_date=timezone.now(),
+                    is_read=False
+                )
+                # Broadcast notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting reward request notification: {e}")
+        except Exception as e:
+            logger.error(f"Error creating admin notifications: {e}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': confirmation_message,
+            'request_id': reward_request.request_id,
+            'points_required': required_points,
+            'remaining_points': user_points.total_points
+        })
+    
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"request_reward_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def reward_requests_list_view(request):
+    """
+    GET: List reward requests (admin only - all requests, user - their own requests)
+    """
+    try:
+        user = request.user
+        is_admin = hasattr(user, 'account_type') and user.account_type.admin
+        
+        if is_admin:
+            # Admin sees all requests
+            # Query from RewardRequest model which uses 'shared_rewardrequest' table
+            status_filter = request.GET.get('status', None)
+            
+            # First get all requests without filter to debug
+            all_requests = RewardRequest.objects.all()
+            total_all = all_requests.count()
+            logger.info(f"DEBUG: Total reward requests in DB (no filter): {total_all}")
+            
+            # Check status distribution
+            from django.db.models import Count
+            status_counts = RewardRequest.objects.values('status').annotate(count=Count('status'))
+            logger.info(f"DEBUG: Status distribution: {list(status_counts)}")
+            
+            queryset = RewardRequest.objects.select_related('user', 'reward_item', 'approved_by').all()
+            
+            if status_filter:
+                queryset = queryset.filter(status=status_filter)
+                logger.info(f"DEBUG: Filtering by status='{status_filter}'")
+            
+            requests_data = []
+            total_requests = queryset.count()
+            # Log to confirm we're querying the shared_rewardrequest table
+            logger.info(f"Admin {user.full_name} fetching reward requests from 'shared_rewardrequest' table. Status filter: {status_filter}. Total matching filter: {total_requests}")
+            
+            for req in queryset.order_by('-requested_at'):
+                try:
+                    # Get user profile pic
+                    profile_pic = None
+                    try:
+                        user_profile = UserProfile.objects.filter(user=req.user).first()
+                        if user_profile and user_profile.profile_pic:
+                            profile_pic = user_profile.profile_pic.url if user_profile.profile_pic else None
+                    except Exception as e:
+                        logger.warning(f"Error getting profile pic for request {req.request_id}: {e}")
+                    
+                    requests_data.append({
+                        'request_id': req.request_id,
+                        'user_id': req.user.user_id,
+                        'user_name': req.user.full_name,
+                        'profile_pic': profile_pic,
+                        'reward_id': req.reward_item.item_id,
+                        'reward_name': req.reward_item.name,
+                        'reward_type': req.reward_item.type,
+                        'reward_value': req.reward_item.value,
+                        'status': req.status,
+                        'points_cost': req.points_cost,
+                        'voucher_code': req.voucher_code,
+                        'voucher_file': req.voucher_file.url if req.voucher_file else None,
+                        'requested_at': req.requested_at.isoformat(),
+                        'approved_at': req.approved_at.isoformat() if req.approved_at else None,
+                        'approved_by': req.approved_by.full_name if req.approved_by else None,
+                        'expires_at': req.expires_at.isoformat() if req.expires_at else None,
+                        'notes': req.notes
+                    })
+                except Exception as e:
+                    import traceback
+                    logger.error(f"Error processing reward request {req.request_id}: {e}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    continue
+            
+            logger.info(f"Returning {len(requests_data)} reward requests (filtered from {total_requests} total)")
+            
+            # If we have requests in DB but none in response, log warning
+            if total_requests > 0 and len(requests_data) == 0:
+                logger.warning(f"WARNING: Found {total_requests} requests in DB matching filter, but none processed successfully. Check for serialization errors above.")
+            
+            return JsonResponse({
+                'success': True,
+                'requests': requests_data,
+                'count': len(requests_data),
+                'total_in_db': total_requests  # Include for debugging
+            })
+        else:
+            # User sees their own requests
+            requests = RewardRequest.objects.filter(user=user).select_related('reward_item', 'approved_by').order_by('-requested_at')
+            requests_data = []
+            for req in requests:
+                requests_data.append({
+                    'request_id': req.request_id,
+                    'reward_id': req.reward_item.item_id,
+                    'reward_name': req.reward_item.name,
+                    'reward_type': req.reward_item.type,
+                    'reward_value': req.reward_item.value,
+                    'status': req.status,
+                    'points_cost': req.points_cost,
+                    'voucher_code': req.voucher_code,
+                    'voucher_file': req.voucher_file.url if req.voucher_file else None,
+                    'requested_at': req.requested_at.isoformat(),
+                    'approved_at': req.approved_at.isoformat() if req.approved_at else None,
+                    'expires_at': req.expires_at.isoformat() if req.expires_at else None,
+                    'notes': req.notes
+                })
+            
+            return JsonResponse({
+                'success': True,
+                'requests': requests_data,
+                'count': len(requests_data)
+            })
+    
+    except Exception as e:
+        logger.error(f"reward_requests_list_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+def get_business_days_after(start_date, days):
+    """
+    Calculate expiration date excluding weekends and holidays.
+    Returns a datetime that is 'days' business days after start_date.
+    """
+    from datetime import date
+    
+    # Philippine holidays (common national holidays)
+    # Format: (month, day) - year-specific holidays would need to be updated annually
+    philippine_holidays = [
+        # Fixed holidays
+        (1, 1),   # New Year's Day
+        (2, 25),  # EDSA Revolution Anniversary
+        (4, 9),   # Day of Valor (Araw ng Kagitingan)
+        (5, 1),   # Labor Day
+        (6, 12),  # Independence Day
+        (8, 21),  # Ninoy Aquino Day
+        (8, 26),  # National Heroes Day (last Monday of August, but fixed as 26th for simplicity)
+        (11, 30), # Bonifacio Day
+        (12, 25), # Christmas Day
+        (12, 30), # Rizal Day
+        # Add more holidays as needed
+    ]
+    
+    # Extract date from timezone-aware or naive datetime
+    if hasattr(start_date, 'date'):
+        current_date = start_date.date()
+        original_time = start_date.time()
+        is_timezone_aware = timezone.is_aware(start_date)
+    else:
+        current_date = start_date
+        original_time = datetime.min.time()
+        is_timezone_aware = False
+    
+    business_days_added = 0
+    check_date = current_date
+    
+    while business_days_added < days:
+        check_date += timedelta(days=1)
+        
+        # Skip weekends (Saturday = 5, Sunday = 6)
+        if check_date.weekday() >= 5:
+            continue
+        
+        # Skip holidays
+        is_holiday = (check_date.month, check_date.day) in philippine_holidays
+        if is_holiday:
+            continue
+        
+        business_days_added += 1
+    
+    # Convert back to datetime, preserving timezone awareness
+    result_datetime = datetime.combine(check_date, original_time)
+    if is_timezone_aware:
+        result_datetime = timezone.make_aware(result_datetime)
+    
+    return result_datetime
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def approve_reward_request_view(request, request_id):
+    """
+    Admin approves a reward request
+    Admin can add instructions/notes on how to claim the voucher
+    For vouchers: can upload voucher code/file, sets 5-day expiration
+    For merchandise: marks as ready for pickup
+    Status changes to 'approved' but points/inventory NOT deducted yet
+    """
+    try:
+        # Check if user is admin
+        admin_user = request.user
+        if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Get reward request
+        try:
+            reward_request = RewardRequest.objects.get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward request not found'
+            }, status=404)
+        
+        if reward_request.status != 'pending':
+            return JsonResponse({
+                'success': False,
+                'message': f'Request is already {reward_request.status}'
+            }, status=400)
+        
+        data = json.loads(request.body) if request.body else {}
+        is_voucher = reward_request.reward_item.type.lower() in ['voucher', 'gift card', 'giftcard', 'coupon']
+        is_merchandise = reward_request.reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
+        
+        # Update request status to 'approved' (ready for user to claim)
+        reward_request.status = 'approved' if is_voucher else 'ready_for_pickup'
+        reward_request.approved_at = timezone.now()
+        reward_request.approved_by = admin_user
+        
+        # Handle voucher expiration (5 business days, excluding weekends and holidays)
+        if is_voucher:
+            approval_date = timezone.now()
+            reward_request.expires_at = get_business_days_after(approval_date, 5)
+            voucher_code = data.get('voucher_code')
+            if voucher_code:
+                reward_request.voucher_code = voucher_code
+        
+        # Admin can add instructions/notes on how to claim
+        notes = data.get('notes') or data.get('instructions')
+        if notes:
+            reward_request.notes = notes
+        
+        reward_request.save()
+        
+        # Get admin profile picture for notification
+        admin_profile_pic = None
+        try:
+            admin_profile = UserProfile.objects.filter(user=admin_user).first()
+            if admin_profile and admin_profile.profile_pic:
+                admin_profile_pic = admin_profile.profile_pic.url
+        except Exception as e:
+            logger.warning(f"Error getting admin profile pic for notification: {e}")
+        
+        # Create notification for user (with instructions if provided)
+        notification_content = f'Your request for "{reward_request.reward_item.name}" has been {"approved" if is_voucher else "processed"}. '
+        if notes:
+            notification_content += f'\n\nInstructions: {notes}\n\n'
+        if reward_request.voucher_code:
+            notification_content += f'Voucher code: {reward_request.voucher_code}. '
+        if is_voucher:
+            notification_content += f'Please claim it within 5 business days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
+        else:
+            notification_content += 'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office.'
+        
+        # Add admin info to notification content for profile picture display
+        notification_content += f'<!--AUTHOR_ID:{admin_user.user_id}-->'
+        notification_content += f'<!--AUTHOR_NAME:{admin_user.full_name}-->'
+        if admin_profile_pic:
+            notification_content += f'<!--AUTHOR_PIC:{admin_profile_pic}-->'
+        # Add reward request ID for direct navigation to reward details
+        notification_content += f'<!--REQUEST_ID:{request_id}-->'
+        
+        notification = Notification.objects.create(
+            user=reward_request.user,
+            notif_type='Reward',
+            subject=f'🎁 Your reward request has been {"approved" if is_voucher else "processed"}!',
+            notifi_content=notification_content,
+            notif_date=timezone.now(),
+            is_read=False
+        )
+        
+        # Broadcast notification
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting notification: {e}")
+        
+        logger.info(f"Admin {admin_user.full_name} approved reward request {request_id} for {reward_request.user.full_name}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Reward request {"approved" if is_voucher else "marked as ready for pickup"}. User will receive notification with instructions.',
+            'status': reward_request.status,
+            'expires_at': reward_request.expires_at.isoformat() if reward_request.expires_at else None
+        })
+    
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"approve_reward_request_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def claim_reward_request_view(request, request_id):
+    """
+    User claims a reward after admin approval, OR admin releases merchandise
+    THIS is where points and inventory get deducted
+    
+    For vouchers: User clicks "Claim" after admin approval
+    For merchandise: Admin clicks "Release" after marking as ready_for_pickup
+    """
+    try:
+        user = request.user
+        
+        # Get reward request
+        try:
+            reward_request = RewardRequest.objects.get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward request not found'
+            }, status=404)
+        
+        # Check if user is admin releasing merchandise
+        is_admin = hasattr(user, 'account_type') and user.account_type.admin
+        is_merchandise = reward_request.reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
+        
+        # Verify this request belongs to the user, OR admin is releasing merchandise
+        if not is_admin or not is_merchandise:
+            if reward_request.user.user_id != user.user_id:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Unauthorized access'
+                }, status=403)
+        
+        # Check if request is approved or ready for pickup
+        if reward_request.status not in ['approved', 'ready_for_pickup']:
+            return JsonResponse({
+                'success': False,
+                'message': f'Reward request is not ready to claim. Current status: {reward_request.status}'
+            }, status=400)
+        
+        # Check if already claimed
+        if reward_request.status == 'claimed':
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward has already been claimed'
+            }, status=400)
+        
+        # Check if expired (for vouchers)
+        if reward_request.expires_at and timezone.now() > reward_request.expires_at:
+            reward_request.status = 'expired'
+            reward_request.save()
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward has expired'
+            }, status=400)
+        
+        # Check if reward item still has stock
+        reward_item = reward_request.reward_item
+        if reward_item.quantity <= 0:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward item is out of stock'
+            }, status=400)
+        
+        # For admin releasing merchandise, use the reward request user's points
+        # For regular users claiming, use their own points
+        reward_user = reward_request.user if (is_admin and is_merchandise) else user
+        
+        # Get user points and verify they still have enough
+        user_points, created = UserPoints.objects.get_or_create(user=reward_user)
+        if user_points.total_points < reward_request.points_cost:
+            return JsonResponse({
+                'success': False,
+                'message': f'Insufficient points. Required: {reward_request.points_cost}, Available: {user_points.total_points}'
+            }, status=400)
+        
+        # NOW deduct points and inventory
+        user_points.total_points -= reward_request.points_cost
+        user_points.save()
+        
+        reward_item.quantity -= 1
+        reward_item.save()
+        
+        # Update request status to claimed
+        reward_request.status = 'claimed'
+        reward_request.save()
+        
+        # Create reward history entry (this is what appears in reward history)
+        # Use approved_by if available, otherwise use the admin who approved (or system)
+        reward_history = RewardHistory.objects.create(
+            user=reward_user,
+            reward_name=reward_item.name,
+            reward_type=reward_item.type,
+            reward_value=reward_item.value,
+            points_deducted=reward_request.points_cost,
+            given_by=reward_request.approved_by if reward_request.approved_by else user  # Admin who approved/released
+        )
+        
+        logger.info(f"Reward history entry created: {reward_history.history_id} for user {reward_user.full_name} - {reward_item.name}")
+        
+        # Create notification for the reward user (not the admin)
+        notification_message = f'Congratulations! '
+        if is_admin and is_merchandise:
+            notification_message += f'Your merchandise "{reward_item.name}" has been released by admin. '
+        else:
+            notification_message += f'You have successfully claimed "{reward_item.name}". '
+        notification_message += f'{reward_request.points_cost} points have been deducted from your account. '
+        if reward_request.voucher_code:
+            notification_message += f'Voucher code: {reward_request.voucher_code}. '
+        if reward_request.notes:
+            notification_message += reward_request.notes
+        # Add reward request ID for direct navigation to reward details
+        notification_message += f'<!--REQUEST_ID:{request_id}-->'
+        
+        notification = Notification.objects.create(
+            user=reward_user,
+            notif_type='Reward',
+            subject=f'🎉 Reward {"Released" if (is_admin and is_merchandise) else "Claimed"} Successfully!',
+            notifi_content=notification_message,
+            notif_date=timezone.now(),
+            is_read=False
+        )
+        
+        # Broadcast notification
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting notification: {e}")
+        
+        if is_admin and is_merchandise:
+            logger.info(f"Admin {user.full_name} released merchandise reward request {request_id} for user {reward_user.full_name}")
+        else:
+            logger.info(f"User {user.full_name} claimed reward request {request_id}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Reward "{reward_item.name}" {"released" if (is_admin and is_merchandise) else "claimed"} successfully!',
+            'points_deducted': reward_request.points_cost,
+            'remaining_points': user_points.total_points,
+            'voucher_code': reward_request.voucher_code if reward_request.voucher_code else None
+        })
+    
+    except Exception as e:
+        logger.error(f"claim_reward_request_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def upload_voucher_file_view(request, request_id):
+    """
+    Admin uploads voucher file for a reward request
+    """
+    try:
+        # Check if user is admin
+        admin_user = request.user
+        if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Get reward request
+        try:
+            reward_request = RewardRequest.objects.get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward request not found'
+            }, status=404)
+        
+        # Check if file is provided
+        if 'voucher_file' not in request.FILES:
+            return JsonResponse({
+                'success': False,
+                'message': 'Voucher file is required'
+            }, status=400)
+        
+        voucher_file = request.FILES['voucher_file']
+        
+        # Save voucher file
+        reward_request.voucher_file = voucher_file
+        reward_request.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Voucher file uploaded successfully',
+            'voucher_file_url': reward_request.voucher_file.url
+        })
+    
+    except Exception as e:
+        logger.error(f"upload_voucher_file_view error: {e}")
         return JsonResponse({
             'success': False,
             'message': f'Error: {str(e)}'

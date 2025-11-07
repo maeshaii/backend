@@ -106,7 +106,8 @@ def tracker_responses_view(request):
             responses.append({
                 'user_id': user.user_id,
                 'name': f'{user.f_name} {user.l_name}',
-                'answers': merged_answers
+                'answers': merged_answers,
+                'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
             })
         return JsonResponse({'success': True, 'responses': responses})
     except Exception as e:
@@ -342,16 +343,14 @@ def submit_tracker_response_view(request):
         # Legacy direct writes to `User` have been removed.
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().
 
-        # Award engagement points for completing tracker form (+30 pts for Alumni only)
+        # Award engagement points for completing tracker form (configurable points for Alumni only)
         if user.account_type and user.account_type.user:  # Check if Alumni
             try:
-                from apps.shared.models import UserPoints
-                user_points, created = UserPoints.objects.get_or_create(user=user)
-                # Award 30 points for completing tracker form
-                user_points.add_points('tracker_form', 30)
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info(f"Awarded 30 points to {user.f_name} {user.l_name} for completing tracker form")
+                from apps.shared.models import UserPoints, EngagementPointsSettings
+                from apps.api.views import award_engagement_points
+                
+                # Use the award_engagement_points function which handles settings
+                award_engagement_points(user, 'tracker_form')
             except Exception as e:
                 import logging
                 logger = logging.getLogger(__name__)
@@ -438,20 +437,25 @@ def update_tracker_accepting_responses_view(request, tracker_form_id):
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def get_active_tracker_form(request):
-    form = TrackerForm.objects.order_by('-id').first()  # Fixed: use 'id' instead of 'tracker_form_id'
-    if form:
-        return JsonResponse({'tracker_form_id': form.pk})
-    
-    # If no TrackerForm exists, create one automatically
+    # Check if TrackerForm with id=1 exists (required by constraint)
     try:
-        default_form = TrackerForm.objects.create(
-            title="CTU MAIN ALUMNI TRACKER",
-            description="Default tracker form for CTU alumni",
-            accepting_responses=True
-        )
-        return JsonResponse({'tracker_form_id': default_form.pk})
-    except Exception as e:
-        return JsonResponse({'tracker_form_id': None, 'error': str(e)}, status=500)
+        form = TrackerForm.objects.get(pk=1)
+        return JsonResponse({'tracker_form_id': form.pk})
+    except TrackerForm.DoesNotExist:
+        # If no TrackerForm exists, create one with id=1 (required by constraint)
+        try:
+            default_form = TrackerForm.objects.create(
+                id=1,  # Explicitly set id=1 to satisfy the CheckConstraint
+                title="CTU MAIN ALUMNI TRACKER",
+                description="Default tracker form for CTU alumni",
+                accepting_responses=True
+            )
+            return JsonResponse({'tracker_form_id': default_form.pk})
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            traceback.print_exc()
+            return JsonResponse({'tracker_form_id': None, 'error': error_msg}, status=500)
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])

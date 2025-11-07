@@ -593,6 +593,7 @@ class UserPoints(models.Model):
     points_from_comments = models.IntegerField(default=0)
     points_from_shares = models.IntegerField(default=0)
     points_from_replies = models.IntegerField(default=0)
+    points_from_posts = models.IntegerField(default=0)
     points_from_posts_with_photos = models.IntegerField(default=0)
     points_from_tracker_form = models.IntegerField(default=0)
     
@@ -601,6 +602,7 @@ class UserPoints(models.Model):
     comment_count = models.IntegerField(default=0)
     share_count = models.IntegerField(default=0)
     reply_count = models.IntegerField(default=0)
+    post_count = models.IntegerField(default=0)
     post_with_photo_count = models.IntegerField(default=0)
     tracker_form_count = models.IntegerField(default=0)
     
@@ -633,6 +635,9 @@ class UserPoints(models.Model):
         elif action_type == 'reply':
             self.points_from_replies += points
             self.reply_count += 1
+        elif action_type == 'post':
+            self.points_from_posts += points
+            self.post_count += 1
         elif action_type == 'post_with_photo':
             self.points_from_posts_with_photos += points
             self.post_with_photo_count += 1
@@ -646,10 +651,57 @@ class UserPoints(models.Model):
             self.points_from_comments +
             self.points_from_shares +
             self.points_from_replies +
+            self.points_from_posts +
             self.points_from_posts_with_photos +
             self.points_from_tracker_form
         )
         self.save()
+
+
+class EngagementPointsSettings(models.Model):
+    """Stores configurable engagement points settings for the system.
+    
+    Only one instance should exist (singleton pattern).
+    """
+    enabled = models.BooleanField(default=True, help_text="Enable or disable the points system")
+    
+    # Points awarded per action
+    like_points = models.IntegerField(default=1, help_text="Points for liking a post")
+    comment_points = models.IntegerField(default=3, help_text="Points for commenting on a post")
+    share_points = models.IntegerField(default=5, help_text="Points for sharing/reposting a post")
+    reply_points = models.IntegerField(default=2, help_text="Points for replying to a comment")
+    post_points = models.IntegerField(default=0, help_text="Points for posting without photos")
+    post_with_photo_points = models.IntegerField(default=15, help_text="Points for posting with photos")
+    tracker_form_points = models.IntegerField(default=0, help_text="Points for completing tracker form")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'shared_engagementpointssettings'
+        verbose_name = 'Engagement Points Settings'
+        verbose_name_plural = 'Engagement Points Settings'
+    
+    def __str__(self):
+        return f"Points Settings (Enabled: {self.enabled})"
+    
+    @classmethod
+    def get_settings(cls):
+        """Get the current settings, creating default if none exist."""
+        settings, created = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                'enabled': True,
+                'like_points': 1,
+                'comment_points': 3,
+                'share_points': 5,
+                'reply_points': 2,
+                'post_points': 0,
+                'post_with_photo_points': 15,
+                'tracker_form_points': 0
+            }
+        )
+        return settings
 
 
 # Refactored User Model Components
@@ -1595,6 +1647,46 @@ class RewardHistory(models.Model):
     
     def __str__(self):
         return f"{self.reward_name} given to {self.user.full_name} on {self.given_at.strftime('%Y-%m-%d')}"
+
+
+class RewardRequest(models.Model):
+    """Track user reward redemption requests"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('ready_for_pickup', 'Ready for Pickup'),
+        ('claimed', 'Claimed'),
+        ('expired', 'Expired'),
+        ('rejected', 'Rejected'),
+    ]
+    
+    request_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='reward_requests')
+    reward_item = models.ForeignKey('RewardInventoryItem', on_delete=models.CASCADE, related_name='requests')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    points_cost = models.IntegerField(default=0)
+    voucher_code = models.CharField(max_length=255, null=True, blank=True)  # For voucher rewards
+    voucher_file = models.FileField(upload_to='vouchers/', null=True, blank=True)  # For uploaded voucher files
+    requested_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_rewards')
+    expires_at = models.DateTimeField(null=True, blank=True)  # For voucher rewards (5 days from approval)
+    notes = models.TextField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'shared_rewardrequest'
+        verbose_name = 'Reward Request'
+        verbose_name_plural = 'Reward Requests'
+        ordering = ['-requested_at']
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['status']),
+            models.Index(fields=['-requested_at']),
+            models.Index(fields=['expires_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.reward_item.name} request by {self.user.full_name} - {self.status}"
 
 
 class ReportSettings(models.Model):
