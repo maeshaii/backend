@@ -5485,7 +5485,12 @@ def post_repost_view(request, post_id):
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
-                notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}--><!--ACTOR_ID:{user.user_id}-->",
+                notifi_content=(
+                    f"{user.full_name} reposted your post"
+                    f"<!--REPOST_ID:{repost.repost_id}-->"
+                    f"<!--POST_ID:{post.post_id}-->"
+                    f"<!--ACTOR_ID:{user.user_id}-->"
+                ),
                 notif_date=timezone.now()
             )
             

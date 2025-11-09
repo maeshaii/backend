@@ -667,12 +667,12 @@ class EngagementPointsSettings(models.Model):
     
     # Points awarded per action
     like_points = models.IntegerField(default=1, help_text="Points for liking a post")
-    comment_points = models.IntegerField(default=3, help_text="Points for commenting on a post")
-    share_points = models.IntegerField(default=5, help_text="Points for sharing/reposting a post")
-    reply_points = models.IntegerField(default=2, help_text="Points for replying to a comment")
-    post_points = models.IntegerField(default=0, help_text="Points for posting without photos")
-    post_with_photo_points = models.IntegerField(default=15, help_text="Points for posting with photos")
-    tracker_form_points = models.IntegerField(default=0, help_text="Points for completing tracker form")
+    comment_points = models.IntegerField(default=2, help_text="Points for commenting on a post")
+    share_points = models.IntegerField(default=3, help_text="Points for sharing/reposting a post")
+    reply_points = models.IntegerField(default=3, help_text="Points for replying to a comment")
+    post_points = models.IntegerField(default=5, help_text="Points for posting without photos")
+    post_with_photo_points = models.IntegerField(default=10, help_text="Points for posting with photos")
+    tracker_form_points = models.IntegerField(default=10, help_text="Points for completing tracker form")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
