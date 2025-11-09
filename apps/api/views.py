@@ -3953,133 +3953,13 @@ def alumni_employment_view(request, user_id):
                     'has_employment_data': bool(ojt_company_profile and ojt_company_profile.company_name and ojt_company_profile.company_name.strip() != '')
                 })
             
-            # For Alumni accounts, check TrackerData
+            # For Alumni accounts, temporarily return coming soon placeholder
             if is_alumni:
-                # Check if user has TrackerData
-                has_tracker_data = False
-                tracker = None
-                try:
-                    tracker = TrackerData.objects.get(user=user)
-                    has_tracker_data = bool(tracker.q_company_name or tracker.q_current_position or tracker.q_employment_status)
-                except TrackerData.DoesNotExist:
-                    has_tracker_data = False
-                    tracker = None
-                
-                if employment:
-                    response_data = {
-                        # Basic employment info - correctly mapped to model fields
-                        'organization_name': employment.company_name_current or '',
-                        'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
-                        'position': employment.position_current or '',
-                        'employment_status': employment.employment_duration_current or '',
-                        'company_address': employment.company_address or '',
-                        'sector': employment.sector_current or '',
-                        
-                        # Additional employment details
-                        'employment_duration_current': employment.employment_duration_current or '',
-                        'salary_current': employment.salary_current or '',
-                        'scope_current': employment.scope_current or '',
-                        'company_email': employment.company_email or '',
-                        'company_contact': employment.company_contact or '',
-                        'contact_person': employment.contact_person or '',
-                        'position_alt': employment.position or '',
-                        
-                        # Job alignment info
-                        'job_alignment_status': employment.job_alignment_status or '',
-                        'job_alignment_category': employment.job_alignment_category or '',
-                        'job_alignment_title': employment.job_alignment_title or '',
-                        'job_alignment_suggested_program': employment.job_alignment_suggested_program or '',
-                        'job_alignment_original_program': employment.job_alignment_original_program or '',
-                        
-                        # Status flags
-                        'self_employed': employment.self_employed,
-                        'high_position': employment.high_position,
-                        'absorbed': employment.absorbed,
-                        
-                        # Awards and recognition
-                        'awards_recognition_current': employment.awards_recognition_current or '',
-                        'supporting_document_current': employment.supporting_document_current or '',
-                        'supporting_document_awards_recognition': employment.supporting_document_awards_recognition or '',
-                        
-                        # Unemployment
-                        'unemployment_reason': employment.unemployment_reason or '',
-                        
-                        # Timestamps
-                        'created_at': employment.created_at.strftime('%Y-%m-%d %H:%M:%S') if employment.created_at else '',
-                        'updated_at': employment.updated_at.strftime('%Y-%m-%d %H:%M:%S') if employment.updated_at else '',
-                        
-                        # Part III: Employment Status fields
-                        # Use TrackerData fields if available (they have the actual dropdown values), otherwise fall back to EmploymentHistory
-                        'employment_type': tracker.q_employment_type if tracker else '',  # Will be set from self_employed or tracker if needed
-                        'current_employment_status': tracker.q_employment_permanent if tracker and tracker.q_employment_permanent else (employment.employment_duration_current or ''),
-                        'current_company_name': employment.company_name_current or (tracker.q_company_name if tracker else ''),
-                        'current_position': employment.position_current or (tracker.q_current_position if tracker else ''),
-                        'current_sector': tracker.q_sector_current if tracker and tracker.q_sector_current else (employment.sector_current or ''),
-                        'current_scope': tracker.q_scope_current if tracker and tracker.q_scope_current else (employment.scope_current or ''),
-                        'employment_duration': tracker.q_employment_duration if tracker and tracker.q_employment_duration else (employment.employment_duration_current or ''),
-                        'salary_range': tracker.q_salary_range if tracker and tracker.q_salary_range else (employment.salary_current or ''),
-                        'received_awards': tracker.q_awards_received if tracker and tracker.q_awards_received else (employment.awards_recognition_current or ''),
-                        'awards_supporting_doc': employment.supporting_document_awards_recognition or '',
-                        'employment_supporting_doc': employment.supporting_document_current or '',
-                        'employment_sector': employment.sector_current or '',
-                        
-                        # Part IV: Further Study fields (from AcademicInfo)
-                        'study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
-                        'post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
-                        'institution_name': academic_info.q_institution_name or '' if academic_info else '',
-                        'units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
-                        # Also include with q_ prefix for compatibility
-                        'q_study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
-                        'q_post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
-                        'q_institution_name': academic_info.q_institution_name or '' if academic_info else '',
-                        'q_units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
-                        # Account type and tracker data status
-                        'account_type': 'alumni',
-                        'has_tracker_data': has_tracker_data
-                    }
-                    
-                    # Set employment_type based on tracker data first, then self_employed flag
-                    if tracker and tracker.q_employment_type:
-                        response_data['employment_type'] = tracker.q_employment_type
-                    elif employment.self_employed:
-                        response_data['employment_type'] = 'Self-employed'
-                    else:
-                        response_data['employment_type'] = 'Employed by a company/organization'
-                    
-                    return JsonResponse(response_data)
-                else:
-                    # No employment but might have tracker data
-                    return JsonResponse({
-                        'account_type': 'alumni',
-                        'has_tracker_data': has_tracker_data,
-                    'organization_name': '',
-                    'date_hired': '',
-                    'position': '',
-                    'employment_status': '',
-                    'company_address': '',
-                    'sector': '',
-                    'employment_duration_current': '',
-                    'salary_current': '',
-                    'scope_current': '',
-                    'company_email': '',
-                    'company_contact': '',
-                    'contact_person': '',
-                    'position_alt': '',
-                    'job_alignment_status': '',
-                    'job_alignment_category': '',
-                    'job_alignment_title': '',
-                    'job_alignment_suggested_program': '',
-                    'job_alignment_original_program': '',
-                    'self_employed': False,
-                    'high_position': False,
-                    'absorbed': False,
-                    'awards_recognition_current': '',
-                    'supporting_document_current': '',
-                    'supporting_document_awards_recognition': '',
-                    'unemployment_reason': '',
-                    'created_at': '',
-                    'updated_at': ''
-                    })
+                return JsonResponse({
+                    'account_type': 'alumni',
+                    'message': 'Coming soon',
+                    'has_tracker_data': False
+                })
             else:
                 # OJT without employment - return empty EmploymentHistory fields only
                 return JsonResponse({
@@ -5582,11 +5462,6 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
-        # Check if user already reposted this post
-        existing_repost = Repost.objects.filter(user=user, post=post).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
-
         # Create repost with optional caption
         payload = {}
         try:
@@ -6415,11 +6290,6 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        
-        # Check if user already reposted this forum post
-        existing_repost = Repost.objects.filter(forum=forum, user=request.user).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
         
         # Create repost with optional caption
         payload = {}
@@ -8067,11 +7937,6 @@ def donation_repost_view(request, donation_id):
     try:
         donation = DonationRequest.objects.get(donation_id=donation_id)
         
-        # Check if user already reposted this donation
-        existing_repost = Repost.objects.filter(donation_request=donation, user=request.user).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
-        
         # Get caption from request data
         caption = request.data.get('caption', '')
         if caption:
@@ -9605,7 +9470,7 @@ def approve_reward_request_view(request, request_id):
         # Handle voucher expiration (5 business days, excluding weekends and holidays)
         if is_voucher:
             approval_date = timezone.now()
-            reward_request.expires_at = get_business_days_after(approval_date, 5)
+            reward_request.expires_at = get_business_days_after(approval_date, 1)
             voucher_code = data.get('voucher_code')
             if voucher_code:
                 reward_request.voucher_code = voucher_code
