@@ -7,7 +7,7 @@ use related models via select_related for performance.
 
 import logging
 from django.shortcuts import render, get_object_or_404
-from django.http import JsonResponse
+from django.http import JsonResponse, Http404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
@@ -63,6 +63,25 @@ def list_ojt_users(request):
             profile = getattr(user, 'profile', None)
             academic = getattr(user, 'academic_info', None)
             ojtinfo = getattr(user, 'ojt_info', None)
+            
+            # Build profile pic URL
+            profile_pic_url = None
+            if profile and hasattr(profile, 'profile_pic') and profile.profile_pic:
+                try:
+                    profile_pic_url = profile.profile_pic.url
+                    # Make it absolute URL if needed
+                    if not str(profile_pic_url).startswith('http'):
+                        from django.conf import settings
+                        base_url = getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                        if base_url.endswith('/') and str(profile_pic_url).startswith('/'):
+                            profile_pic_url = f"{base_url[:-1]}{profile_pic_url}"
+                        elif not str(profile_pic_url).startswith('/'):
+                            profile_pic_url = f"{base_url}/{profile_pic_url}"
+                        else:
+                            profile_pic_url = f"{base_url}{profile_pic_url}"
+                except Exception:
+                    profile_pic_url = None
+            
             users_data.append({
                 'user_id': user.user_id,
                 'username': user.acc_username,
@@ -82,6 +101,7 @@ def list_ojt_users(request):
                 'civil_status': getattr(profile, 'civil_status', None) if profile else None,
                 'birthdate': getattr(profile, 'birthdate', None) if profile else None,
                 'age': getattr(profile, 'age', None) if profile else None,
+                'profile_pic': profile_pic_url,
             })
 
         return JsonResponse({
@@ -110,22 +130,66 @@ def get_ojt_user_details(request, user_id):
     Get detailed information for a specific OJT user
     """
     try:
-        user = get_object_or_404(
-            User.objects.select_related('profile', 'academic_info', 'ojt_info'),
-            user_id=user_id,
-            account_type__ojt=True,
-        )
+        # Try to get the user with OJT account type
+        try:
+            user = User.objects.select_related('profile', 'academic_info', 'ojt_info').get(
+                user_id=user_id,
+                account_type__ojt=True,
+            )
+        except User.DoesNotExist:
+            logger.warning(f"OJT user with user_id={user_id} not found")
+            return JsonResponse({'success': False, 'error': 'OJT user not found'}, status=404)
 
-        profile = getattr(user, 'profile', None)
-        academic = getattr(user, 'academic_info', None)
-        ojtinfo = getattr(user, 'ojt_info', None)
+        # Get related objects safely - use get_or_create to ensure they exist
+        try:
+            profile = getattr(user, 'profile', None)
+            if not profile:
+                profile, _ = UserProfile.objects.get_or_create(user=user)
+        except Exception as e:
+            logger.warning(f"Error getting profile for user_id={user_id}: {e}")
+            profile = None
+            
+        try:
+            academic = getattr(user, 'academic_info', None)
+            if not academic:
+                academic, _ = AcademicInfo.objects.get_or_create(user=user)
+        except Exception as e:
+            logger.warning(f"Error getting academic_info for user_id={user_id}: {e}")
+            academic = None
+            
+        try:
+            ojtinfo = getattr(user, 'ojt_info', None)
+            if not ojtinfo:
+                ojtinfo, _ = OJTInfo.objects.get_or_create(user=user)
+        except Exception as e:
+            logger.warning(f"Error getting ojt_info for user_id={user_id}: {e}")
+            ojtinfo = None
+
+        # Build profile pic URL
+        profile_pic_url = None
+        if profile and hasattr(profile, 'profile_pic') and profile.profile_pic:
+            try:
+                profile_pic_url = profile.profile_pic.url
+                # Make it absolute URL if needed
+                if not str(profile_pic_url).startswith('http'):
+                    from django.conf import settings
+                    base_url = getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    if base_url.endswith('/') and str(profile_pic_url).startswith('/'):
+                        profile_pic_url = f"{base_url[:-1]}{profile_pic_url}"
+                    elif not str(profile_pic_url).startswith('/'):
+                        profile_pic_url = f"{base_url}/{profile_pic_url}"
+                    else:
+                        profile_pic_url = f"{base_url}{profile_pic_url}"
+            except Exception as e:
+                logger.warning(f"Error building profile pic URL for user_id={user_id}: {e}")
+                profile_pic_url = None
 
         user_data = {
             'CTU_ID': user.user_id,
-            'First_Name': user.f_name,
-            'Middle_Name': user.m_name,
-            'Last_Name': user.l_name,
-            'Gender': user.gender,
+            'First_Name': user.f_name or '',
+            'Middle_Name': user.m_name or '',
+            'Last_Name': user.l_name or '',
+            'Gender': user.gender or '',
             'Birthdate': getattr(profile, 'birthdate', None) if profile else None,
             'Phone_Number': getattr(profile, 'phone_num', None) if profile else None,
             'Social_Media': getattr(profile, 'social_media', None) if profile else None,
@@ -136,6 +200,8 @@ def get_ojt_user_details(request, user_id):
             'Ojt_End_Date': getattr(ojtinfo, 'ojt_end_date', None) if ojtinfo else None,
             'Status': getattr(ojtinfo, 'ojtstatus', None) if ojtinfo else None,
             'Civil_Status': getattr(profile, 'civil_status', None) if profile else None,
+            'Profile_Picture': profile_pic_url,
+            'Bio': getattr(profile, 'profile_bio', None) if profile else None,
         }
         
         return JsonResponse({
@@ -143,9 +209,12 @@ def get_ojt_user_details(request, user_id):
             'user': user_data
         })
         
+    except Http404:
+        logger.warning(f"OJT user with user_id={user_id} not found (Http404)")
+        return JsonResponse({'success': False, 'error': 'OJT user not found'}, status=404)
     except Exception as e:
-        logger.error(f"Error in get_ojt_user_details for user_id={user_id}: {e}")
-        return JsonResponse({'success': False, 'error': 'Failed to fetch OJT user details'}, status=500)
+        logger.error(f"Error in get_ojt_user_details for user_id={user_id}: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': f'Failed to fetch OJT user details: {str(e)}'}, status=500)
 
 # Update OJT user status (for coordinators)
 @api_view(["PUT", "PATCH"])
