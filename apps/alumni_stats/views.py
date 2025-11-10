@@ -24,14 +24,29 @@ logger = logging.getLogger(__name__)
 
 def count_self_employed_users(qs):
     """Return number of alumni marked self-employed via employment record or tracker answer."""
-    return (
-        qs.filter(
-            Q(employment__self_employed=True) |
-            Q(tracker_data__q_employment_type__icontains='self')
-        )
-        .distinct()
-        .count()
-    )
+    # Debug logging to help diagnose self-employed detection
+    self_employed_users = qs.filter(
+        Q(employment__self_employed=True) |
+        Q(tracker_data__q_employment_type__iregex=r'self[\s\-]*employ')
+    ).distinct()
+    
+    count = self_employed_users.count()
+    
+    # Log for debugging
+    if count > 0:
+        for user in self_employed_users[:5]:  # Log first 5
+            emp_type = user.tracker_data.q_employment_type if hasattr(user, 'tracker_data') and user.tracker_data else 'N/A'
+            emp_bool = user.employment.self_employed if hasattr(user, 'employment') and user.employment else False
+            logger.info(f"Self-employed user found: {user.user_id} - Type: {emp_type}, Boolean: {emp_bool}")
+    else:
+        # Log why no one matched
+        logger.info(f"No self-employed users found. Checking all employment types:")
+        for user in qs[:5]:  # Check first 5 users
+            emp_type = user.tracker_data.q_employment_type if hasattr(user, 'tracker_data') and user.tracker_data else 'N/A'
+            emp_bool = user.employment.self_employed if hasattr(user, 'employment') and user.employment else False
+            logger.info(f"User {user.user_id}: Type='{emp_type}', Boolean={emp_bool}")
+    
+    return count
 
 
 def count_award_recipients(qs):
@@ -76,7 +91,17 @@ def alumni_statistics_view(request):
         employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
             employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
             unemployed=Count('id', filter=Q(q_employment_status__iexact='no')),
-            pending_tracker=Count('id', filter=Q(q_employment_status__isnull=True) | Q(q_employment_status=''))
+            pending_tracker=Count(
+                'id',
+                filter=(
+                    Q(q_employment_status__isnull=True)
+                    | Q(q_employment_status='')
+                    | Q(q_employment_status__iexact='pending')
+                    | Q(q_employment_status__iexact='untracked')
+                    | Q(q_employment_status__iexact='n/a')
+                    | Q(q_employment_status__iexact='na')
+                ),
+            ),
         )
         employed = employment_stats['employed']
         unemployed = employment_stats['unemployed']
@@ -178,8 +203,15 @@ def generate_statistics_view(request):
                 absorbed = EmploymentHistory.objects.filter(user__in=alumni_qs, absorbed=True).count()
                 
                 total_alumni_count = total_alumni  # preserve original count explicitly
-                # Use exact same logic as alumni_statistics_view
-                untracked = max(total_alumni_count - employed - unemployed - absorbed, 0)
+                # Calculate untracked: alumni who haven't answered tracker at all
+                # Check if they've ACTUALLY submitted by looking for non-null employment status or submitted timestamp
+                alumni_with_tracker = TrackerData.objects.filter(
+                    user__in=alumni_qs
+                ).filter(
+                    Q(q_employment_status__isnull=False) & ~Q(q_employment_status='') |
+                    Q(tracker_submitted_at__isnull=False)
+                ).values_list('user_id', flat=True).distinct().count()
+                untracked = max(total_alumni_count - alumni_with_tracker, 0)
             except Exception as e:
                 logger.error(f"Error in QPRO stats calculation: {e}")
                 # Fallback to simple calculation
@@ -338,13 +370,31 @@ def generate_statistics_view(request):
         
         elif stats_type == 'AACUP':
             # AACUP: Absorbed, employed, high position statistics - OPTIMIZED
-            from apps.shared.models import TrackerData
+            from apps.shared.models import TrackerData, EmploymentHistory
+            from django.db.models import Q, Count
             
-            # OPTIMIZED: Use database aggregation for employment status only
-            employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
-                employed=Count('id', filter=Q(q_employment_status__iexact='yes'))
-            )
-            employed = employment_stats['employed']
+            # Count employed from BOTH TrackerData and EmploymentHistory to avoid missing users
+            # Use EmploymentHistory as primary source since it's more complete
+            try:
+                # Try to get employment status from tracker first
+                employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
+                    employed=Count('id', filter=Q(q_employment_status__iexact='yes'))
+                )
+                employed_from_tracker = employment_stats['employed']
+                
+                # Also count from employment history for users who might not have tracker yet
+                employed_from_history = alumni_qs.filter(
+                    Q(employment__isnull=False) &
+                    ~Q(employment__position_current__isnull=True) &
+                    ~Q(employment__position_current='')
+                ).count()
+                
+                # Use the higher count (more conservative estimate)
+                employed = max(employed_from_tracker, employed_from_history)
+            except Exception as e:
+                logger.error(f"Error counting employed in AACUP: {e}")
+                # Fallback: count any alumni with employment data
+                employed = alumni_qs.filter(employment__isnull=False).count()
             
             absorbed = alumni_qs.filter(employment__absorbed=True).count()
             high_position = alumni_qs.filter(employment__high_position=True).count()

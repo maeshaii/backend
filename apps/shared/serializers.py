@@ -224,7 +224,8 @@ class SmallUserSerializer(serializers.ModelSerializer):
         """Get profile picture URL with cache-busting timestamp"""
         try:
             from apps.api.views import build_profile_pic_url
-            url = build_profile_pic_url(obj)
+            request = self.context.get('request')
+            url = build_profile_pic_url(obj, request)
             return url if url else None
         except Exception:
             return None
@@ -325,7 +326,7 @@ class ConversationSerializer(serializers.ModelSerializer):
             other_user = obj.get_other_participant(request.user)
             if other_user:
                 from apps.api.views import build_profile_pic_url
-                avatar_url = build_profile_pic_url(other_user)
+                avatar_url = build_profile_pic_url(other_user, request)
                 return {
                     'user_id': other_user.user_id,
                     'name': other_user.full_name,
