@@ -19,7 +19,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile
 from apps.shared.services import UserService
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
@@ -53,6 +53,19 @@ import tempfile
 from django.http import FileResponse
 from django.db import transaction
 from typing import Optional
+
+
+def _table_exists(table_name: str) -> bool:
+    """
+    Safely check if a database table exists.
+    Prevents runtime errors when migrations haven't been applied yet.
+    """
+    try:
+        with connection.cursor() as cursor:
+            tables = connection.introspection.table_names(cursor)
+        return table_name in tables
+    except Exception:
+        return False
 
 # --- Helper Functions ---
 
@@ -2335,6 +2348,46 @@ def import_ojt_view(request):
                 
                 print(f"Row {index+2} - CTU_ID: {ctu_id}, User exists: {existing_user_check is not None}")
                 
+                # IMPORTANT: Check if this CTU_ID was imported by a different coordinator
+                if existing_user_check:
+                    # Check if user has academic_info (OJT students should have this)
+                    if hasattr(existing_user_check, 'academic_info') and existing_user_check.academic_info:
+                        user_year = existing_user_check.academic_info.year_graduated
+                        user_section = getattr(existing_user_check.academic_info, 'section', None) or ''
+                        
+                        # Find which coordinator(s) imported this user's year+section
+                        existing_imports = OJTImport.objects.filter(
+                            batch_year=user_year,
+                            section=user_section
+                        )
+                        
+                        if existing_imports.exists():
+                            # Check all imports for this year+section
+                            coordinators_for_this_batch = set()
+                            for imp in existing_imports:
+                                coordinators_for_this_batch.add(imp.coordinator)
+                            
+                            # If any coordinator other than current one imported this batch, block it
+                            other_coordinators = coordinators_for_this_batch - {coordinator_username}
+                            if other_coordinators:
+                                original_coordinator = list(other_coordinators)[0]  # Get first other coordinator
+                                error_msg = f"Row {index + 2}: CTU_ID {ctu_id} was already imported by {original_coordinator} (batch {user_year}, section {user_section}). Cannot import to {coordinator_username}."
+                                print(f"❌ BLOCKED: {error_msg}")
+                                errors.append(error_msg)
+                                skipped_count += 1
+                                continue
+                            else:
+                                print(f"✅ CTU_ID {ctu_id} was imported by same coordinator ({coordinator_username}) - allowing update")
+                        else:
+                            # User exists but no import record - might be from old system
+                            # Check if user is OJT type - if yes, block it to prevent conflicts
+                            if existing_user_check.account_type and existing_user_check.account_type.ojt:
+                                error_msg = f"Row {index + 2}: CTU_ID {ctu_id} already exists as OJT student (batch {user_year}, section {user_section}) but has no import record. Cannot import to prevent conflicts."
+                                print(f"❌ BLOCKED: {error_msg}")
+                                errors.append(error_msg)
+                                skipped_count += 1
+                                continue
+                
                 if not existing_user_check:
                     # NEW USER - require all fields (including personal info AND company info)
                     print(f"Row {index+2} - NEW USER MODE - validating required fields...")
@@ -2860,6 +2913,9 @@ def ojt_statistics_view(request):
         year_section_counts = {}
         try:
             from apps.shared.models import OJTImport
+            from django.db.models import Q
+            
+            # Get imports filtered by coordinator
             import_filter = OJTImport.objects.all()
             if coordinator_username:
                 import_filter = import_filter.filter(coordinator=coordinator_username)
@@ -2867,7 +2923,7 @@ def ojt_statistics_view(request):
             print(f"DEBUG: Filtering by coordinator: {coordinator_username}")
             print(f"DEBUG: Found {import_filter.count()} import records")
             
-            # Get unique year+section combinations (don't count duplicates)
+            # Get unique year+section combinations from imports (ONLY from this coordinator's imports)
             unique_year_sections = {}
             for imp in import_filter:
                 y = getattr(imp, 'batch_year', None)
@@ -2879,46 +2935,66 @@ def ojt_statistics_view(request):
             
             print(f"DEBUG: Unique year+section combinations from imports: {unique_year_sections.keys()}")
             
-            # ALSO get year+section combinations from actual users in database
-            # This ensures we show cards even if import records were deleted
-            from django.db.models import Q
-            actual_users = User.objects.filter(
-                account_type__ojt=True
-            ).exclude(
-                acc_username='coordinator'
-            ).exclude(
-                f_name='Coordinator'
-            ).select_related('academic_info')
+            # If coordinator is specified, ONLY show year+section combinations from their imports
+            # Don't add users from other coordinators
+            if not coordinator_username:
+                # Admin view - can see all users, but still only from import records
+                # Add year+section from actual users that have import records
+                all_imports = OJTImport.objects.all()
+                all_import_year_sections = set()
+                for imp in all_imports:
+                    y = getattr(imp, 'batch_year', None)
+                    section = getattr(imp, 'section', None) or 'Unknown'
+                    if y is not None:
+                        all_import_year_sections.add((y, section))
+                
+                # Only add users that match import records
+                actual_users = User.objects.filter(
+                    account_type__ojt=True
+                ).exclude(
+                    acc_username=settings.DEFAULT_COORDINATOR_USERNAME
+                ).exclude(
+                    f_name='Coordinator'
+                ).select_related('academic_info')
+                
+                for user in actual_users:
+                    if hasattr(user, 'academic_info') and user.academic_info:
+                        year = user.academic_info.year_graduated
+                        section = user.academic_info.section or 'Unknown'
+                        if year and (year, section) in all_import_year_sections:
+                            unique_year_sections[(year, section)] = True
             
-            if coordinator_username:
-                # For coordinators, we need to match by their managed year+sections
-                # But since import records might be deleted, let's just show all OJT users
-                pass
-            
-            # Add year+section from actual users
-            for user in actual_users:
-                if hasattr(user, 'academic_info') and user.academic_info:
-                    year = user.academic_info.year_graduated
-                    section = user.academic_info.section or 'Unknown'
-                    if year:
-                        unique_year_sections[(year, section)] = True
-            
-            print(f"DEBUG: Unique year+section combinations (with users): {unique_year_sections.keys()}")
+            print(f"DEBUG: Unique year+section combinations (final): {unique_year_sections.keys()}")
             
             # Now count actual OJT users for each year and section (exclude alumni and coordinators)
             for (year, section) in unique_year_sections.keys():
                 # Count actual OJT users in database for this year AND section
                 # Only count active OJT students, NOT alumni
-                ojt_count = User.objects.filter(
+                user_query = User.objects.filter(
                     academic_info__year_graduated=year,
                     academic_info__section=section,
                     account_type__ojt=True,  # Only count OJT students, not alumni
                     user_status__iexact='Active'  # Only count active students
                 ).exclude(
-                    acc_username='coordinator'  # Exclude coordinator users
+                    acc_username=settings.DEFAULT_COORDINATOR_USERNAME  # Exclude coordinator users
                 ).exclude(
                     f_name='Coordinator'  # Exclude any user with name "Coordinator"
-                ).count()
+                )
+                
+                # If coordinator is specified, ensure users match their imports
+                if coordinator_username:
+                    # Double-check: verify this year+section was imported by this coordinator
+                    coordinator_has_import = OJTImport.objects.filter(
+                        coordinator=coordinator_username,
+                        batch_year=year,
+                        section=section
+                    ).exists()
+                    
+                    if not coordinator_has_import:
+                        # Skip this year+section if coordinator didn't import it
+                        continue
+                
+                ojt_count = user_query.count()
                 
                 # Only show cards with actual OJT students (don't count alumni)
                 if ojt_count > 0:
@@ -2968,22 +3044,70 @@ def ojt_by_year_view(request):
         except Exception:
             return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
 
+        # Get coordinator's imported year+section combinations if coordinator is specified
+        coordinator_year_sections = set()
+        coordinator_year_sections_normalized = set()  # For flexible matching
+        if coordinator_username:
+            try:
+                from apps.shared.models import OJTImport
+                coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+                for imp in coordinator_imports:
+                    y = getattr(imp, 'batch_year', None)
+                    s = getattr(imp, 'section', None)
+                    # Normalize section: strip whitespace, handle None
+                    s_normalized = s.strip() if s else ''
+                    if y:
+                        coordinator_year_sections.add((y, s_normalized))
+                        # Also add with original value for flexible matching
+                        coordinator_year_sections_normalized.add((y, s_normalized))
+                        if s and s.strip() and s.strip() != s_normalized:
+                            coordinator_year_sections_normalized.add((y, s.strip()))
+                print(f"DEBUG: Coordinator {coordinator_username} has imports for: {coordinator_year_sections}")
+            except Exception as e:
+                print(f"ERROR getting coordinator imports: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Normalize section for comparison (empty string or None both become '')
+        normalized_section = section.strip() if section else ''
+        # Check if the OJT company profile table is available (some environments may be mid-migration)
+        ojt_company_profile_exists = _table_exists(OJTCompanyProfile._meta.db_table)
+        select_related_fields = ['profile', 'academic_info', 'ojt_info', 'employment', 'initial_password']
+        if ojt_company_profile_exists:
+            select_related_fields.append('ojt_company_profile')
+        
         # Filter by section if provided
-        if section:
-            print(f"DEBUG: Filtering by section: {section}")
+        if normalized_section:
+            print(f"DEBUG: Filtering by section: {normalized_section}")
             # Filter by actual section stored in AcademicInfo - ONLY OJT STUDENTS
             ojt_data = (
                 User.objects
                 .filter(
                     academic_info__year_graduated=year_int, 
-                    academic_info__section=section,
+                    academic_info__section=normalized_section,
                     account_type__ojt=True  # Only OJT students, not alumni
                 )
-                .exclude(acc_username='coordinator')  # Exclude coordinator user
+                .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
                 .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
+                .select_related(*select_related_fields)
                 .order_by('l_name', 'f_name')
             )
+            
+            # If coordinator is specified, ensure this year+section was imported by them
+            if coordinator_username:
+                # Check if this year+section combination exists in coordinator's imports
+                # Try both exact match and normalized match
+                section_key = normalized_section
+                section_found = (
+                    (year_int, section_key) in coordinator_year_sections or
+                    (year_int, section_key) in coordinator_year_sections_normalized
+                )
+                
+                if not section_found:
+                    # This year+section was not imported by this coordinator, return empty
+                    ojt_data = User.objects.none()
+                    print(f"DEBUG: Year {year_int}, Section {section_key} not imported by {coordinator_username}")
+                    print(f"DEBUG: Available sections: {[s for y, s in coordinator_year_sections if y == year_int]}")
         else:
             # No section filter - show all users for the year
             # If no coordinator is specified, this is likely an admin request
@@ -2997,56 +3121,87 @@ def ojt_by_year_view(request):
                         ojt_info__is_sent_to_admin=True,
                         account_type__ojt=True  # Only OJT students
                     )
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
+                    .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
                     .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
+                    .select_related(*select_related_fields)
                     .order_by('l_name', 'f_name')
                 )
             else:
-                # Coordinator request - show all OJT users for the year
-                ojt_data = (
-                    User.objects
-                    .filter(
-                        academic_info__year_graduated=year_int,
-                        account_type__ojt=True  # Only OJT students, not alumni
-                    )
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('l_name', 'f_name')
-                )
+                # Coordinator request - show only OJT users for year+section combinations they imported
+                from django.db.models import Q
+                year_section_filters = Q()
+                has_filters = False
+                for (y, s) in coordinator_year_sections:
+                    if y == year_int:  # Only include sections for this year
+                        has_filters = True
+                        s_normalized = s or ''  # Normalize None to empty string
+                        if s_normalized:
+                            year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s_normalized)
+                        else:
+                            year_section_filters |= Q(academic_info__year_graduated=y)
+                
+                if has_filters and year_section_filters:
+                    try:
+                        ojt_data = (
+                            User.objects
+                            .filter(
+                                year_section_filters,
+                                account_type__ojt=True  # Only OJT students, not alumni
+                            )
+                            .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
+                            .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
+                    .select_related(*select_related_fields)
+                            .order_by('l_name', 'f_name')
+                        )
+                    except Exception as e:
+                        print(f"ERROR in ojt_by_year_view filter: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        ojt_data = User.objects.none()
+                else:
+                    # No imports for this year by this coordinator
+                    ojt_data = User.objects.none()
+                    print(f"DEBUG: Coordinator {coordinator_username} has no imports for year {year_int}")
 
         # Fallbacks to avoid empty UI and help coordinators verify recent imports
         # BUT: Only apply fallback for coordinator requests, NOT for admin requests
+        # AND: Only show users from coordinator's imports
         if not ojt_data.exists() and coordinator_username:
-            # 1) Prefer recently created/updated users (likely the ones just imported)
+            # 1) Prefer recently created/updated users from coordinator's imports
             try:
+                from django.db.models import Q
                 recent_since = timezone.now() - timedelta(days=1)
-                recent_users = (
-                    User.objects
-                    .filter(updated_at__gte=recent_since)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('-updated_at', 'l_name', 'f_name')
-                )
+                
+                # Build filter for coordinator's year+section combinations
+                year_section_filters = Q()
+                for (y, s) in coordinator_year_sections:
+                    if s:
+                        year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s)
+                    else:
+                        year_section_filters |= Q(academic_info__year_graduated=y)
+                
+                if year_section_filters:
+                    recent_users = (
+                        User.objects
+                        .filter(
+                            year_section_filters,
+                            updated_at__gte=recent_since,
+                            account_type__ojt=True
+                        )
+                        .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
+                        .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
+                        .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
+                    .select_related(*select_related_fields)
+                        .order_by('-updated_at', 'l_name', 'f_name')
+                    )
+                else:
+                    recent_users = User.objects.none()
             except Exception:
                 recent_users = User.objects.none()
 
             if recent_users.exists():
                 ojt_data = recent_users
-            else:
-                # 2) As a last resort, show all OJT-type users (but exclude coordinators)
-                ojt_data = (
-                    User.objects
-                    .filter(account_type__ojt=True)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('l_name', 'f_name')
-                )
+            # Don't show all OJT users as fallback - respect coordinator isolation
 
         ojt_list = []
         for ojt in ojt_data:
@@ -3075,7 +3230,12 @@ def ojt_by_year_view(request):
             academic_info = getattr(ojt, 'academic_info', None) if hasattr(ojt, 'academic_info') else None
             employment = getattr(ojt, 'employment', None) if hasattr(ojt, 'employment') else None
             ojt_info = getattr(ojt, 'ojt_info', None) if hasattr(ojt, 'ojt_info') else None
-            ojt_company_profile = getattr(ojt, 'ojt_company_profile', None) if hasattr(ojt, 'ojt_company_profile') else None
+            ojt_company_profile = None
+            if ojt_company_profile_exists:
+                try:
+                    ojt_company_profile = ojt.ojt_company_profile
+                except (AttributeError, OJTCompanyProfile.DoesNotExist):
+                    ojt_company_profile = None
             account_type = getattr(ojt, 'account_type', None) if hasattr(ojt, 'account_type') else None
             initial_password = getattr(ojt, 'initial_password', None) if hasattr(ojt, 'initial_password') else None
             
@@ -3218,7 +3378,7 @@ def ojt_company_statistics_view(request):
             company_profiles
             .exclude(company_name__isnull=True)
             .exclude(company_name='')
-            .exclude(user__acc_username='coordinator')  # Exclude coordinator users
+            .exclude(user__acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator users
             .values('company_name')
             .annotate(student_count=Count('id'))
             .order_by('-student_count', 'company_name')
@@ -8829,29 +8989,56 @@ def set_send_date_view(request):
         
         # Update all OJT students' end dates to match the send date
         # This ensures consistent end dates across the batch
+        # IMPORTANT: Only update students imported by this coordinator
         try:
-            from apps.shared.models import User, OJTInfo, AcademicInfo
+            from apps.shared.models import User, OJTInfo, AcademicInfo, OJTImport
+            from django.db.models import Q
             
-            # Find all OJT students in this batch year
+            # Get year+section combinations imported by this coordinator
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator)
+            coordinator_year_sections = set()
+            for imp in coordinator_imports:
+                y = getattr(imp, 'batch_year', None)
+                s = getattr(imp, 'section', None) or ''
+                if y == batch_year:  # Only for this batch year
+                    coordinator_year_sections.add((y, s))
+            
+            # Build filter for coordinator's year+section combinations
+            year_section_filters = Q()
+            has_filters = False
+            for (y, s) in coordinator_year_sections:
+                if y == batch_year:
+                    has_filters = True
+                    if s:
+                        year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s)
+                    else:
+                        year_section_filters |= Q(academic_info__year_graduated=y)
+            
             updated_count = 0
-            students = User.objects.filter(
-                account_type__ojt=True,
-                academic_info__year_graduated=batch_year
-            ).select_related('ojt_info', 'academic_info')
-            
-            print(f"🔍 Found {students.count()} OJT students in batch {batch_year}")
-            
-            for student in students:
-                if hasattr(student, 'ojt_info') and student.ojt_info:
-                    # Update the end date to match the scheduled send date
-                    student.ojt_info.ojt_end_date = send_date_obj
-                    student.ojt_info.save()
-                    updated_count += 1
-                    print(f"  ✓ Updated end date for {student.full_name or student.acc_username} to {send_date_obj}")
+            if has_filters and year_section_filters:
+                # Only update students from this coordinator's imports
+                students = User.objects.filter(
+                    year_section_filters,
+                    account_type__ojt=True
+                ).select_related('ojt_info', 'academic_info')
+                
+                print(f"🔍 Found {students.count()} OJT students in batch {batch_year} imported by {coordinator}")
+                
+                for student in students:
+                    if hasattr(student, 'ojt_info') and student.ojt_info:
+                        # Update the end date to match the scheduled send date
+                        student.ojt_info.ojt_end_date = send_date_obj
+                        student.ojt_info.save()
+                        updated_count += 1
+                        print(f"  ✓ Updated end date for {student.full_name or student.acc_username} to {send_date_obj}")
+            else:
+                print(f"⚠️ No students found for coordinator {coordinator} in batch {batch_year}")
             
             print(f"✅ Updated {updated_count} students' end dates to {send_date_obj}")
         except Exception as update_error:
             print(f"⚠️ Warning: Could not update student end dates: {update_error}")
+            import traceback
+            traceback.print_exc()
             # Don't fail the whole operation if this fails
         
         print(f"✅ Successfully set send date for batch {batch_year}: {send_date_obj}")
@@ -8887,7 +9074,7 @@ def check_all_sent_status_view(request):
         base_query = User.objects.filter(
             account_type__ojt=True,
             ojt_info__ojtstatus='Completed'
-        ).exclude(acc_username='coordinator')
+        ).exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)
         
         # Filter by batch year if provided
         if batch_year and batch_year != 'ALL':
