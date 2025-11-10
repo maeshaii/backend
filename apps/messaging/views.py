@@ -408,6 +408,31 @@ def conversation_detail(request, conversation_id):
     return Response(serializer.data)
 
 
+@api_view(['PATCH', 'PUT'])
+@permission_classes([IsAuthenticated, IsAlumniOrOJT])
+def update_message(request, conversation_id, message_id):
+    """Update/edit a message"""
+    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+    if not conversation.participants.filter(user_id=request.user.user_id).exists():
+        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    message = get_object_or_404(Message, message_id=message_id, conversation=conversation)
+    if message.sender.user_id != request.user.user_id:
+        return Response({'error': 'You can only edit your own messages'}, status=status.HTTP_403_FORBIDDEN)
+    
+    # Update message content
+    content = request.data.get('content')
+    if not content or not content.strip():
+        return Response({'error': 'Message content cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    message.content = content.strip()
+    message.save()
+    
+    # Return updated message
+    from apps.shared.serializers import MessageSerializer
+    serializer = MessageSerializer(message, context={'request': request})
+    return Response(serializer.data)
+
+
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def delete_message(request, conversation_id, message_id):

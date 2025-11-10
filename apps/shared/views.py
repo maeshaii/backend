@@ -159,8 +159,10 @@ def check_job_alignment(request):
             program = user.academic_info.program
         
         # Perform job alignment check without saving
-        alignment_result = employment._check_job_alignment_for_position(position, program)
+        employment._check_job_alignment_for_position(position, program)
         
+        normalized_position = employment.job_alignment_title or ' '.join(position.strip().split()).upper()
+
         # Check if alignment needs confirmation
         needs_confirmation = employment.job_alignment_status == 'pending_user_confirmation'
         
@@ -168,16 +170,18 @@ def check_job_alignment(request):
             'success': True,
             'needs_confirmation': needs_confirmation,
             'job_alignment_status': employment.job_alignment_status,
-            'from_autocomplete': from_autocomplete
+            'from_autocomplete': from_autocomplete,
+            'normalized_position': normalized_position,
+            'normalized_company_name': employment.company_name_current,
         }
         
         if needs_confirmation:
             response_data.update({
                 'suggestion': {
                     'employment_id': employment.id,
-                    'position': position,
+                    'position': normalized_position,
                     'user_program': user.academic_info.program if hasattr(user, 'academic_info') else 'Unknown',
-                    'question': f"Is '{position}' aligned to your {user.academic_info.program if hasattr(user, 'academic_info') else 'program'} program?"
+                    'question': f"Is '{normalized_position}' aligned to your {user.academic_info.program if hasattr(user, 'academic_info') else 'program'} program?"
                 }
             })
         

@@ -5,6 +5,7 @@ Uses shared models and serializers for data representation. If this file continu
 
 import logging
 import uuid
+import os
 logger = logging.getLogger(__name__)
 
 from django.conf import settings
@@ -51,8 +52,61 @@ from rest_framework.decorators import api_view
 import tempfile
 from django.http import FileResponse
 from django.db import transaction
+from typing import Optional
 
 # --- Helper Functions ---
+
+
+def ensure_initial_password_active(user, raw_password: Optional[str] = None, allow_create: bool = False) -> bool:
+    """Guarantee the user has an active UserInitialPassword entry.
+
+    Parameters
+    ----------
+    user: User instance
+    raw_password: optional plaintext password to store (only use if you are certain it is current)
+    allow_create: when True and the record does not exist, create it (requires raw_password)
+
+    Returns
+    -------
+    bool
+        True if an active record exists or was successfully created/updated.
+    """
+
+    try:
+        initial = getattr(user, 'initial_password', None)
+        updated_fields = []
+
+        if initial:
+            if raw_password:
+                initial.set_plaintext(raw_password)
+                updated_fields.append('password_encrypted')
+            if not initial.is_active:
+                initial.is_active = True
+                updated_fields.append('is_active')
+            if updated_fields:
+                initial.save(update_fields=updated_fields)
+            return True
+
+        if allow_create and raw_password:
+            initial = UserInitialPassword.objects.create(user=user)
+            initial.set_plaintext(raw_password)
+            initial.is_active = True
+            initial.save(update_fields=['password_encrypted', 'is_active'])
+            return True
+
+        if not initial and not allow_create:
+            logger.warning(
+                "User %s lacks initial password record; cannot enforce first login without plaintext",
+                getattr(user, 'acc_username', user.user_id),
+            )
+        return False
+    except Exception as exc:
+        logger.error(
+            "Failed to ensure initial password for user %s: %s",
+            getattr(user, 'acc_username', user.user_id),
+            exc,
+        )
+        raise
 
 def award_engagement_points(user, action_type):
     """
@@ -261,7 +315,7 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
             # Skip if user not found or other error
             continue
 
-def build_profile_pic_url(user):
+def build_profile_pic_url(user, request=None):
     try:
         # Use refactored profile model
         profile = getattr(user, 'profile', None)
@@ -280,7 +334,23 @@ def build_profile_pic_url(user):
             try:
                 if not str(url).startswith('http'):
                     from django.conf import settings
-                    base_url = getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    
+                    # Try to get base URL from multiple sources (priority order):
+                    # 1. Request object (most accurate for mobile)
+                    # 2. Environment variable
+                    # 3. Settings file
+                    # 4. Fallback to localhost
+                    base_url = None
+                    
+                    if request:
+                        # Build URL from request (works for mobile accessing via network IP)
+                        scheme = 'https' if request.is_secure() else 'http'
+                        host = request.get_host()
+                        base_url = f"{scheme}://{host}"
+                    
+                    if not base_url:
+                        base_url = os.environ.get('BASE_URL') or getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    
                     # Avoid double slashes when concatenating
                     if base_url.endswith('/') and str(url).startswith('/'):
                         return f"{base_url[:-1]}{url}"
@@ -742,14 +812,7 @@ def import_alumni_view(request):
                 
                 # Store initial password (encrypted) for export/sharing
                 # Set is_active=True so users get forced to change password on first login
-                try:
-                    up, _ = UserInitialPassword.objects.get_or_create(user=user)
-                    up.set_plaintext(password_raw)
-                    up.is_active = True  # Force password change for security
-                    up.save()
-                except Exception as e:
-                    print(f"DEBUG: Error saving initial password for {ctu_id}: {e}")
-                    pass
+                ensure_initial_password_active(user, raw_password=password_raw, allow_create=True)
                 
                 # CRITICAL: Count user creation immediately after successful user creation
                 # This ensures accurate count even if related model creation fails
@@ -1028,7 +1091,17 @@ def alumni_statistics_view(request):
         employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
             employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
             unemployed=Count('id', filter=Q(q_employment_status__iexact='no')),
-            pending_tracker=Count('id', filter=Q(q_employment_status__isnull=True) | Q(q_employment_status=''))
+            pending_tracker=Count(
+                'id',
+                filter=(
+                    Q(q_employment_status__isnull=True)
+                    | Q(q_employment_status='')
+                    | Q(q_employment_status__iexact='pending')
+                    | Q(q_employment_status__iexact='untracked')
+                    | Q(q_employment_status__iexact='n/a')
+                    | Q(q_employment_status__iexact='na')
+                ),
+            ),
         )
         employed = employment_stats['employed']
         unemployed = employment_stats['unemployed']
@@ -1977,14 +2050,13 @@ def import_ojt_view(request):
                         from apps.shared.models import UserInitialPassword
                         has_initial_password = UserInitialPassword.objects.filter(user=existing_user).exists()
                         
-                        # TWO-STEP IMPORT: Password generation rules
-                        # User ALREADY EXISTS - NEVER regenerate password or add to export
-                        # Only update their information
-                        if has_initial_password:
-                            print(f"Row {index+2} - UPDATE MODE: User exists, password NOT changed (keeping existing password)")
-                        else:
-                            # Edge case: User exists but has no initial password record (shouldn't happen normally)
-                            print(f"Row {index+2} - WARNING: User exists without initial password record, not regenerating password")
+                        # Ensure a first-login record exists and is active for coordinator-managed accounts
+                        ensure_initial_password_active(
+                            existing_user,
+                            raw_password=password_raw if password_raw else None,
+                            allow_create=bool(password_raw),
+                        )
+                        print(f"Row {index+2} - Initial password record ensured/activated for {ctu_id}")
 
                         # Update names to match latest import where present (only if provided in Excel)
                         updated = False
@@ -2182,13 +2254,7 @@ def import_ojt_view(request):
                 ojt_user.save()
                 # Store initial password (encrypted)
                 # Set is_active=True so users get forced to change password on first login
-                try:
-                    up, _ = UserInitialPassword.objects.get_or_create(user=ojt_user)
-                    up.set_plaintext(password_raw)
-                    up.is_active = True  # Force password change for security
-                    up.save()
-                except Exception:
-                    pass
+                ensure_initial_password_active(ojt_user, raw_password=password_raw, allow_create=True)
                 from apps.shared.models import UserProfile, AcademicInfo, EmploymentHistory, OJTInfo
                 birthdate_val = row.get('Birthdate')
                 # Extract phone number from Contact_No column (your Excel uses Contact_No, not Phone_Number)
@@ -3591,6 +3657,9 @@ def approve_ojt_to_alumni_view(request):
                     # Do NOT update password - keep the existing OJT password
                     user.save()
 
+                    # Reactivate first-login flag so alumni must change the coordinator-issued password
+                    ensure_initial_password_active(user)
+
                     # Clear sent to admin flag since user is now approved
                     if hasattr(user, 'ojt_info') and user.ojt_info:
                         user.ojt_info.is_sent_to_admin = False
@@ -3718,6 +3787,7 @@ def approve_individual_ojt_to_alumni_view(request):
             user.save()
 
             # Do NOT create/update UserInitialPassword - keep existing password
+            ensure_initial_password_active(user)
 
             # Ensure academic info year_graduated is set
             if hasattr(user, 'academic_info') and user.academic_info:
