@@ -1500,6 +1500,172 @@ def send_reminder_view(request):
         except Exception as e:
             continue
     return JsonResponse({'success': True, 'sent': sent, 'total': len(users)})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_email_reminder_view(request):
+    """
+    Send tracker form reminders via email to selected users.
+    
+    Expected payload:
+    {
+        "user_ids": [1, 2, 3],
+        "message": "HTML formatted message with [User's Name] placeholder",
+        "subject": "Email subject",
+        "tracker_link_base": "https://domain.com"
+    }
+    """
+    try:
+        data = json.loads(request.body)
+        user_ids = data.get('user_ids', [])
+        message = data.get('message', '')
+        subject = data.get('subject', 'CTU Alumni Tracker Form Reminder')
+        tracker_link_base = data.get('tracker_link_base', '')
+        
+        # Validation
+        if not user_ids:
+            return JsonResponse({
+                'success': False, 
+                'message': 'No users selected'
+            }, status=400)
+        
+        if not message:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Message content is required'
+            }, status=400)
+            
+        if not tracker_link_base:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Tracker link base URL is required'
+            }, status=400)
+        
+        # Check if email is configured
+        if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
+            return JsonResponse({
+                'success': False,
+                'message': 'Email is not configured on the server. Please contact the administrator.'
+            }, status=500)
+        
+        # Fetch users with their profiles
+        users = User.objects.filter(
+            user_id__in=user_ids
+        ).select_related('profile')
+        
+        sent_count = 0
+        failed_count = 0
+        no_email_count = 0
+        errors = []
+        
+        for user in users:
+            try:
+                # Check if user has a profile with email
+                if not hasattr(user, 'profile') or not user.profile:
+                    no_email_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': 'No profile found'
+                    })
+                    continue
+                
+                user_email = user.profile.email
+                if not user_email or user_email.strip() == '':
+                    no_email_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': 'No email address'
+                    })
+                    continue
+                
+                # Personalize the message
+                full_name = f"{user.f_name} {user.l_name}"
+                personalized_message = message.replace('[User\'s Name]', full_name)
+                
+                # Generate tracker link
+                tracker_link = f"{tracker_link_base}/alumni/tracker?user_id={user.user_id}"
+                
+                # Replace the tracker form link placeholder with actual clickable link
+                personalized_message = personalized_message.replace(
+                    '👉 Fill Out the Tracker Form',
+                    f'<a href="{tracker_link}" style="color:#1e4c7a;font-weight:600;text-decoration:underline;">👉 Fill Out the Tracker Form</a>'
+                )
+                
+                # Create HTML email with proper formatting
+                html_message = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                </head>
+                <body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
+                    <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                        <div style="background-color:#1e4c7a;color:#ffffff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
+                            <h1 style="margin:0;font-size:24px;">CTU Alumni Tracker Form</h1>
+                        </div>
+                        <div style="padding:30px;color:#333333;line-height:1.6;">
+                            {personalized_message.replace(chr(10), '<br>')}
+                        </div>
+                        <div style="background-color:#f8f9fa;padding:20px;border-radius:0 0 8px 8px;text-align:center;font-size:12px;color:#666;">
+                            <p style="margin:0;">This is an automated message from CTU CCICT Alumni Management System</p>
+                            <p style="margin:5px 0 0 0;">Please do not reply to this email</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                # Send email using Django's send_mail
+                from django.core.mail import EmailMultiAlternatives
+                
+                email = EmailMultiAlternatives(
+                    subject=subject,
+                    body=personalized_message,  # Plain text fallback
+                    from_email=settings.EMAIL_HOST_USER,
+                    to=[user_email],
+                )
+                email.attach_alternative(html_message, "text/html")
+                email.send(fail_silently=False)
+                
+                sent_count += 1
+                logger.info(f"Email sent successfully to {full_name} ({user_email})")
+                
+            except Exception as e:
+                failed_count += 1
+                error_msg = str(e)
+                logger.error(f"Failed to send email to {user.f_name} {user.l_name}: {error_msg}")
+                errors.append({
+                    'user': f"{user.f_name} {user.l_name}",
+                    'reason': error_msg
+                })
+        
+        # Prepare response
+        response_data = {
+            'success': sent_count > 0,
+            'sent': sent_count,
+            'failed': failed_count,
+            'no_email': no_email_count,
+            'total': len(user_ids)
+        }
+        
+        if errors:
+            response_data['errors'] = errors
+        
+        return JsonResponse(response_data)
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON payload'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error in send_email_reminder_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def notifications_view(request):

@@ -161,7 +161,9 @@ def check_job_alignment(request):
         # Perform job alignment check without saving
         employment._check_job_alignment_for_position(position, program)
         
-        normalized_position = employment.job_alignment_title or ' '.join(position.strip().split()).upper()
+        # Keep user's original input for UI display, don't force uppercase
+        # Normalization to uppercase will happen only when saving to database
+        display_position = ' '.join(position.strip().split())  # Just normalize whitespace
 
         # Check if alignment needs confirmation
         needs_confirmation = employment.job_alignment_status == 'pending_user_confirmation'
@@ -171,17 +173,20 @@ def check_job_alignment(request):
             'needs_confirmation': needs_confirmation,
             'job_alignment_status': employment.job_alignment_status,
             'from_autocomplete': from_autocomplete,
-            'normalized_position': normalized_position,
+            'normalized_position': display_position,  # Send user's input back, not uppercase
             'normalized_company_name': employment.company_name_current,
         }
+        
+        # DEBUG: Log the response for investigation
+        logger.info(f"🔍 check_job_alignment: user={user_id}, pos='{position[:30]}', program={program}, status={employment.job_alignment_status}, needs_confirm={needs_confirmation}")
         
         if needs_confirmation:
             response_data.update({
                 'suggestion': {
                     'employment_id': employment.id,
-                    'position': normalized_position,
+                    'position': display_position,
                     'user_program': user.academic_info.program if hasattr(user, 'academic_info') else 'Unknown',
-                    'question': f"Is '{normalized_position}' aligned to your {user.academic_info.program if hasattr(user, 'academic_info') else 'program'} program?"
+                    'question': f"Is '{display_position}' aligned to your {user.academic_info.program if hasattr(user, 'academic_info') else 'program'} program?"
                 }
             })
         
