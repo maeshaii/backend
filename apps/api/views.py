@@ -536,8 +536,22 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                 ).first()
             
             if user and user.user_id != commenter_user.user_id:
-                # Create notification for the mentioned user
-                notification_content = f"{commenter_user.full_name} mentioned you in a comment"
+                # Create notification for the mentioned user with context-aware message
+                # Determine the context based on what IDs are present
+                if reply_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in their reply"
+                elif comment_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in their comment"
+                elif repost_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in their repost"
+                elif forum_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in a forum post"
+                elif donation_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in a donation post"
+                elif post_id:
+                    notification_content = f"{commenter_user.full_name} mentioned you in their post"
+                else:
+                    notification_content = f"{commenter_user.full_name} mentioned you"
                 
                 # Add actor ID for profile picture
                 notification_content += f"<!--ACTOR_ID:{commenter_user.user_id}-->"
@@ -5190,7 +5204,7 @@ def repost_like_view(request, repost_id):
                     notification = Notification.objects.create(
                         user=repost.user,
                         notif_type='like',
-                        subject='Repost Liked',
+                        subject='New Like',
                         notifi_content=notif_content,
                         notif_date=timezone.now()
                     )
@@ -5337,7 +5351,7 @@ def repost_comments_view(request, repost_id):
                 notification = Notification.objects.create(
                     user=repost.user,
                     notif_type='comment',
-                    subject='Repost Commented',
+                    subject='New Comment',
                     notifi_content=notif_content,
                     notif_date=timezone.now()
                 )
@@ -5409,7 +5423,7 @@ def post_like_view(request, post_id):
                     like_notification = Notification.objects.create(
                         user=post.user,
                         notif_type='like',
-                        subject='Post Liked',
+                        subject='New Like',
                         notifi_content=f"{user.full_name} liked your post<!--POST_ID:{post.post_id}--><!--ACTOR_ID:{user.user_id}-->",
                         notif_date=timezone.now()
                     )
@@ -5592,7 +5606,7 @@ def post_comments_view(request, post_id):
                 comment_notification = Notification.objects.create(
                     user=post.user,
                     notif_type='comment',
-                    subject='Post Commented',
+                    subject='New Comment',
                     notifi_content=f"{user.full_name} commented on your post<!--POST_ID:{post.post_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{user.user_id}-->",
                     notif_date=timezone.now()
                 )
@@ -5719,7 +5733,7 @@ def comment_replies_view(request, comment_id):
                 notification = Notification.objects.create(
                     user=comment.user,
                     notif_type='reply',
-                    subject='Comment Replied',
+                    subject='New Reply',
                     notifi_content=notif_content,
                     notif_date=timezone.now()
                 )
@@ -5989,7 +6003,22 @@ def post_repost_view(request, post_id):
         return response
 
     try:
-        post = Post.objects.get(post_id=post_id)
+        # Get the post - if this post_id is actually a repost_id, we need to get the original post
+        # Check if there's a repost with this ID (edge case handling)
+        try:
+            repost_check = Repost.objects.select_related('post').get(repost_id=post_id)
+            # If post_id is actually a repost_id, use the original post from that repost
+            if repost_check.post:
+                post = repost_check.post
+            else:
+                # If it's a forum or donation repost, we can't repost it as a post
+                return JsonResponse({'error': 'Cannot repost forum or donation repost as a post'}, status=400)
+        except Repost.DoesNotExist:
+            # Normal case: post_id is actually a post_id
+            try:
+                post = Post.objects.get(post_id=post_id)
+            except Post.DoesNotExist:
+                return JsonResponse({'error': 'Post not found'}, status=404)
 
         # Get user from token
         auth_header = request.headers.get('Authorization')
@@ -6006,6 +6035,8 @@ def post_repost_view(request, post_id):
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
         # Create repost with optional caption
+        # NOTE: Users can repost the same post multiple times - no restrictions
+        # NOTE: If reposting a repost, the original post is always reposted (handled above)
         payload = {}
         try:
             payload = json.loads(request.body or "{}")
@@ -6019,6 +6050,15 @@ def post_repost_view(request, post_id):
             caption=caption,
         )
         
+        # Create mention notifications for users mentioned in the repost caption
+        if caption:
+            create_mention_notifications(
+                caption,
+                user,
+                post_id=post.post_id,
+                repost_id=repost.repost_id
+            )
+        
         # Award engagement points (+5 for share/repost)
         award_engagement_points(user, 'share')
 
@@ -6027,7 +6067,7 @@ def post_repost_view(request, post_id):
             repost_notification = Notification.objects.create(
                 user=post.user,
                 notif_type='repost',
-                subject='Post Reposted',
+                subject='Your Post Was Reposted',
                 notifi_content=(
                     f"{user.full_name} reposted your post"
                     f"<!--REPOST_ID:{repost.repost_id}-->"
@@ -6299,6 +6339,13 @@ def forum_list_create_view(request):
                 user=request.user,
                 content=content,
                 type='forum',
+            )
+            
+            # Create mention notifications for users mentioned in the forum post
+            create_mention_notifications(
+                content,
+                request.user,
+                forum_id=forum.forum_id
             )
             
             # Handle image uploads - base64 or FormData
@@ -6694,8 +6741,8 @@ def forum_like_view(request, forum_id):
                 notification = Notification.objects.create(
                     user=forum.user,
                     notif_type='like',
-                    subject='Forum Liked',
-                    notifi_content=f"{request.user.full_name} liked your forum post<!--FORUM_ID:{forum.forum_id}-->",
+                    subject='New Like',
+                    notifi_content=f"{request.user.full_name} liked your forum post<!--FORUM_ID:{forum.forum_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
                 
@@ -6779,7 +6826,7 @@ def forum_comments_view(request, forum_id):
                 forum_comment_notification = Notification.objects.create(
                     user=forum.user,
                     notif_type='comment',
-                    subject='Forum Commented',
+                    subject='New Comment',
                     notifi_content=f"{request.user.full_name} commented on your forum post<!--FORUM_ID:{forum.forum_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
@@ -6864,6 +6911,15 @@ def forum_repost_view(request, forum_id):
             caption=caption
         )
         
+        # Create mention notifications for users mentioned in the repost caption
+        if caption:
+            create_mention_notifications(
+                caption,
+                request.user,
+                forum_id=forum.forum_id,
+                repost_id=r.repost_id
+            )
+        
         # Award engagement points (+5 for share/repost)
         award_engagement_points(request.user, 'share')
         
@@ -6872,7 +6928,7 @@ def forum_repost_view(request, forum_id):
             forum_repost_notification = Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
-                subject='Forum Reposted',
+                subject='Your Forum Post Was Reposted',
                 notifi_content=f"{request.user.full_name} reposted your forum post<!--FORUM_ID:{forum.forum_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                 notif_date=timezone.now()
             )
@@ -6972,7 +7028,7 @@ def follow_user_view(request, user_id):
                         user=user_to_follow,
                         notif_type='follow',
                         subject='New Follower',
-                        notifi_content=f"{current_user.full_name}|{current_user.user_id} started following you.",
+                        notifi_content=f"{current_user.full_name} started following you<!--ACTOR_ID:{current_user.user_id}-->",
                         notif_date=timezone.now()
                     )
                     
@@ -7249,6 +7305,13 @@ def posts_view(request):
             )
             
             print(f"Post created successfully - ID: {new_post.post_id}, User: {new_post.user.user_id}")
+            
+            # Create mention notifications for users mentioned in the post
+            create_mention_notifications(
+                post_content,
+                request.user,
+                post_id=new_post.post_id
+            )
             
             # Notify OJT and alumni users if post author is admin or PESO
             notify_users_of_admin_peso_post(request.user, "post", new_post.post_id)
@@ -8206,6 +8269,13 @@ def donation_requests_view(request):
                 description=description.strip()
             )
             
+            # Create mention notifications for users mentioned in the donation post
+            create_mention_notifications(
+                description.strip(),
+                request.user,
+                donation_id=donation.donation_id
+            )
+            
             # Notify OJT and alumni users if post author is admin or PESO
             notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
             
@@ -8335,8 +8405,8 @@ def donation_like_view(request, donation_id):
                     notification = Notification.objects.create(
                         user=donation.user,
                         notif_type='like',
-                        subject='Donation Liked',
-                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
+                        subject='New Like',
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                         notif_date=timezone.now()
                     )
                     # Broadcast donation like notification in real-time
@@ -8430,7 +8500,7 @@ def donation_comments_view(request, donation_id):
                 notification = Notification.objects.create(
                     user=donation.user,
                     notif_type='comment',
-                    subject='Donation Commented',
+                    subject='New Comment',
                     notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                     notif_date=timezone.now()
                 )
@@ -8531,6 +8601,15 @@ def donation_repost_view(request, donation_id):
             repost_date=timezone.now()
         )
         
+        # Create mention notifications for users mentioned in the repost caption
+        if caption:
+            create_mention_notifications(
+                caption,
+                request.user,
+                donation_id=donation.donation_id,
+                repost_id=repost.repost_id
+            )
+        
         # Award engagement points (+5 for share/repost)
         award_engagement_points(request.user, 'share')
         
@@ -8539,7 +8618,7 @@ def donation_repost_view(request, donation_id):
             notification = Notification.objects.create(
                 user=donation.user,
                 notif_type='repost',
-                subject='Donation Reposted',
+                subject='Your Donation Request Was Reposted',
                 notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
                 notif_date=timezone.now()
             )
