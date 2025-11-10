@@ -1384,15 +1384,18 @@ class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     answers = models.JSONField()  # {question_id: answer} - for temporary storage during form submission
     submitted_at = models.DateTimeField(auto_now_add=True)
+    is_draft = models.BooleanField(default=False)  # True = draft (auto-saved), False = final submission
+    last_saved_at = models.DateTimeField(auto_now=True)  # Track when draft was last updated
     
     class Meta:
         # Ensure only one response per user
         unique_together = ['user']
     
     def save(self, *args, **kwargs):
-        # When saving, also update the User model fields
+        # Only update user fields if this is a final submission (not a draft)
         super().save(*args, **kwargs)
-        self.update_user_fields()
+        if not self.is_draft:
+            self.update_user_fields()
     
     def update_user_fields(self):
         """Update domain models from tracker JSON answers (no legacy User field writes)"""

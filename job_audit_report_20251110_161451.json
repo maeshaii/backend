@@ -1,0 +1,257 @@
+{
+  "bsit_removed": [
+    {
+      "job": "Aerospace Engineering and Operations Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Aircraft Mechanics and Service Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Audiovisual Equipment Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Automotive Body and Related Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Automotive Engineering Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Automotive Glass Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Bicycle Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Camera and Photographic Equipment Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Civil Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Coin, Vending, and Amusement Machine Servicers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Computer Hardware Engineers",
+      "reason": "Contains excluded keyword: 'hardware'"
+    },
+    {
+      "job": "Computer, Automated Teller, and Office Machine Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Control and Valve Installers and Repairers, Except Mechanical Door",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electric Motor, Power Tool, and Related Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electrical Power-Line Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electrical and Electronic Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Electrical and Electronics Installers and Repairers, Transportation Equipment",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electrical and Electronics Repairers, Commercial and Industrial Equipment",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electrical and Electronics Repairers, Powerhouse, Substation, and Relay",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Electronic Equipment Installers and Repairers, Motor Vehicles",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Elevator and Escalator Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Engineering Technologists and Technicians, Except Drafters, All Other",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Environmental Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "First-Line Supervisors of Mechanics, Installers, and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Heating, Air Conditioning, and Refrigeration Mechanics and Installers",
+      "reason": "Contains excluded keyword: 'mechanic'"
+    },
+    {
+      "job": "Home Appliance Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Industrial Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Locksmiths and Safe Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Manufactured Building and Mobile Home Installers",
+      "reason": "Contains excluded keyword: 'installer'"
+    },
+    {
+      "job": "Mechanical Door Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Mechanical Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Medical Appliance Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Medical Equipment Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Musical Instrument Repairers and Tuners",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Nanotechnology Engineering Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Precision Instrument and Equipment Repairers, All Other",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Radio, Cellular, and Tower Equipment Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Rail Car Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Refractory Materials Repairers, Except Brickmasons",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Security and Fire Alarm Systems Installers",
+      "reason": "Contains excluded keyword: 'installer'"
+    },
+    {
+      "job": "Shoe and Leather Workers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Signal and Track Switch Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Solar Photovoltaic Installers",
+      "reason": "Contains excluded keyword: 'installer'"
+    },
+    {
+      "job": "Sound Engineering Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Surveying and Mapping Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Telecommunications Equipment Installers and Repairers, Except Line Installers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Telecommunications Line Installers and Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Tire Repairers and Changers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Watch and Clock Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Biofuels Processing Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Bioinformatics Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    }
+  ],
+  "bsis_removed": [
+    {
+      "job": "Aerospace Engineering and Operations Technologists and Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Bicycle Repairers",
+      "reason": "Contains excluded keyword: 'repair'"
+    },
+    {
+      "job": "Biofuels Processing Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Bioinformatics Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Biological Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Biomass Plant Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Manufactured Building and Mobile Home Installers",
+      "reason": "Contains excluded keyword: 'installer'"
+    },
+    {
+      "job": "Semiconductor Processing Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    },
+    {
+      "job": "Wind Turbine Service Technicians",
+      "reason": "Contains excluded keyword: 'technician'"
+    }
+  ],
+  "bitct_removed": [],
+  "cross_program_jobs": [
+    {
+      "job": "Market Research Analysts and Marketing Specialists",
+      "programs": [
+        "BSIT",
+        "BSIS",
+        "BIT-CT"
+      ]
+    }
+  ]
+}
