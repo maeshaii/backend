@@ -257,12 +257,17 @@ class MessageListView(generics.ListCreateAPIView):
             
             channel_layer = get_channel_layer()
             
+            # Get sender avatar URL
+            from apps.api.views import build_profile_pic_url
+            sender_avatar_url = build_profile_pic_url(request.user)
+            
             # Create the message data structure
             message_data = {
                 'message_id': message.message_id,
                 'content': message.content,
                 'sender_id': request.user.user_id,
                 'sender_name': getattr(request.user, 'full_name', ''),
+                'sender_avatar': sender_avatar_url if sender_avatar_url else None,
                 'message_type': message.message_type,
                 'created_at': message.created_at.isoformat(),
                 'timestamp': timezone.now().isoformat(),

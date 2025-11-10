@@ -729,12 +729,12 @@ class EngagementPointsSettings(models.Model):
     
     # Points awarded per action
     like_points = models.IntegerField(default=1, help_text="Points for liking a post")
-    comment_points = models.IntegerField(default=3, help_text="Points for commenting on a post")
-    share_points = models.IntegerField(default=5, help_text="Points for sharing/reposting a post")
-    reply_points = models.IntegerField(default=2, help_text="Points for replying to a comment")
-    post_points = models.IntegerField(default=0, help_text="Points for posting without photos")
-    post_with_photo_points = models.IntegerField(default=15, help_text="Points for posting with photos")
-    tracker_form_points = models.IntegerField(default=0, help_text="Points for completing tracker form")
+    comment_points = models.IntegerField(default=2, help_text="Points for commenting on a post")
+    share_points = models.IntegerField(default=3, help_text="Points for sharing/reposting a post")
+    reply_points = models.IntegerField(default=3, help_text="Points for replying to a comment")
+    post_points = models.IntegerField(default=5, help_text="Points for posting without photos")
+    post_with_photo_points = models.IntegerField(default=10, help_text="Points for posting with photos")
+    tracker_form_points = models.IntegerField(default=10, help_text="Points for completing tracker form")
     
     # Rate limiting settings - Daily limits
     rate_limiting_enabled = models.BooleanField(default=True, help_text="Enable rate limiting to prevent spam")
@@ -1843,12 +1843,12 @@ class ReportSettings(models.Model):
     
     class Meta:
         db_table = 'shared_reportsettings'
-        verbose_name = 'Report Settings'
-        verbose_name_plural = 'Report Settings'
+        verbose_name = 'Header/Footer Settings'
+        verbose_name_plural = 'Header/Footer Settings'
         ordering = ['-updated_at']
     
     def __str__(self):
-        return f"Report Settings (Updated: {self.updated_at.strftime('%Y-%m-%d %H:%M:%S')})"
+        return f"Header/Footer Settings (Updated: {self.updated_at.strftime('%Y-%m-%d %H:%M:%S')})"
     
     @classmethod
     def get_active_settings(cls):

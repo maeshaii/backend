@@ -214,10 +214,20 @@ class AlumniStatsSerializer(serializers.Serializer):
 # Messaging Serializers
 class SmallUserSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='full_name', read_only=True)
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['user_id', 'name']
+        fields = ['user_id', 'name', 'avatar_url']
+    
+    def get_avatar_url(self, obj):
+        """Get profile picture URL with cache-busting timestamp"""
+        try:
+            from apps.api.views import build_profile_pic_url
+            url = build_profile_pic_url(obj)
+            return url if url else None
+        except Exception:
+            return None
 
 class MessageAttachmentSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
@@ -314,12 +324,15 @@ class ConversationSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             other_user = obj.get_other_participant(request.user)
             if other_user:
+                from apps.api.views import build_profile_pic_url
+                avatar_url = build_profile_pic_url(other_user)
                 return {
                     'user_id': other_user.user_id,
                     'name': other_user.full_name,
                     'f_name': other_user.f_name,
                     'l_name': other_user.l_name,
                     'acc_username': other_user.acc_username,
+                    'avatar_url': avatar_url if avatar_url else None,
                 }
         return None
 

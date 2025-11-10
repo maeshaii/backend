@@ -288,7 +288,7 @@ def get_job_autocomplete_suggestions(request):
 def get_report_settings_view(request):
     """
     Get current report header/footer settings for export generation.
-    Returns the most recently updated report settings.
+    Returns the most recently updated header/footer settings.
     """
     try:
         settings_obj = ReportSettings.get_active_settings()
@@ -342,7 +342,7 @@ def get_report_settings_view(request):
         return Response(response_data)
         
     except Exception as e:
-        logger.error(f"Error getting report settings: {str(e)}")
+        logger.error(f"Error getting header/footer settings: {str(e)}")
         return Response({
             'error': 'Internal server error'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -424,12 +424,12 @@ def update_report_settings_view(request):
         
         return Response({
             'success': True,
-            'message': 'Report settings updated successfully',
+            'message': 'Header/Footer Settings updated successfully',
             'settings_id': settings_obj.settings_id
         })
         
     except Exception as e:
-        logger.error(f"Error updating report settings: {str(e)}")
+        logger.error(f"Error updating header/footer settings: {str(e)}")
         return Response({
             'error': 'Internal server error',
             'detail': str(e)

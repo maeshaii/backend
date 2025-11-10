@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from apps.shared.models import User, TrackerResponse, Question
 from collections import Counter
 from django.db import models
+from django.db.models import Q, Count
 from statistics import mean
 # OPTIMIZED: Import all helper functions from shared utils (no duplication)
 from apps.shared.utils.stats import (
@@ -19,6 +20,32 @@ from .decorators import cache_statistics
 logger = logging.getLogger(__name__)
 
 # Create your views here.
+
+
+def count_self_employed_users(qs):
+    """Return number of alumni marked self-employed via employment record or tracker answer."""
+    return (
+        qs.filter(
+            Q(employment__self_employed=True) |
+            Q(tracker_data__q_employment_type__icontains='self')
+        )
+        .distinct()
+        .count()
+    )
+
+
+def count_award_recipients(qs):
+    """Return number of alumni who indicated receiving awards (tracker or employment details)."""
+    award_tracker_filter = Q(tracker_data__q_awards_received__icontains='yes')
+    award_employment_filter = (
+        Q(employment__awards_recognition_current__isnull=False)
+        & ~Q(employment__awards_recognition_current__exact='')
+    )
+    return (
+        qs.filter(award_tracker_filter | award_employment_filter)
+        .distinct()
+        .count()
+    )
 
 @cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
@@ -161,6 +188,8 @@ def generate_statistics_view(request):
                 absorbed = 0
                 untracked = total_alumni
             employment_rate = (employed / total_alumni_count * 100) if total_alumni_count > 0 else 0
+            awards_count = count_award_recipients(alumni_qs)
+            self_employed_count = count_self_employed_users(alumni_qs)
 
             # Calculate statistics with proper null handling
             most_common_company = safe_mode_related(alumni_qs, 'employment__company_name_current')
@@ -193,6 +222,8 @@ def generate_statistics_view(request):
                 'most_common_civil_status': most_common_civil_status,
                 'average_age': average_age,
                 'sample_email': sample_email,
+                'awards_count': awards_count,
+                'self_employed_count': self_employed_count,
                 'year': year,
                 'course': course
             })
@@ -204,7 +235,7 @@ def generate_statistics_view(request):
             
             # Job alignment statistics using new fields
             job_aligned = alumni_qs.filter(employment__job_alignment_status='aligned').count()
-            self_employed = alumni_qs.filter(employment__self_employed=True).count()
+            self_employed = count_self_employed_users(alumni_qs)
             not_aligned = alumni_qs.filter(employment__job_alignment_status='not_aligned').count()
             
             # REMOVED: Dead code querying empty Ched model (always returned 0)
@@ -217,6 +248,7 @@ def generate_statistics_view(request):
             most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
             average_age = safe_mean_related(alumni_qs, 'profile__age')
             sample_email = safe_sample_related(alumni_qs, 'profile__email')
+            awards_count = count_award_recipients(alumni_qs)
             
             return JsonResponse({
                 'success': True,
@@ -237,6 +269,7 @@ def generate_statistics_view(request):
                 'most_common_civil_status': most_common_civil_status,
                 'average_age': average_age,
                 'sample_email': sample_email,
+                'awards_count': awards_count,
                 'year': year,
                 'course': course
             })
@@ -273,6 +306,8 @@ def generate_statistics_view(request):
             most_common_civil_status = safe_mode_related(alumni_qs, 'profile__civil_status')
             average_age = safe_mean_related(alumni_qs, 'profile__age')
             sample_email = safe_sample_related(alumni_qs, 'profile__email')
+            awards_count = count_award_recipients(alumni_qs)
+            self_employed = count_self_employed_users(alumni_qs)
             
             return JsonResponse({
                 'success': True,
@@ -286,6 +321,7 @@ def generate_statistics_view(request):
                 'private_count': private_count,
                 'local_count': local_count,
                 'international_count': international_count,
+                'average_salary': safe_mean_related(alumni_qs, 'employment__salary_current'),
                 # Real data fields using related models with null safety
                 'most_common_company': most_common_company,
                 'most_common_position': most_common_position,
@@ -294,6 +330,8 @@ def generate_statistics_view(request):
                 'most_common_civil_status': most_common_civil_status,
                 'average_age': average_age,
                 'sample_email': sample_email,
+                'self_employed_count': self_employed,
+                'awards_count': awards_count,
                 'year': year,
                 'course': course
             })
@@ -301,9 +339,8 @@ def generate_statistics_view(request):
         elif stats_type == 'AACUP':
             # AACUP: Absorbed, employed, high position statistics - OPTIMIZED
             from apps.shared.models import TrackerData
-            from django.db.models import Q, Count
             
-            # OPTIMIZED: Use database aggregation
+            # OPTIMIZED: Use database aggregation for employment status only
             employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
                 employed=Count('id', filter=Q(q_employment_status__iexact='yes'))
             )
@@ -311,7 +348,8 @@ def generate_statistics_view(request):
             
             absorbed = alumni_qs.filter(employment__absorbed=True).count()
             high_position = alumni_qs.filter(employment__high_position=True).count()
-            self_employed = alumni_qs.filter(employment__self_employed=True).count()
+            self_employed = count_self_employed_users(alumni_qs)
+            awards_received = count_award_recipients(alumni_qs)
             
             employment_rate = (employed / total_alumni * 100) if total_alumni > 0 else 0
             absorption_rate = (absorbed / total_alumni * 100) if total_alumni > 0 else 0
@@ -339,6 +377,7 @@ def generate_statistics_view(request):
                 'absorbed_count': absorbed,
                 'high_position_count': high_position,
                 'self_employed_count': self_employed,
+                'awards_count': awards_received,
                 # Real data fields using related models with null safety
                 'most_common_company': most_common_company,
                 'most_common_position': most_common_position,
