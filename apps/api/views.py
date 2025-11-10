@@ -7580,6 +7580,9 @@ def posts_view(request):
                 # Get reposts count
                 reposts_count = Repost.objects.filter(post=post).count()
 
+                # Check if current user liked this post
+                is_liked = Like.objects.filter(post=post, user=user).exists()
+
                 # Get likes data
                 likes = Like.objects.filter(post=post).select_related('user')
                 likes_data = []
@@ -7655,6 +7658,7 @@ def posts_view(request):
                     'likes_count': likes_count,
                     'comments_count': comments_count,
                     'reposts_count': reposts_count,
+                    'is_liked': is_liked,
                     'likes': likes_data,
                     'comments': comments_data,
                     'user': {
@@ -7677,6 +7681,10 @@ def posts_view(request):
                         # Get repost likes count and data
                         repost_likes = Like.objects.filter(repost=repost).select_related('user')
                         repost_likes_count = repost_likes.count()
+                        
+                        # Check if current user liked this repost
+                        repost_is_liked = Like.objects.filter(repost=repost, user=user).exists()
+                        
                         repost_likes_data = []
                         for like in repost_likes:
                             repost_likes_data.append({
@@ -7719,6 +7727,7 @@ def posts_view(request):
                             'repost_caption': repost.caption,
                             'likes_count': repost_likes_count,
                             'comments_count': repost_comments_count,
+                            'is_liked': repost_is_liked,
                             'likes': repost_likes_data,
                             'comments': repost_comments_data,
                             'user': {
@@ -8215,6 +8224,9 @@ def donation_requests_view(request):
                 # Get reposts for this donation
                 reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
                 
+                # Check if current user liked this donation
+                is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
+                
                 donation_info = {
                     'donation_id': donation.donation_id,
                     'user': {
@@ -8235,6 +8247,7 @@ def donation_requests_view(request):
                     'likes_count': likes.count(),
                     'comments_count': comments.count(),
                     'reposts_count': reposts.count(),
+                    'is_liked': is_liked,
                     'likes': [
                         {
                             'like_id': like.like_id,
@@ -8275,6 +8288,7 @@ def donation_requests_view(request):
                             },
                             'likes_count': Like.objects.filter(repost=repost).count(),
                             'comments_count': Comment.objects.filter(repost=repost).count(),
+                            'is_liked': Like.objects.filter(repost=repost, user=request.user).exists(),
                             'likes': [
                                 {
                                     'like_id': like.like_id,
