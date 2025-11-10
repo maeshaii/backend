@@ -12,6 +12,12 @@ from cryptography.fernet import Fernet
 import base64, hashlib
 
 
+def _normalize_text(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return ' '.join(value.strip().split())
+
+
 class AccountType(models.Model):
     """Account type flags for user roles (admin, peso, user, coordinator, ojt).
 
@@ -656,6 +662,68 @@ class UserPoints(models.Model):
             self.points_from_tracker_form
         )
         self.save()
+    
+    def deduct_points(self, action_type: str, points: int = 0) -> None:
+        """Deduct points for a specific action type (e.g., when unliking)"""
+        if action_type == 'like':
+            # Ensure we don't go below 0
+            self.points_from_likes = max(0, self.points_from_likes - points)
+            self.like_count = max(0, self.like_count - 1)
+        elif action_type == 'comment':
+            self.points_from_comments = max(0, self.points_from_comments - points)
+            self.comment_count = max(0, self.comment_count - 1)
+        elif action_type == 'share':
+            self.points_from_shares = max(0, self.points_from_shares - points)
+            self.share_count = max(0, self.share_count - 1)
+        elif action_type == 'reply':
+            self.points_from_replies = max(0, self.points_from_replies - points)
+            self.reply_count = max(0, self.reply_count - 1)
+        elif action_type == 'post':
+            self.points_from_posts = max(0, self.points_from_posts - points)
+            self.post_count = max(0, self.post_count - 1)
+        elif action_type == 'post_with_photo':
+            self.points_from_posts_with_photos = max(0, self.points_from_posts_with_photos - points)
+            self.post_with_photo_count = max(0, self.post_with_photo_count - 1)
+        elif action_type == 'tracker_form':
+            self.points_from_tracker_form = max(0, self.points_from_tracker_form - points)
+            self.tracker_form_count = max(0, self.tracker_form_count - 1)
+        
+        # Update total points
+        self.total_points = (
+            self.points_from_likes +
+            self.points_from_comments +
+            self.points_from_shares +
+            self.points_from_replies +
+            self.points_from_posts +
+            self.points_from_posts_with_photos +
+            self.points_from_tracker_form
+        )
+        self.save()
+
+
+class UserActionLog(models.Model):
+    """Track user actions for rate limiting purposes.
+    
+    Records each point-earning action with timestamp to enforce daily/hourly limits.
+    """
+    log_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='action_logs')
+    action_type = models.CharField(max_length=50, help_text="Type of action: like, comment, share, reply, post, post_with_photo, tracker_form")
+    action_timestamp = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'shared_useractionlog'
+        verbose_name = 'User Action Log'
+        verbose_name_plural = 'User Action Logs'
+        indexes = [
+            models.Index(fields=['user', 'action_type', '-action_timestamp']),
+            models.Index(fields=['user', '-action_timestamp']),
+            models.Index(fields=['action_timestamp']),
+        ]
+        ordering = ['-action_timestamp']
+    
+    def __str__(self):
+        return f"{self.user.full_name} - {self.action_type} at {self.action_timestamp}"
 
 
 class EngagementPointsSettings(models.Model):
@@ -673,6 +741,25 @@ class EngagementPointsSettings(models.Model):
     post_points = models.IntegerField(default=5, help_text="Points for posting without photos")
     post_with_photo_points = models.IntegerField(default=10, help_text="Points for posting with photos")
     tracker_form_points = models.IntegerField(default=10, help_text="Points for completing tracker form")
+    
+    # Rate limiting settings - Daily limits
+    rate_limiting_enabled = models.BooleanField(default=True, help_text="Enable rate limiting to prevent spam")
+    daily_like_limit = models.IntegerField(default=100, help_text="Maximum likes per day")
+    daily_comment_limit = models.IntegerField(default=50, help_text="Maximum comments per day")
+    daily_share_limit = models.IntegerField(default=20, help_text="Maximum shares/reposts per day")
+    daily_reply_limit = models.IntegerField(default=50, help_text="Maximum replies per day")
+    daily_post_limit = models.IntegerField(default=10, help_text="Maximum posts per day")
+    daily_post_with_photo_limit = models.IntegerField(default=10, help_text="Maximum posts with photos per day")
+    daily_tracker_form_limit = models.IntegerField(default=1, help_text="Maximum tracker form submissions per day")
+    
+    # Rate limiting settings - Hourly limits
+    hourly_like_limit = models.IntegerField(default=20, help_text="Maximum likes per hour")
+    hourly_comment_limit = models.IntegerField(default=10, help_text="Maximum comments per hour")
+    hourly_share_limit = models.IntegerField(default=5, help_text="Maximum shares/reposts per hour")
+    hourly_reply_limit = models.IntegerField(default=10, help_text="Maximum replies per hour")
+    hourly_post_limit = models.IntegerField(default=2, help_text="Maximum posts per hour")
+    hourly_post_with_photo_limit = models.IntegerField(default=2, help_text="Maximum posts with photos per hour")
+    hourly_tracker_form_limit = models.IntegerField(default=1, help_text="Maximum tracker form submissions per hour")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -698,7 +785,22 @@ class EngagementPointsSettings(models.Model):
                 'reply_points': 2,
                 'post_points': 0,
                 'post_with_photo_points': 15,
-                'tracker_form_points': 0
+                'tracker_form_points': 0,
+                'rate_limiting_enabled': True,
+                'daily_like_limit': 100,
+                'daily_comment_limit': 50,
+                'daily_share_limit': 20,
+                'daily_reply_limit': 50,
+                'daily_post_limit': 10,
+                'daily_post_with_photo_limit': 10,
+                'daily_tracker_form_limit': 1,
+                'hourly_like_limit': 20,
+                'hourly_comment_limit': 10,
+                'hourly_share_limit': 5,
+                'hourly_reply_limit': 10,
+                'hourly_post_limit': 2,
+                'hourly_post_with_photo_limit': 2,
+                'hourly_tracker_form_limit': 1,
             }
         )
         return settings
@@ -825,6 +927,22 @@ class EmploymentHistory(models.Model):
             models.Index(fields=['self_employed', 'high_position']),
         ]
     
+    def _normalize_job_title(self, position: str) -> str:
+        """Normalize a job title for consistent matching/storage."""
+        if not position:
+            return ''
+        # Collapse whitespace then upper-case for canonical storage
+        collapsed = ' '.join(position.strip().split())
+        return collapsed.upper()
+
+    def _normalize_job_title(self, position: str) -> str:
+        normalized = _normalize_text(position)
+        return normalized.upper() if normalized else ''
+
+    def _normalize_company_name(self, company: Optional[str]) -> Optional[str]:
+        normalized = _normalize_text(company)
+        return normalized.upper() if normalized else None
+
     def _check_job_alignment_for_position(self, position, program):
         """Check job alignment for a specific position without saving to database
         Used during form completion for real-time alignment checking
@@ -835,7 +953,8 @@ class EmploymentHistory(models.Model):
             self.job_alignment_title = None
             return
         
-        position_lower = position.lower().strip()
+        normalized_position = self._normalize_job_title(position)
+        position_lower = normalized_position.lower()
         program_lower = (program or '').lower()
         
         # Check alignment against job tables
@@ -843,26 +962,26 @@ class EmploymentHistory(models.Model):
         
         # Check SimpleInfoTechJob (BSIT)
         if 'bsit' in program_lower or 'information technology' in program_lower:
-            if SimpleInfoTechJob.objects.filter(job_title__iexact=position).exists():
+            if SimpleInfoTechJob.objects.filter(job_title__iexact=normalized_position).exists():
                 self.job_alignment_status = 'aligned'
                 self.job_alignment_category = 'BSIT'
-                self.job_alignment_title = position
+                self.job_alignment_title = normalized_position
                 alignment_found = True
         
         # Check SimpleInfoSystemJob (BSIS)
         if not alignment_found and ('bsis' in program_lower or 'information system' in program_lower):
-            if SimpleInfoSystemJob.objects.filter(job_title__iexact=position).exists():
+            if SimpleInfoSystemJob.objects.filter(job_title__iexact=normalized_position).exists():
                 self.job_alignment_status = 'aligned'
                 self.job_alignment_category = 'BSIS'
-                self.job_alignment_title = position
+                self.job_alignment_title = normalized_position
                 alignment_found = True
         
         # Check SimpleCompTechJob (BIT-CT)
         if not alignment_found and ('bit-ct' in program_lower or 'computer technology' in program_lower):
-            if SimpleCompTechJob.objects.filter(job_title__iexact=position).exists():
+            if SimpleCompTechJob.objects.filter(job_title__iexact=normalized_position).exists():
                 self.job_alignment_status = 'aligned'
                 self.job_alignment_category = 'BIT-CT'
-                self.job_alignment_title = position
+                self.job_alignment_title = normalized_position
                 alignment_found = True
         
         # Check cross-program alignment
@@ -871,19 +990,27 @@ class EmploymentHistory(models.Model):
             if cross_program_match:
                 self.job_alignment_status = 'pending_user_confirmation'
                 self.job_alignment_category = cross_program_match['category']
-                self.job_alignment_title = cross_program_match['title']
-                self.job_alignment_suggested_program = cross_program_match['program']
+                self.job_alignment_title = self._normalize_job_title(cross_program_match['title'])
+                self.job_alignment_suggested_program = cross_program_match['suggested_program']
                 self.job_alignment_original_program = program
+                self.match_method = cross_program_match.get('match_method')
                 alignment_found = True
         
         # If no alignment found, mark as pending confirmation
         if not alignment_found:
             self.job_alignment_status = 'pending_user_confirmation'
             self.job_alignment_category = None
-            self.job_alignment_title = position
+            self.job_alignment_title = normalized_position
             self.job_alignment_original_program = program
         
         return self.job_alignment_status
+
+    def save(self, *args, **kwargs):
+        if self.position_current:
+            self.position_current = self._normalize_job_title(self.position_current)
+        if self.company_name_current:
+            self.company_name_current = self._normalize_company_name(self.company_name_current)
+        super().save(*args, **kwargs)
 
 
     def update_job_alignment(self):
@@ -896,7 +1023,9 @@ class EmploymentHistory(models.Model):
             self.job_alignment_title = None
             return
         
-        position_lower = self.position_current.lower().strip()
+        normalized_position = self._normalize_job_title(self.position_current)
+        self.position_current = normalized_position
+        position_lower = normalized_position.lower()
         course_lower = (self.user.academic_info.program or '').lower() if hasattr(self.user, 'academic_info') else ''
         
         # STEP 1: Self-employed status based on tracker answer Q23 (q_employment_type)
@@ -1175,29 +1304,29 @@ class EmploymentHistory(models.Model):
         try:
             # Determine which table to add to based on user's program
             user_program = self.job_alignment_original_program
-            job_title = cross_program_match['title']
+            job_title = self._normalize_job_title(cross_program_match['title'])
             
             # Add to appropriate table
             if 'bit-ct' in user_program or 'computer technology' in user_program:
                 # Check if already exists
                 if not SimpleCompTechJob.objects.filter(job_title__iexact=job_title).exists():
                     SimpleCompTechJob.objects.create(job_title=job_title)
-                    logger.info(f"Added '{job_title}' to BIT-CT job table")
+                    logger.info("Added '%s' to BIT-CT job table", job_title)
             
             elif 'bsit' in user_program or 'information technology' in user_program:
                 # Check if already exists
                 if not SimpleInfoTechJob.objects.filter(job_title__iexact=job_title).exists():
                     SimpleInfoTechJob.objects.create(job_title=job_title)
-                    logger.info(f"Added '{job_title}' to BSIT job table")
+                    logger.info("Added '%s' to BSIT job table", job_title)
             
             elif 'bsis' in user_program or 'information system' in user_program:
                 # Check if already exists
                 if not SimpleInfoSystemJob.objects.filter(job_title__iexact=job_title).exists():
                     SimpleInfoSystemJob.objects.create(job_title=job_title)
-                    logger.info(f"Added '{job_title}' to BSIS job table")
+                    logger.info("Added '%s' to BSIS job table", job_title)
             
         except Exception as e:
-            logger.error(f"Failed to add job to user program table: {e}")
+            logger.error("Failed to add job to user program table: %s", e)
             # Don't let this break the main flow
     
     def _add_new_job_to_program_table(self, job_title, user_program):
@@ -1211,24 +1340,27 @@ class EmploymentHistory(models.Model):
             # Add to appropriate table based on user's program
             if 'bit-ct' in user_program.lower() or 'computer technology' in user_program.lower():
                 # Check if already exists
-                if not SimpleCompTechJob.objects.filter(job_title__iexact=job_title).exists():
-                    SimpleCompTechJob.objects.create(job_title=job_title)
-                    logger.info(f"Added new job '{job_title}' to BIT-CT job table")
+                normalized = self._normalize_job_title(job_title)
+                if not SimpleCompTechJob.objects.filter(job_title__iexact=normalized).exists():
+                    SimpleCompTechJob.objects.create(job_title=normalized)
+                    logger.info("Added new job '%s' to BIT-CT job table", normalized)
             
             elif 'bsit' in user_program.lower() or 'information technology' in user_program.lower():
                 # Check if already exists
-                if not SimpleInfoTechJob.objects.filter(job_title__iexact=job_title).exists():
-                    SimpleInfoTechJob.objects.create(job_title=job_title)
-                    logger.info(f"Added new job '{job_title}' to BSIT job table")
+                normalized = self._normalize_job_title(job_title)
+                if not SimpleInfoTechJob.objects.filter(job_title__iexact=normalized).exists():
+                    SimpleInfoTechJob.objects.create(job_title=normalized)
+                    logger.info("Added new job '%s' to BSIT job table", normalized)
             
             elif 'bsis' in user_program.lower() or 'information system' in user_program.lower():
                 # Check if already exists
-                if not SimpleInfoSystemJob.objects.filter(job_title__iexact=job_title).exists():
-                    SimpleInfoSystemJob.objects.create(job_title=job_title)
-                    logger.info(f"Added new job '{job_title}' to BSIS job table")
+                normalized = self._normalize_job_title(job_title)
+                if not SimpleInfoSystemJob.objects.filter(job_title__iexact=normalized).exists():
+                    SimpleInfoSystemJob.objects.create(job_title=normalized)
+                    logger.info("Added new job '%s' to BSIS job table", normalized)
             
         except Exception as e:
-            logger.error(f"Failed to add new job to program table: {e}")
+            logger.error("Failed to add new job to program table: %s", e)
             # Don't let this break the main flow
     
     def __str__(self):
@@ -1321,6 +1453,15 @@ class OJTCompanyProfile(models.Model):
     def __str__(self):
         return f"OJT Company Profile for {self.user.full_name} - {self.company_name}"
 
+    def save(self, *args, **kwargs):
+        if self.company_name:
+            normalized = _normalize_text(self.company_name)
+            self.company_name = normalized.upper() if normalized else None
+        if self.position:
+            normalized_pos = _normalize_text(self.position)
+            self.position = normalized_pos.upper() if normalized_pos else None
+        super().save(*args, **kwargs)
+
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=255)
@@ -1339,15 +1480,18 @@ class TrackerResponse(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     answers = models.JSONField()  # {question_id: answer} - for temporary storage during form submission
     submitted_at = models.DateTimeField(auto_now_add=True)
+    is_draft = models.BooleanField(default=False)  # True = draft (auto-saved), False = final submission
+    last_saved_at = models.DateTimeField(auto_now=True)  # Track when draft was last updated
     
     class Meta:
         # Ensure only one response per user
         unique_together = ['user']
     
     def save(self, *args, **kwargs):
-        # When saving, also update the User model fields
+        # Only update user fields if this is a final submission (not a draft)
         super().save(*args, **kwargs)
-        self.update_user_fields()
+        if not self.is_draft:
+            self.update_user_fields()
     
     def update_user_fields(self):
         """Update domain models from tracker JSON answers (no legacy User field writes)"""
@@ -1499,11 +1643,12 @@ class TrackerResponse(models.Model):
         user.save()
         profile.save()
         academic.save()
-        # Update job alignment and related derived employment fields
-        employment.update_job_alignment()
-        employment.save()
+        # CRITICAL: Save tracker FIRST so employment.update_job_alignment() can read it
         tracker.tracker_submitted_at = self.submitted_at
         tracker.save()
+        # Now update job alignment - it will read the saved tracker data
+        employment.update_job_alignment()
+        employment.save()
         
         # PHASE 3: Invalidate statistics cache after tracker submission
         self._invalidate_statistics_cache()

@@ -5,6 +5,7 @@ Uses shared models and serializers for data representation. If this file continu
 
 import logging
 import uuid
+import os
 logger = logging.getLogger(__name__)
 
 from django.conf import settings
@@ -51,8 +52,157 @@ from rest_framework.decorators import api_view
 import tempfile
 from django.http import FileResponse
 from django.db import transaction
+from typing import Optional
 
 # --- Helper Functions ---
+
+def check_rate_limit(user, action_type):
+    """
+    Check if user has exceeded rate limits for a specific action type.
+    
+    Returns:
+        tuple: (is_allowed: bool, error_message: str, reset_time: datetime or None)
+    """
+    from apps.shared.models import EngagementPointsSettings, UserActionLog
+    from django.utils import timezone
+    from datetime import timedelta
+    
+    try:
+        settings = EngagementPointsSettings.get_settings()
+        
+        # If rate limiting is disabled, allow all actions
+        if not settings.rate_limiting_enabled:
+            return True, None, None
+        
+        # Get current time
+        now = timezone.now()
+        
+        # Calculate time windows
+        one_hour_ago = now - timedelta(hours=1)
+        one_day_ago = now - timedelta(days=1)
+        
+        # Get limit field names based on action type
+        daily_limit_field = f'daily_{action_type}_limit'
+        hourly_limit_field = f'hourly_{action_type}_limit'
+        
+        # Get limits from settings
+        daily_limit = getattr(settings, daily_limit_field, None)
+        hourly_limit = getattr(settings, hourly_limit_field, None)
+        
+        # If no limits configured for this action type, allow it
+        if daily_limit is None and hourly_limit is None:
+            return True, None, None
+        
+        # Count actions in the last hour
+        hourly_count = UserActionLog.objects.filter(
+            user=user,
+            action_type=action_type,
+            action_timestamp__gte=one_hour_ago
+        ).count()
+        
+        # Count actions in the last 24 hours
+        daily_count = UserActionLog.objects.filter(
+            user=user,
+            action_type=action_type,
+            action_timestamp__gte=one_day_ago
+        ).count()
+        
+        # Check hourly limit
+        if hourly_limit is not None and hourly_count >= hourly_limit:
+            # Calculate when the oldest action in the last hour will expire
+            oldest_action = UserActionLog.objects.filter(
+                user=user,
+                action_type=action_type,
+                action_timestamp__gte=one_hour_ago
+            ).order_by('action_timestamp').first()
+            
+            if oldest_action:
+                reset_time = oldest_action.action_timestamp + timedelta(hours=1)
+                time_until_reset = reset_time - now
+                minutes = int(time_until_reset.total_seconds() / 60)
+                return False, f"You've reached your hourly limit of {hourly_limit} {action_type}s. Try again in {minutes} minute(s).", reset_time
+            else:
+                return False, f"You've reached your hourly limit of {hourly_limit} {action_type}s. Try again in 1 hour.", now + timedelta(hours=1)
+        
+        # Check daily limit
+        if daily_limit is not None and daily_count >= daily_limit:
+            # Calculate when the oldest action in the last 24 hours will expire
+            oldest_action = UserActionLog.objects.filter(
+                user=user,
+                action_type=action_type,
+                action_timestamp__gte=one_day_ago
+            ).order_by('action_timestamp').first()
+            
+            if oldest_action:
+                reset_time = oldest_action.action_timestamp + timedelta(days=1)
+                time_until_reset = reset_time - now
+                hours = int(time_until_reset.total_seconds() / 3600)
+                return False, f"You've reached your daily limit of {daily_limit} {action_type}s. Try again in {hours} hour(s).", reset_time
+            else:
+                return False, f"You've reached your daily limit of {daily_limit} {action_type}s. Try again tomorrow.", now + timedelta(days=1)
+        
+        # All checks passed
+        return True, None, None
+        
+    except Exception as e:
+        # If there's an error checking limits, log it but allow the action
+        # (fail open to avoid blocking legitimate users due to system errors)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error checking rate limit for user {user.user_id}, action {action_type}: {e}")
+        return True, None, None
+
+
+def ensure_initial_password_active(user, raw_password: Optional[str] = None, allow_create: bool = False) -> bool:
+    """Guarantee the user has an active UserInitialPassword entry.
+
+    Parameters
+    ----------
+    user: User instance
+    raw_password: optional plaintext password to store (only use if you are certain it is current)
+    allow_create: when True and the record does not exist, create it (requires raw_password)
+
+    Returns
+    -------
+    bool
+        True if an active record exists or was successfully created/updated.
+    """
+
+    try:
+        initial = getattr(user, 'initial_password', None)
+        updated_fields = []
+
+        if initial:
+            if raw_password:
+                initial.set_plaintext(raw_password)
+                updated_fields.append('password_encrypted')
+            if not initial.is_active:
+                initial.is_active = True
+                updated_fields.append('is_active')
+            if updated_fields:
+                initial.save(update_fields=updated_fields)
+            return True
+
+        if allow_create and raw_password:
+            initial = UserInitialPassword.objects.create(user=user)
+            initial.set_plaintext(raw_password)
+            initial.is_active = True
+            initial.save(update_fields=['password_encrypted', 'is_active'])
+            return True
+
+        if not initial and not allow_create:
+            logger.warning(
+                "User %s lacks initial password record; cannot enforce first login without plaintext",
+                getattr(user, 'acc_username', user.user_id),
+            )
+        return False
+    except Exception as exc:
+        logger.error(
+            "Failed to ensure initial password for user %s: %s",
+            getattr(user, 'acc_username', user.user_id),
+            exc,
+        )
+        raise
 
 def award_engagement_points(user, action_type):
     """
@@ -61,30 +211,43 @@ def award_engagement_points(user, action_type):
     Points are configurable via EngagementPointsSettings model.
     Awards points to Alumni and OJT users.
     OJT users cannot receive tracker_form points since they can't answer the tracker.
+    
+    Now includes rate limiting to prevent spam.
     """
     try:
         # Get points settings
-        from apps.shared.models import EngagementPointsSettings
+        from apps.shared.models import EngagementPointsSettings, UserActionLog
+        from django.utils import timezone
         settings = EngagementPointsSettings.get_settings()
         
         # Check if points system is enabled
         if not settings.enabled:
-            return
+            return {'success': True, 'message': 'Points system is disabled'}
         
         # Only award points to Alumni or OJT users
         if not hasattr(user, 'account_type'):
-            return
+            return {'success': False, 'message': 'User account type not found'}
         
         account_type = user.account_type
         is_alumni = getattr(account_type, 'user', False)
         is_ojt = getattr(account_type, 'ojt', False)
         
         if not (is_alumni or is_ojt):
-            return
+            return {'success': False, 'message': 'User is not eligible for points'}
         
         # OJT users cannot receive tracker_form points
         if is_ojt and action_type == 'tracker_form':
-            return
+            return {'success': False, 'message': 'OJT users cannot receive tracker form points'}
+        
+        # Check rate limits before awarding points
+        is_allowed, error_message, reset_time = check_rate_limit(user, action_type)
+        if not is_allowed:
+            return {
+                'success': False,
+                'message': error_message,
+                'rate_limited': True,
+                'reset_time': reset_time.isoformat() if reset_time else None
+            }
         
         # Get or create user points
         user_points, created = UserPoints.objects.get_or_create(user=user)
@@ -103,6 +266,17 @@ def award_engagement_points(user, action_type):
         points = points_map.get(action_type, 0)
         if points > 0:
             user_points.add_points(action_type, points)
+            
+            # Log the action for rate limiting
+            UserActionLog.objects.create(
+                user=user,
+                action_type=action_type,
+                action_timestamp=timezone.now()
+            )
+            
+            # Log the points award
+            import logging
+            logger = logging.getLogger(__name__)
             logger.info(f"Awarded {points} points to {user.full_name} for {action_type}")
             
             # Broadcast points update via WebSocket for real-time updates
@@ -158,11 +332,154 @@ def award_engagement_points(user, action_type):
                     'rank': rank,
                     'points_breakdown': points_breakdown
                 })
-            except Exception as e:
-                logger.error(f"Error broadcasting points update for user {user.user_id}: {e}")
-    
+            except Exception as broadcast_error:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error broadcasting points update for user {user.user_id}: {broadcast_error}")
+            
+            return {
+                'success': True,
+                'message': f'Points awarded: {points}',
+                'points_awarded': points,
+                'total_points': user_points.total_points
+            }
+        else:
+            return {'success': True, 'message': 'No points awarded for this action type'}
+            
     except Exception as e:
-        logger.error(f"Error awarding points to user {user.user_id}: {e}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error awarding engagement points: {e}")
+        return {'success': False, 'message': f'Error awarding points: {str(e)}'}
+
+
+def deduct_engagement_points(user, action_type):
+    """
+    Deduct engagement points from a user when they undo an action (e.g., unlike).
+    
+    Points are configurable via EngagementPointsSettings model.
+    Deducts points from Alumni and OJT users.
+    """
+    try:
+        # Get points settings
+        from apps.shared.models import EngagementPointsSettings
+        from django.utils import timezone
+        settings = EngagementPointsSettings.get_settings()
+        
+        # Check if points system is enabled
+        if not settings.enabled:
+            return {'success': True, 'message': 'Points system is disabled'}
+        
+        # Only deduct points from Alumni or OJT users
+        if not hasattr(user, 'account_type'):
+            return {'success': False, 'message': 'User account type not found'}
+        
+        account_type = user.account_type
+        is_alumni = getattr(account_type, 'user', False)
+        is_ojt = getattr(account_type, 'ojt', False)
+        
+        if not (is_alumni or is_ojt):
+            return {'success': False, 'message': 'User is not eligible for points'}
+        
+        # Get or create user points
+        user_points, created = UserPoints.objects.get_or_create(user=user)
+        
+        # If user points were just created, they have no points to deduct
+        if created:
+            return {'success': True, 'message': 'No points to deduct'}
+        
+        # Deduct points based on action type using settings from database
+        points_map = {
+            'like': settings.like_points,
+            'comment': settings.comment_points,
+            'share': settings.share_points,
+            'reply': settings.reply_points,
+            'post': settings.post_points,
+            'post_with_photo': settings.post_with_photo_points,
+            'tracker_form': settings.tracker_form_points
+        }
+        
+        points = points_map.get(action_type, 0)
+        if points > 0:
+            user_points.deduct_points(action_type, points)
+            
+            # Log the points deduction
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Deducted {points} points from {user.full_name} for {action_type}")
+            
+            # Broadcast points update via WebSocket for real-time updates
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_points_update
+                from django.db.models import Q
+                
+                # Get updated points data directly from database
+                user_points.refresh_from_db()
+                
+                # Calculate rank
+                higher_points_count = UserPoints.objects.filter(
+                    Q(user__account_type__user=True) | Q(user__account_type__ojt=True),
+                    total_points__gt=user_points.total_points
+                ).count()
+                rank = higher_points_count + 1
+                
+                # Build points breakdown
+                points_breakdown = {
+                    'likes': {
+                        'points': user_points.points_from_likes,
+                        'count': user_points.like_count
+                    },
+                    'comments': {
+                        'points': user_points.points_from_comments,
+                        'count': user_points.comment_count
+                    },
+                    'shares': {
+                        'points': user_points.points_from_shares,
+                        'count': user_points.share_count
+                    },
+                    'replies': {
+                        'points': user_points.points_from_replies,
+                        'count': user_points.reply_count
+                    },
+                    'posts': {
+                        'points': user_points.points_from_posts,
+                        'count': user_points.post_count
+                    },
+                    'posts_with_photos': {
+                        'points': user_points.points_from_posts_with_photos,
+                        'count': user_points.post_with_photo_count
+                    },
+                    'tracker_form': {
+                        'points': user_points.points_from_tracker_form,
+                        'count': user_points.tracker_form_count
+                    }
+                }
+                
+                broadcast_points_update(user.user_id, {
+                    'user_id': user.user_id,
+                    'total_points': user_points.total_points,
+                    'rank': rank,
+                    'points_breakdown': points_breakdown
+                })
+            except Exception as broadcast_error:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error broadcasting points update for user {user.user_id}: {broadcast_error}")
+            
+            return {
+                'success': True,
+                'message': f'Points deducted: {points}',
+                'points_deducted': points,
+                'total_points': user_points.total_points
+            }
+        else:
+            return {'success': True, 'message': 'No points to deduct for this action type'}
+            
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error deducting engagement points: {e}")
+        return {'success': False, 'message': f'Error deducting points: {str(e)}'}
 
 
 def get_content_images_safe(content_id, content_type):
@@ -261,7 +578,7 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
             # Skip if user not found or other error
             continue
 
-def build_profile_pic_url(user):
+def build_profile_pic_url(user, request=None):
     try:
         # Use refactored profile model
         profile = getattr(user, 'profile', None)
@@ -280,7 +597,23 @@ def build_profile_pic_url(user):
             try:
                 if not str(url).startswith('http'):
                     from django.conf import settings
-                    base_url = getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    
+                    # Try to get base URL from multiple sources (priority order):
+                    # 1. Request object (most accurate for mobile)
+                    # 2. Environment variable
+                    # 3. Settings file
+                    # 4. Fallback to localhost
+                    base_url = None
+                    
+                    if request:
+                        # Build URL from request (works for mobile accessing via network IP)
+                        scheme = 'https' if request.is_secure() else 'http'
+                        host = request.get_host()
+                        base_url = f"{scheme}://{host}"
+                    
+                    if not base_url:
+                        base_url = os.environ.get('BASE_URL') or getattr(settings, 'BASE_URL', 'http://127.0.0.1:8000')
+                    
                     # Avoid double slashes when concatenating
                     if base_url.endswith('/') and str(url).startswith('/'):
                         return f"{base_url[:-1]}{url}"
@@ -742,14 +1075,7 @@ def import_alumni_view(request):
                 
                 # Store initial password (encrypted) for export/sharing
                 # Set is_active=True so users get forced to change password on first login
-                try:
-                    up, _ = UserInitialPassword.objects.get_or_create(user=user)
-                    up.set_plaintext(password_raw)
-                    up.is_active = True  # Force password change for security
-                    up.save()
-                except Exception as e:
-                    print(f"DEBUG: Error saving initial password for {ctu_id}: {e}")
-                    pass
+                ensure_initial_password_active(user, raw_password=password_raw, allow_create=True)
                 
                 # CRITICAL: Count user creation immediately after successful user creation
                 # This ensures accurate count even if related model creation fails
@@ -1028,7 +1354,17 @@ def alumni_statistics_view(request):
         employment_stats = TrackerData.objects.filter(user__in=alumni_qs).aggregate(
             employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
             unemployed=Count('id', filter=Q(q_employment_status__iexact='no')),
-            pending_tracker=Count('id', filter=Q(q_employment_status__isnull=True) | Q(q_employment_status=''))
+            pending_tracker=Count(
+                'id',
+                filter=(
+                    Q(q_employment_status__isnull=True)
+                    | Q(q_employment_status='')
+                    | Q(q_employment_status__iexact='pending')
+                    | Q(q_employment_status__iexact='untracked')
+                    | Q(q_employment_status__iexact='n/a')
+                    | Q(q_employment_status__iexact='na')
+                ),
+            ),
         )
         employed = employment_stats['employed']
         unemployed = employment_stats['unemployed']
@@ -1164,6 +1500,172 @@ def send_reminder_view(request):
         except Exception as e:
             continue
     return JsonResponse({'success': True, 'sent': sent, 'total': len(users)})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_email_reminder_view(request):
+    """
+    Send tracker form reminders via email to selected users.
+    
+    Expected payload:
+    {
+        "user_ids": [1, 2, 3],
+        "message": "HTML formatted message with [User's Name] placeholder",
+        "subject": "Email subject",
+        "tracker_link_base": "https://domain.com"
+    }
+    """
+    try:
+        data = json.loads(request.body)
+        user_ids = data.get('user_ids', [])
+        message = data.get('message', '')
+        subject = data.get('subject', 'CTU Alumni Tracker Form Reminder')
+        tracker_link_base = data.get('tracker_link_base', '')
+        
+        # Validation
+        if not user_ids:
+            return JsonResponse({
+                'success': False, 
+                'message': 'No users selected'
+            }, status=400)
+        
+        if not message:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Message content is required'
+            }, status=400)
+            
+        if not tracker_link_base:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Tracker link base URL is required'
+            }, status=400)
+        
+        # Check if email is configured
+        if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
+            return JsonResponse({
+                'success': False,
+                'message': 'Email is not configured on the server. Please contact the administrator.'
+            }, status=500)
+        
+        # Fetch users with their profiles
+        users = User.objects.filter(
+            user_id__in=user_ids
+        ).select_related('profile')
+        
+        sent_count = 0
+        failed_count = 0
+        no_email_count = 0
+        errors = []
+        
+        for user in users:
+            try:
+                # Check if user has a profile with email
+                if not hasattr(user, 'profile') or not user.profile:
+                    no_email_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': 'No profile found'
+                    })
+                    continue
+                
+                user_email = user.profile.email
+                if not user_email or user_email.strip() == '':
+                    no_email_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': 'No email address'
+                    })
+                    continue
+                
+                # Personalize the message
+                full_name = f"{user.f_name} {user.l_name}"
+                personalized_message = message.replace('[User\'s Name]', full_name)
+                
+                # Generate tracker link
+                tracker_link = f"{tracker_link_base}/alumni/tracker?user_id={user.user_id}"
+                
+                # Replace the tracker form link placeholder with actual clickable link
+                personalized_message = personalized_message.replace(
+                    '👉 Fill Out the Tracker Form',
+                    f'<a href="{tracker_link}" style="color:#1e4c7a;font-weight:600;text-decoration:underline;">👉 Fill Out the Tracker Form</a>'
+                )
+                
+                # Create HTML email with proper formatting
+                html_message = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                </head>
+                <body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
+                    <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                        <div style="background-color:#1e4c7a;color:#ffffff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
+                            <h1 style="margin:0;font-size:24px;">CTU Alumni Tracker Form</h1>
+                        </div>
+                        <div style="padding:30px;color:#333333;line-height:1.6;">
+                            {personalized_message.replace(chr(10), '<br>')}
+                        </div>
+                        <div style="background-color:#f8f9fa;padding:20px;border-radius:0 0 8px 8px;text-align:center;font-size:12px;color:#666;">
+                            <p style="margin:0;">This is an automated message from CTU CCICT Alumni Management System</p>
+                            <p style="margin:5px 0 0 0;">Please do not reply to this email</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                # Send email using Django's send_mail
+                from django.core.mail import EmailMultiAlternatives
+                
+                email = EmailMultiAlternatives(
+                    subject=subject,
+                    body=personalized_message,  # Plain text fallback
+                    from_email=settings.EMAIL_HOST_USER,
+                    to=[user_email],
+                )
+                email.attach_alternative(html_message, "text/html")
+                email.send(fail_silently=False)
+                
+                sent_count += 1
+                logger.info(f"Email sent successfully to {full_name} ({user_email})")
+                
+            except Exception as e:
+                failed_count += 1
+                error_msg = str(e)
+                logger.error(f"Failed to send email to {user.f_name} {user.l_name}: {error_msg}")
+                errors.append({
+                    'user': f"{user.f_name} {user.l_name}",
+                    'reason': error_msg
+                })
+        
+        # Prepare response
+        response_data = {
+            'success': sent_count > 0,
+            'sent': sent_count,
+            'failed': failed_count,
+            'no_email': no_email_count,
+            'total': len(user_ids)
+        }
+        
+        if errors:
+            response_data['errors'] = errors
+        
+        return JsonResponse(response_data)
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON payload'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error in send_email_reminder_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def notifications_view(request):
@@ -1977,14 +2479,13 @@ def import_ojt_view(request):
                         from apps.shared.models import UserInitialPassword
                         has_initial_password = UserInitialPassword.objects.filter(user=existing_user).exists()
                         
-                        # TWO-STEP IMPORT: Password generation rules
-                        # User ALREADY EXISTS - NEVER regenerate password or add to export
-                        # Only update their information
-                        if has_initial_password:
-                            print(f"Row {index+2} - UPDATE MODE: User exists, password NOT changed (keeping existing password)")
-                        else:
-                            # Edge case: User exists but has no initial password record (shouldn't happen normally)
-                            print(f"Row {index+2} - WARNING: User exists without initial password record, not regenerating password")
+                        # Ensure a first-login record exists and is active for coordinator-managed accounts
+                        ensure_initial_password_active(
+                            existing_user,
+                            raw_password=password_raw if password_raw else None,
+                            allow_create=bool(password_raw),
+                        )
+                        print(f"Row {index+2} - Initial password record ensured/activated for {ctu_id}")
 
                         # Update names to match latest import where present (only if provided in Excel)
                         updated = False
@@ -2182,13 +2683,7 @@ def import_ojt_view(request):
                 ojt_user.save()
                 # Store initial password (encrypted)
                 # Set is_active=True so users get forced to change password on first login
-                try:
-                    up, _ = UserInitialPassword.objects.get_or_create(user=ojt_user)
-                    up.set_plaintext(password_raw)
-                    up.is_active = True  # Force password change for security
-                    up.save()
-                except Exception:
-                    pass
+                ensure_initial_password_active(ojt_user, raw_password=password_raw, allow_create=True)
                 from apps.shared.models import UserProfile, AcademicInfo, EmploymentHistory, OJTInfo
                 birthdate_val = row.get('Birthdate')
                 # Extract phone number from Contact_No column (your Excel uses Contact_No, not Phone_Number)
@@ -3591,6 +4086,9 @@ def approve_ojt_to_alumni_view(request):
                     # Do NOT update password - keep the existing OJT password
                     user.save()
 
+                    # Reactivate first-login flag so alumni must change the coordinator-issued password
+                    ensure_initial_password_active(user)
+
                     # Clear sent to admin flag since user is now approved
                     if hasattr(user, 'ojt_info') and user.ojt_info:
                         user.ojt_info.is_sent_to_admin = False
@@ -3718,6 +4216,7 @@ def approve_individual_ojt_to_alumni_view(request):
             user.save()
 
             # Do NOT create/update UserInitialPassword - keep existing password
+            ensure_initial_password_active(user)
 
             # Ensure academic info year_graduated is set
             if hasattr(user, 'academic_info') and user.academic_info:
@@ -4663,6 +5162,9 @@ def repost_like_view(request, repost_id):
             print(f"🔍 DEBUG: Like created={created}, like_id={like.like_id if like else None}")
             
             if created:
+                # Award engagement points for liking
+                award_engagement_points(user, 'like')
+                
                 # Create notification for repost owner (only if the liker is not the repost owner)
                 if user.user_id != repost.user.user_id:
                     # Determine repost type
@@ -4716,6 +5218,8 @@ def repost_like_view(request, repost_id):
         try:
             like = Like.objects.get(user=user, repost=repost)
             like.delete()
+            # Deduct engagement points for unliking
+            deduct_engagement_points(user, 'like')
             return JsonResponse({'success': True, 'message': 'Repost unliked'})
         except Like.DoesNotExist:
             return JsonResponse({'success': False, 'message': 'Repost not liked'})
@@ -4873,6 +5377,8 @@ def repost_comment_edit_view(request, repost_id, comment_id):
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
     else:
+        # Deduct engagement points for deleting comment
+        deduct_engagement_points(comment.user, 'comment')
         comment.delete()
         return JsonResponse({'success': True})
 
@@ -4922,6 +5428,8 @@ def post_like_view(request, post_id):
             try:
                 like = Like.objects.get(user=user, post=post)
                 like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(user, 'like')
                 return JsonResponse({'success': True, 'message': 'Post unliked'})
             except Like.DoesNotExist:
                 return JsonResponse({'success': False, 'message': 'Post not liked'})
@@ -4956,12 +5464,21 @@ def post_edit_view(request, post_id):
 
         elif request.method == "DELETE":
             try:
+                # Check if post has images before deletion to determine point type
+                has_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id).exists()
+                
                 # Delete related images using ContentImage
                 content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
                 for img in content_images:
                     if getattr(img, 'image', None):
                         img.image.delete(save=False)
                 content_images.delete()
+
+                # Deduct engagement points before deleting the post
+                if has_images:
+                    deduct_engagement_points(user, 'post_with_photo')
+                else:
+                    deduct_engagement_points(user, 'post')
 
                 # Finally delete the post itself
                 post.delete()
@@ -5007,6 +5524,8 @@ def comment_edit_view(request, post_id, comment_id):
             else:
                 return JsonResponse({'error': 'No content provided'}, status=400)
         elif request.method == "DELETE":
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
     except Post.DoesNotExist:
@@ -5270,6 +5789,10 @@ def reply_edit_view(request, comment_id, reply_id):
             })
             
         elif request.method == "DELETE":
+            # Get the reply user before deletion
+            reply_user = reply.user
+            # Deduct engagement points for deleting reply
+            deduct_engagement_points(reply_user, 'reply')
             reply.delete()
             return JsonResponse({
                 'success': True,
@@ -5402,6 +5925,13 @@ def post_delete_view(request, post_id):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
 
         try:
+            # Check if post has images before deletion to determine point type
+            has_images = False
+            try:
+                has_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id).exists()
+            except Exception as e:
+                logger.warning(f"Could not check ContentImage for post deletion points: {e}")
+            
             # Best-effort cleanup of associated uploaded files before deletion
             if getattr(post, 'post_image', None):
                 try:
@@ -5418,6 +5948,19 @@ def post_delete_view(request, post_id):
                     except Exception:
                         pass
                 images_rel.all().delete()
+
+            # Delete related images using ContentImage
+            content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+            for img in content_images:
+                if getattr(img, 'image', None):
+                    img.image.delete(save=False)
+            content_images.delete()
+
+            # Deduct engagement points before deleting the post
+            if has_images:
+                deduct_engagement_points(user, 'post_with_photo')
+            else:
+                deduct_engagement_points(user, 'post')
 
             # Finally delete the post itself
             post.delete()
@@ -5540,6 +6083,8 @@ def repost_delete_view(request, repost_id):
         elif request.method == 'DELETE':
             # Delete repost
             print(f"🗑️ DEBUG: User {request.user.user_id} deleting repost {repost_id}")
+            # Deduct engagement points for deleting repost (share)
+            deduct_engagement_points(request.user, 'share')
             repost.delete()
             return JsonResponse({'success': True, 'message': 'Repost deleted successfully'})
             
@@ -6141,6 +6686,10 @@ def forum_like_view(request, forum_id):
                     'donation_request': None
                 }
             )
+            if created:
+                # Award engagement points for liking
+                award_engagement_points(request.user, 'like')
+                
             if created and request.user.user_id != forum.user.user_id:
                 notification = Notification.objects.create(
                     user=forum.user,
@@ -6161,6 +6710,8 @@ def forum_like_view(request, forum_id):
             try:
                 like = Like.objects.get(forum=forum, user=request.user)
                 like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(request.user, 'like')
             except Like.DoesNotExist:
                 pass
             return JsonResponse({'success': True})
@@ -6271,6 +6822,8 @@ def forum_comment_edit_view(request, forum_id, comment_id):
             return JsonResponse({'success': True})
         else:
             # Both comment owner and post owner can delete
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
             comment.delete()
             return JsonResponse({'success': True})
     except Comment.DoesNotExist:
@@ -6342,6 +6895,8 @@ def forum_repost_delete_view(request, repost_id):
         r = Repost.objects.get(repost_id=repost_id)
         if r.user.user_id != request.user.user_id:
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Deduct engagement points for deleting repost (share)
+        deduct_engagement_points(request.user, 'share')
         r.delete()
         return JsonResponse({'success': True})
     except Repost.DoesNotExist:
@@ -7758,6 +8313,9 @@ def donation_like_view(request, donation_id):
             )
             
             if created:
+                # Award engagement points for liking
+                award_engagement_points(request.user, 'like')
+                
                 # Create notification for donation owner
                 if request.user.user_id != donation.user.user_id:
                     notification = Notification.objects.create(
@@ -7782,6 +8340,8 @@ def donation_like_view(request, donation_id):
             try:
                 like = Like.objects.get(donation_request=donation, user=request.user)
                 like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(request.user, 'like')
                 return JsonResponse({'success': True, 'message': 'Donation unliked'})
             except Like.DoesNotExist:
                 return JsonResponse({'success': False, 'message': 'Not liked'})
@@ -7923,6 +8483,8 @@ def donation_comment_edit_view(request, donation_id, comment_id):
             return JsonResponse({'success': True})
         else:
             # Both comment owner and donation owner can delete
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
             comment.delete()
             return JsonResponse({'success': True})
     except DonationRequest.DoesNotExist:
@@ -8589,7 +9151,23 @@ def engagement_points_settings_view(request):
                     'reply_points': settings.reply_points,
                     'post_points': settings.post_points,
                     'post_with_photo_points': settings.post_with_photo_points,
-                    'tracker_form_points': settings.tracker_form_points
+                    'tracker_form_points': settings.tracker_form_points,
+                    # Rate limiting settings
+                    'rate_limiting_enabled': settings.rate_limiting_enabled,
+                    'daily_like_limit': settings.daily_like_limit,
+                    'daily_comment_limit': settings.daily_comment_limit,
+                    'daily_share_limit': settings.daily_share_limit,
+                    'daily_reply_limit': settings.daily_reply_limit,
+                    'daily_post_limit': settings.daily_post_limit,
+                    'daily_post_with_photo_limit': settings.daily_post_with_photo_limit,
+                    'daily_tracker_form_limit': settings.daily_tracker_form_limit,
+                    'hourly_like_limit': settings.hourly_like_limit,
+                    'hourly_comment_limit': settings.hourly_comment_limit,
+                    'hourly_share_limit': settings.hourly_share_limit,
+                    'hourly_reply_limit': settings.hourly_reply_limit,
+                    'hourly_post_limit': settings.hourly_post_limit,
+                    'hourly_post_with_photo_limit': settings.hourly_post_with_photo_limit,
+                    'hourly_tracker_form_limit': settings.hourly_tracker_form_limit,
                 }
             })
         
@@ -8629,6 +9207,40 @@ def engagement_points_settings_view(request):
             
             if 'tracker_form' in data:
                 settings.tracker_form_points = int(data['tracker_form'])
+            
+            # Update rate limiting settings
+            if 'rate_limiting_enabled' in data:
+                settings.rate_limiting_enabled = bool(data['rate_limiting_enabled'])
+            
+            if 'daily_like_limit' in data:
+                settings.daily_like_limit = int(data['daily_like_limit'])
+            if 'daily_comment_limit' in data:
+                settings.daily_comment_limit = int(data['daily_comment_limit'])
+            if 'daily_share_limit' in data:
+                settings.daily_share_limit = int(data['daily_share_limit'])
+            if 'daily_reply_limit' in data:
+                settings.daily_reply_limit = int(data['daily_reply_limit'])
+            if 'daily_post_limit' in data:
+                settings.daily_post_limit = int(data['daily_post_limit'])
+            if 'daily_post_with_photo_limit' in data:
+                settings.daily_post_with_photo_limit = int(data['daily_post_with_photo_limit'])
+            if 'daily_tracker_form_limit' in data:
+                settings.daily_tracker_form_limit = int(data['daily_tracker_form_limit'])
+            
+            if 'hourly_like_limit' in data:
+                settings.hourly_like_limit = int(data['hourly_like_limit'])
+            if 'hourly_comment_limit' in data:
+                settings.hourly_comment_limit = int(data['hourly_comment_limit'])
+            if 'hourly_share_limit' in data:
+                settings.hourly_share_limit = int(data['hourly_share_limit'])
+            if 'hourly_reply_limit' in data:
+                settings.hourly_reply_limit = int(data['hourly_reply_limit'])
+            if 'hourly_post_limit' in data:
+                settings.hourly_post_limit = int(data['hourly_post_limit'])
+            if 'hourly_post_with_photo_limit' in data:
+                settings.hourly_post_with_photo_limit = int(data['hourly_post_with_photo_limit'])
+            if 'hourly_tracker_form_limit' in data:
+                settings.hourly_tracker_form_limit = int(data['hourly_tracker_form_limit'])
             
             settings.save()
             

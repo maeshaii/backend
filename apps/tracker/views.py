@@ -271,13 +271,137 @@ def check_user_tracker_status_view(request):
     
     try:
         user = User.objects.get(user_id=user_id)
-        existing_response = TrackerResponse.objects.filter(user=user).first()
+        # Only check for FINAL submissions, not drafts
+        existing_response = TrackerResponse.objects.filter(user=user, is_draft=False).first()
         
         return JsonResponse({
             'success': True, 
             'has_submitted': existing_response is not None,
             'submitted_at': existing_response.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if existing_response else None
         })
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def save_tracker_draft_view(request):
+    """Auto-save tracker responses as draft (doesn't trigger notifications or data processing)"""
+    import json
+    from django.utils import timezone
+    from apps.shared.models import TrackerResponse, User
+    
+    try:
+        user_id = request.data.get('user_id')
+        answers_json = request.data.get('answers')
+        
+        if not user_id:
+            return JsonResponse({'success': False, 'message': 'Missing user_id'}, status=400)
+        
+        # Empty answers are okay for drafts
+        if answers_json is None:
+            answers = {}
+        elif isinstance(answers_json, str):
+            answers = json.loads(answers_json)
+        else:
+            answers = answers_json
+        
+        # SANITIZE: Remove empty objects, null, undefined, and other invalid values
+        # that React can't render as text in input fields
+        sanitized_answers = {}
+        for key, value in answers.items():
+            # Skip empty objects, empty dicts, null, None
+            if value is None:
+                continue
+            if isinstance(value, dict) and len(value) == 0:
+                continue
+            # Skip empty strings only if explicitly empty (keep spaces, keep "0")
+            if isinstance(value, str) and value.strip() == '':
+                continue
+            # Keep valid values (strings, numbers, booleans, non-empty dicts/lists)
+            sanitized_answers[key] = value
+        
+        user = User.objects.get(user_id=user_id)
+        
+        # Check if user already has a final submission
+        final_submission = TrackerResponse.objects.filter(user=user, is_draft=False).exists()
+        if final_submission:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Cannot save draft - form already submitted'
+            }, status=400)
+        
+        # Create or update draft
+        tr, created = TrackerResponse.objects.update_or_create(
+            user=user,
+            defaults={
+                'answers': sanitized_answers,
+                'is_draft': True
+            }
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Draft saved',
+            'last_saved_at': tr.last_saved_at.isoformat(),
+            'is_new': created
+        })
+        
+    except User.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
+    except json.JSONDecodeError:
+        return JsonResponse({'success': False, 'message': 'Invalid JSON in answers'}, status=400)
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def load_tracker_draft_view(request):
+    """Load saved draft for a user"""
+    from apps.shared.models import TrackerResponse, User
+    
+    try:
+        user_id = request.GET.get('user_id')
+        if not user_id:
+            return JsonResponse({'success': False, 'message': 'Missing user_id'}, status=400)
+        
+        user = User.objects.get(user_id=user_id)
+        
+        # Try to find a draft
+        draft = TrackerResponse.objects.filter(user=user, is_draft=True).first()
+        
+        if draft:
+            # SANITIZE: Remove empty objects and invalid values from loaded data
+            # This protects against corrupted data that's already in the database
+            sanitized_answers = {}
+            for key, value in draft.answers.items():
+                # Skip empty objects, empty dicts, null, None
+                if value is None:
+                    continue
+                if isinstance(value, dict) and len(value) == 0:
+                    continue
+                # Skip empty strings
+                if isinstance(value, str) and value.strip() == '':
+                    continue
+                # Keep valid values
+                sanitized_answers[key] = value
+            
+            return JsonResponse({
+                'success': True,
+                'has_draft': True,
+                'answers': sanitized_answers,
+                'last_saved_at': draft.last_saved_at.isoformat()
+            })
+        else:
+            return JsonResponse({
+                'success': True,
+                'has_draft': False,
+                'answers': {}
+            })
+        
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     except Exception as e:
@@ -302,14 +426,26 @@ def submit_tracker_response_view(request):
         answers = json.loads(answers_json)
         user = User.objects.get(pk=user_id)
         
-        # Check if user has already submitted a response
-        existing_response = TrackerResponse.objects.filter(user=user).first()
+        # Check if user has already submitted a FINAL response (not draft)
+        existing_response = TrackerResponse.objects.filter(user=user, is_draft=False).first()
         if existing_response:
             return JsonResponse({'success': False, 'message': 'You have already submitted the tracker form'}, status=400)
         
-        # Create the tracker response
-        tr = TrackerResponse(user=user, answers=answers, submitted_at=timezone.now())
-        tr.save()  # This will trigger update_user_fields()
+        # Create or update the tracker response (convert draft to final submission)
+        tr, created = TrackerResponse.objects.get_or_create(user=user, defaults={
+            'answers': answers,
+            'submitted_at': timezone.now(),
+            'is_draft': False
+        })
+        
+        if not created:
+            # Update existing draft to final submission
+            tr.answers = answers
+            tr.is_draft = False
+            tr.submitted_at = timezone.now()
+            tr.save()  # This will trigger update_user_fields() because is_draft=False
+        else:
+            tr.save()  # Triggers update_user_fields() for new submission
         
         # Handle file uploads
         uploaded_files = []
