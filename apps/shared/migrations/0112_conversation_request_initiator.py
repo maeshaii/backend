@@ -2,7 +2,53 @@
 
 import django.db.models.deletion
 from django.conf import settings
-from django.db import migrations, models
+from django.db import migrations, models, connection
+
+
+def check_and_add_field(apps, schema_editor):
+    """Check if request_initiator_id column exists before adding it"""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='shared_conversation' 
+            AND column_name='request_initiator_id'
+        """)
+        exists = cursor.fetchone()
+        
+        if not exists:
+            # Column doesn't exist, add it
+            cursor.execute("""
+                ALTER TABLE shared_conversation 
+                ADD COLUMN request_initiator_id INTEGER NULL 
+                REFERENCES shared_user(user_id) ON DELETE SET NULL
+            """)
+            # Add index for better performance
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS shared_conversation_request_initiator_id_idx 
+                ON shared_conversation(request_initiator_id)
+            """)
+
+
+def reverse_migration(apps, schema_editor):
+    """Remove the field if it exists"""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='shared_conversation' 
+            AND column_name='request_initiator_id'
+        """)
+        exists = cursor.fetchone()
+        
+        if exists:
+            cursor.execute("""
+                DROP INDEX IF EXISTS shared_conversation_request_initiator_id_idx
+            """)
+            cursor.execute("""
+                ALTER TABLE shared_conversation 
+                DROP COLUMN IF EXISTS request_initiator_id
+            """)
 
 
 class Migration(migrations.Migration):
@@ -12,9 +58,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='conversation',
-            name='request_initiator',
-            field=models.ForeignKey(blank=True, help_text='User who initiated the message request', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='initiated_message_requests', to=settings.AUTH_USER_MODEL),
-        ),
+        migrations.RunPython(check_and_add_field, reverse_migration),
     ]

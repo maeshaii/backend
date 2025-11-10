@@ -656,6 +656,68 @@ class UserPoints(models.Model):
             self.points_from_tracker_form
         )
         self.save()
+    
+    def deduct_points(self, action_type: str, points: int = 0) -> None:
+        """Deduct points for a specific action type (e.g., when unliking)"""
+        if action_type == 'like':
+            # Ensure we don't go below 0
+            self.points_from_likes = max(0, self.points_from_likes - points)
+            self.like_count = max(0, self.like_count - 1)
+        elif action_type == 'comment':
+            self.points_from_comments = max(0, self.points_from_comments - points)
+            self.comment_count = max(0, self.comment_count - 1)
+        elif action_type == 'share':
+            self.points_from_shares = max(0, self.points_from_shares - points)
+            self.share_count = max(0, self.share_count - 1)
+        elif action_type == 'reply':
+            self.points_from_replies = max(0, self.points_from_replies - points)
+            self.reply_count = max(0, self.reply_count - 1)
+        elif action_type == 'post':
+            self.points_from_posts = max(0, self.points_from_posts - points)
+            self.post_count = max(0, self.post_count - 1)
+        elif action_type == 'post_with_photo':
+            self.points_from_posts_with_photos = max(0, self.points_from_posts_with_photos - points)
+            self.post_with_photo_count = max(0, self.post_with_photo_count - 1)
+        elif action_type == 'tracker_form':
+            self.points_from_tracker_form = max(0, self.points_from_tracker_form - points)
+            self.tracker_form_count = max(0, self.tracker_form_count - 1)
+        
+        # Update total points
+        self.total_points = (
+            self.points_from_likes +
+            self.points_from_comments +
+            self.points_from_shares +
+            self.points_from_replies +
+            self.points_from_posts +
+            self.points_from_posts_with_photos +
+            self.points_from_tracker_form
+        )
+        self.save()
+
+
+class UserActionLog(models.Model):
+    """Track user actions for rate limiting purposes.
+    
+    Records each point-earning action with timestamp to enforce daily/hourly limits.
+    """
+    log_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='action_logs')
+    action_type = models.CharField(max_length=50, help_text="Type of action: like, comment, share, reply, post, post_with_photo, tracker_form")
+    action_timestamp = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'shared_useractionlog'
+        verbose_name = 'User Action Log'
+        verbose_name_plural = 'User Action Logs'
+        indexes = [
+            models.Index(fields=['user', 'action_type', '-action_timestamp']),
+            models.Index(fields=['user', '-action_timestamp']),
+            models.Index(fields=['action_timestamp']),
+        ]
+        ordering = ['-action_timestamp']
+    
+    def __str__(self):
+        return f"{self.user.full_name} - {self.action_type} at {self.action_timestamp}"
 
 
 class EngagementPointsSettings(models.Model):
@@ -673,6 +735,25 @@ class EngagementPointsSettings(models.Model):
     post_points = models.IntegerField(default=0, help_text="Points for posting without photos")
     post_with_photo_points = models.IntegerField(default=15, help_text="Points for posting with photos")
     tracker_form_points = models.IntegerField(default=0, help_text="Points for completing tracker form")
+    
+    # Rate limiting settings - Daily limits
+    rate_limiting_enabled = models.BooleanField(default=True, help_text="Enable rate limiting to prevent spam")
+    daily_like_limit = models.IntegerField(default=100, help_text="Maximum likes per day")
+    daily_comment_limit = models.IntegerField(default=50, help_text="Maximum comments per day")
+    daily_share_limit = models.IntegerField(default=20, help_text="Maximum shares/reposts per day")
+    daily_reply_limit = models.IntegerField(default=50, help_text="Maximum replies per day")
+    daily_post_limit = models.IntegerField(default=10, help_text="Maximum posts per day")
+    daily_post_with_photo_limit = models.IntegerField(default=10, help_text="Maximum posts with photos per day")
+    daily_tracker_form_limit = models.IntegerField(default=1, help_text="Maximum tracker form submissions per day")
+    
+    # Rate limiting settings - Hourly limits
+    hourly_like_limit = models.IntegerField(default=20, help_text="Maximum likes per hour")
+    hourly_comment_limit = models.IntegerField(default=10, help_text="Maximum comments per hour")
+    hourly_share_limit = models.IntegerField(default=5, help_text="Maximum shares/reposts per hour")
+    hourly_reply_limit = models.IntegerField(default=10, help_text="Maximum replies per hour")
+    hourly_post_limit = models.IntegerField(default=2, help_text="Maximum posts per hour")
+    hourly_post_with_photo_limit = models.IntegerField(default=2, help_text="Maximum posts with photos per hour")
+    hourly_tracker_form_limit = models.IntegerField(default=1, help_text="Maximum tracker form submissions per hour")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -698,7 +779,22 @@ class EngagementPointsSettings(models.Model):
                 'reply_points': 2,
                 'post_points': 0,
                 'post_with_photo_points': 15,
-                'tracker_form_points': 0
+                'tracker_form_points': 0,
+                'rate_limiting_enabled': True,
+                'daily_like_limit': 100,
+                'daily_comment_limit': 50,
+                'daily_share_limit': 20,
+                'daily_reply_limit': 50,
+                'daily_post_limit': 10,
+                'daily_post_with_photo_limit': 10,
+                'daily_tracker_form_limit': 1,
+                'hourly_like_limit': 20,
+                'hourly_comment_limit': 10,
+                'hourly_share_limit': 5,
+                'hourly_reply_limit': 10,
+                'hourly_post_limit': 2,
+                'hourly_post_with_photo_limit': 2,
+                'hourly_tracker_form_limit': 1,
             }
         )
         return settings
