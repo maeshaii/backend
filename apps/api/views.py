@@ -5976,28 +5976,63 @@ def recent_searches_view(request):
         user = request.user
         
         if request.method == "GET":
-            # Mobile-optimized: Fixed limit of 10 for better performance
-            recent_searches = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')[:10]
+            # Support optional ?limit= query param (default to 10, max 50 for safety)
+            try:
+                limit_param = request.GET.get('limit')
+                limit = int(limit_param) if limit_param is not None else 10
+            except (TypeError, ValueError):
+                limit = 10
+            if limit <= 0:
+                limit = 10
+            limit = min(limit, 50)
+
+            recent_query = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')
+            if limit:
+                recent_query = recent_query[:limit]
             
             searches_data = []
-            for search in recent_searches:
+            flat_recent = []
+            for search in recent_query:
                 searched_user = search.searched_user
-                searches_data.append({
+                user_payload = {
+                    'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                    'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                    'm_name': getattr(searched_user, 'm_name', ''),
+                    'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user),
+                }
+                entry = {
                     'id': search.id,
-                    'searched_user': {
-                        'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
-                        'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
-                        'm_name': getattr(searched_user, 'm_name', ''),
-                        'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
-                        'profile_pic': build_profile_pic_url(searched_user),
-                    },
+                    'searched_user': user_payload,
                     'created_at': search.created_at.isoformat()
+                }
+                searches_data.append(entry)
+                flat_recent.append({
+                    'id': search.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': entry['created_at'],
                 })
             
             logger.info("recent_searches_view GET returning %s rows", len(searches_data))
+            legacy_payload = [
+                {
+                    'id': entry['id'],
+                    'user_id': entry['user_id'],
+                    'f_name': entry['f_name'],
+                    'l_name': entry['l_name'],
+                    'profile_pic': entry['profile_pic'],
+                    'created_at': entry['created_at']
+                }
+                for entry in flat_recent
+            ]
+
             return JsonResponse({
                 'success': True,
                 'recent_searches': searches_data,
+                'recent': legacy_payload,  # Backwards compatibility for mobile clients
                 'count': len(searches_data)
             })
             
@@ -8876,25 +8911,58 @@ def recent_searches_view(request):
     DELETE: clear all
     """
     try:
-        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
-        if request.method == 'GET':
-            limit = int(request.GET.get('limit', '10'))
-            qs = (RecentSearch.objects
-                  .filter(owner=request.user)
-                  .select_related('searched_user')
-                  .order_by('-created_at')[:max(1, min(limit, 50))])
-            logger.info("recent_searches_view GET returning %s rows", qs.count())
-            results = []
+        from apps.messaging.notification_broadcaster import broadcast_recent_search_update
+
+        def serialize_recent_searches(owner, limit_value=10):
+            try:
+                limit_value = int(limit_value)
+            except (TypeError, ValueError):
+                limit_value = 10
+            limit_value = max(1, min(limit_value, 50))
+
+            qs = (
+                RecentSearch.objects
+                .filter(owner=owner)
+                .select_related('searched_user')
+                .order_by('-created_at')[:limit_value]
+            )
+
+            detailed_results = []
+            legacy_results = []
             for rs in qs:
-                u = rs.searched_user
-                results.append({
-                    'user_id': getattr(u, 'id', getattr(u, 'user_id', None)),
-                    'f_name': getattr(u, 'f_name', '') or getattr(u, 'first_name', ''),
-                    'l_name': getattr(u, 'l_name', '') or getattr(u, 'last_name', ''),
-                    'profile_pic': getattr(u, 'profile_pic', None),
+                searched_user = rs.searched_user
+                user_payload = {
+                    'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                    'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                    'm_name': getattr(searched_user, 'm_name', ''),
+                    'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user),
+                }
+                detailed_results.append({
+                    'id': rs.id,
+                    'searched_user': user_payload,
                     'created_at': rs.created_at.isoformat(),
                 })
-            return JsonResponse({ 'recent': results })
+                legacy_results.append({
+                    'id': rs.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': rs.created_at.isoformat(),
+                })
+            return detailed_results, legacy_results
+
+        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
+        if request.method == 'GET':
+            detailed_results, legacy_results = serialize_recent_searches(request.user, request.GET.get('limit', '10'))
+            logger.info("recent_searches_view GET returning %s rows", len(detailed_results))
+            return JsonResponse({
+                'success': True,
+                'recent_searches': detailed_results,
+                'recent': legacy_results,
+                'count': len(detailed_results),
+            })
 
         if request.method == 'POST':
             try:
@@ -8924,10 +8992,24 @@ def recent_searches_view(request):
                 logger.info("recent_searches_view DB: name=%s host=%s port=%s owner_recent_count=%s", db_name, db_host, db_port, owner_count)
             except Exception as diag_e:
                 logger.warning("recent_searches_view diagnostics failed: %s", diag_e)
+
+            detailed_results, legacy_results = serialize_recent_searches(request.user)
+            broadcast_recent_search_update(
+                getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None),
+                detailed_results,
+                legacy_results
+            )
+
             return JsonResponse({ 'success': True })
 
         if request.method == 'DELETE':
             RecentSearch.objects.filter(owner=request.user).delete()
+            detailed_results, legacy_results = serialize_recent_searches(request.user)
+            broadcast_recent_search_update(
+                getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None),
+                detailed_results,
+                legacy_results
+            )
             return JsonResponse({ 'success': True })
 
         return JsonResponse({ 'success': False, 'message': 'Method not allowed' }, status=405)

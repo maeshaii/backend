@@ -120,6 +120,40 @@ class NotificationBroadcaster:
         except Exception as e:
             logger.error(f"Error broadcasting points update to user {user_id}: {e}")
     
+    def broadcast_recent_searches(self, user_id, recent_searches, legacy_recent):
+        """
+        Broadcast recent search updates to a user.
+        
+        Args:
+            user_id: User ID to broadcast to
+            recent_searches: List containing detailed recent search entries
+            legacy_recent: Flattened list for backward compatibility
+        """
+        try:
+            if not self.channel_layer:
+                logger.warning("Channel layer not available for recent search broadcasting")
+                return
+            
+            payload = {
+                'type': 'recent_search_update',
+                'recent_searches': recent_searches,
+                'recent': legacy_recent
+            }
+            
+            async_to_sync(self.channel_layer.group_send)(
+                f"notifications_{user_id}",
+                payload
+            )
+            
+            async_to_sync(self.channel_layer.group_send)(
+                f"recent_searches_{user_id}",
+                payload
+            )
+            
+            logger.info("Broadcasted recent search update to user %s (entries=%s)", user_id, len(recent_searches))
+        except Exception as e:
+            logger.error("Error broadcasting recent search update to user %s: %s", user_id, e)
+    
     def broadcast_multiple_notifications(self, notifications):
         """
         Broadcast multiple notifications to their respective users.
@@ -168,3 +202,15 @@ def broadcast_points_update(user_id, points_data):
         points_data: Points data dictionary
     """
     notification_broadcaster.broadcast_points_update(user_id, points_data)
+
+
+def broadcast_recent_search_update(user_id, recent_searches, legacy_recent):
+    """
+    Convenience function to broadcast recent search updates.
+    
+    Args:
+        user_id: User ID
+        recent_searches: Detailed recent search payload
+        legacy_recent: Flattened payload
+    """
+    notification_broadcaster.broadcast_recent_searches(user_id, recent_searches, legacy_recent)
