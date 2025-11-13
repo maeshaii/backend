@@ -1,12 +1,16 @@
 from django.apps import AppConfig
+<<<<<<< HEAD
 import logging
 
 logger = logging.getLogger(__name__)
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 
 class SharedConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'apps.shared'
+<<<<<<< HEAD
     scheduler = None  # Store scheduler instance to prevent garbage collection
     
     def ready(self):
@@ -30,3 +34,5 @@ class SharedConfig(AppConfig):
             logger.info("✅ Scheduler initialized successfully in ready()")
         except Exception as e:
             logger.error(f"❌ Failed to start scheduler: {e}", exc_info=True)
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

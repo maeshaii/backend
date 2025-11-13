@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 asgiref==3.8.1
 Django==5.2.3
 django-cors-headers==4.6.0
@@ -22,3 +23,15 @@ boto3==1.34.0
 django-storages==1.14.2
 sentry-sdk[django]==1.38.0
 apscheduler==3.11.0
+=======
+asgiref
+Django
+django-cors-headers
+djangorestframework
+djangorestframework-simplejwt
+PyJWT
+pytz
+sqlparse
+psycopg2-binary
+python-dotenv
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

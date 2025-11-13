@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """
 Tracker API endpoints for managing tracker questions, responses, and form settings.
 If this module grows further, consider splitting into submodules (e.g., questions, responses, forms).
@@ -90,6 +91,78 @@ def tracker_responses_view(request):
             # Attach file uploads metadata
             for file_upload in resp.files.all():
                 question_id_str = str(file_upload.question_id)
+=======
+from django.shortcuts import render
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+import json
+from apps.shared.models import QuestionCategory, TrackerResponse, Question, TrackerForm
+
+# Create your views here.
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def tracker_questions_view(request):
+    categories = []
+    for cat in QuestionCategory.objects.prefetch_related('questions').all():
+        categories.append({
+            "id": cat.id,
+            "title": cat.title,
+            "description": cat.description,
+            "questions": [
+                {
+                    "id": q.id,
+                    "text": q.text,
+                    "type": q.type,
+                    "options": q.options or []
+                }
+                for q in cat.questions.all()
+            ]
+        })
+    return JsonResponse({"success": True, "categories": categories})
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def tracker_responses_view(request):
+    from apps.shared.models import User
+    responses = []
+    
+    # Get batch year from query parameter
+    batch_year = request.GET.get('batch_year')
+    
+    # Define the basic user fields to merge
+    basic_fields = {
+        'First Name': 'f_name',
+        'Middle Name': 'm_name',
+        'Last Name': 'l_name',
+        'Gender': 'gender',
+        'Birthdate': 'birthdate',
+        'Phone Number': 'phone_num',
+        'Address': 'address',
+        'Social Media': 'social_media',
+        'Civil Status': 'civil_status',
+        'Age': 'age',
+        'Email': 'email',
+        'Program Name': 'program',
+        'Status': 'user_status',
+    }
+    
+    # Filter responses by batch year if provided
+    tracker_responses = TrackerResponse.objects.select_related('user').prefetch_related('files').all()
+    if batch_year:
+        tracker_responses = tracker_responses.filter(user__year_graduated=batch_year)
+    
+    for resp in tracker_responses:
+        user = resp.user
+        merged_answers = resp.answers.copy() if resp.answers else {}
+        
+        # Add file information to answers
+        for file_upload in resp.files.all():
+            question_id_str = str(file_upload.question_id)
+            if question_id_str in merged_answers:
+                # If this question has a file upload, add file info
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
                 merged_answers[question_id_str] = {
                     'type': 'file',
                     'filename': file_upload.original_filename,
@@ -97,6 +170,7 @@ def tracker_responses_view(request):
                     'file_size': file_upload.file_size,
                     'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S')
                 }
+<<<<<<< HEAD
             # Fill missing basic fields from related models
             for label, path in basic_fields.items():
                 if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
@@ -116,6 +190,24 @@ def tracker_responses_view(request):
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
+=======
+        
+        # Fill in missing basic fields from User model
+        for label, field in basic_fields.items():
+            if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
+                value = getattr(user, field, None)
+                if value is not None and value != '':
+                    merged_answers[label] = str(value)
+        responses.append({
+            'user_id': user.user_id,
+            'name': f'{user.f_name} {user.l_name}',
+            'answers': merged_answers
+        })
+    return JsonResponse({'success': True, 'responses': responses})
+
+@csrf_exempt
+@require_http_methods(["GET"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def tracker_responses_by_user_view(request, user_id):
     try:
         # Ensure user_id is an integer
@@ -135,8 +227,13 @@ def tracker_responses_by_user_view(request, user_id):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+<<<<<<< HEAD
 @api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["POST"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def add_category_view(request):
     data = json.loads(request.body)
     title = data.get('title')
@@ -146,8 +243,13 @@ def add_category_view(request):
     cat = QuestionCategory.objects.create(title=title, description=description)
     return JsonResponse({'success': True, 'category': {'id': cat.id, 'title': cat.title, 'description': cat.description, 'questions': []}})
 
+<<<<<<< HEAD
 @api_view(["DELETE"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["DELETE"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def delete_category_view(request, category_id):
     try:
         cat = QuestionCategory.objects.get(id=category_id)
@@ -156,8 +258,13 @@ def delete_category_view(request, category_id):
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
 
+<<<<<<< HEAD
 @api_view(["DELETE"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["DELETE"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def delete_question_view(request, question_id):
     try:
         q = Question.objects.get(id=question_id)
@@ -166,22 +273,31 @@ def delete_question_view(request, question_id):
     except Question.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Question not found'}, status=404)
 
+<<<<<<< HEAD
 @api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["POST"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def add_question_view(request):
     data = json.loads(request.body)
     category_id = data.get('category_id')
     text = data.get('text')
     qtype = data.get('type')
     options = data.get('options', [])
+<<<<<<< HEAD
     required = data.get('required', False)
     order = data.get('order', 0)
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     if not (category_id and text and qtype):
         return JsonResponse({'success': False, 'message': 'Missing required fields'}, status=400)
     try:
         category = QuestionCategory.objects.get(id=category_id)
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
+<<<<<<< HEAD
     q = Question.objects.create(category=category, text=text, type=qtype, options=options, required=required, order=order)
     return JsonResponse({'success': True, 'question': {
         'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or [], 'required': q.required, 'order': q.order
@@ -189,6 +305,15 @@ def add_question_view(request):
 
 @api_view(["PUT"]) 
 @permission_classes([IsAuthenticated])
+=======
+    q = Question.objects.create(category=category, text=text, type=qtype, options=options)
+    return JsonResponse({'success': True, 'question': {
+        'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or []
+    }})
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def update_category_view(request, category_id):
     data = json.loads(request.body)
     title = data.get('title')
@@ -203,12 +328,18 @@ def update_category_view(request, category_id):
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
 
+<<<<<<< HEAD
 @api_view(["PUT"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["PUT"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def update_question_view(request, question_id):
     data = json.loads(request.body)
     text = data.get('text')
     qtype = data.get('type')
+<<<<<<< HEAD
     # Only update fields that are explicitly provided to avoid unintended resets
     options_provided = 'options' in data
     required_provided = 'required' in data
@@ -216,12 +347,16 @@ def update_question_view(request, question_id):
     options = data.get('options')
     required = data.get('required')
     order = data.get('order')
+=======
+    options = data.get('options', [])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     try:
         q = Question.objects.get(id=question_id)
         if text:
             q.text = text
         if qtype:
             q.type = qtype
+<<<<<<< HEAD
         if options_provided:
             q.options = options or []
         if required_provided:
@@ -235,6 +370,16 @@ def update_question_view(request, question_id):
 
 @api_view(["PUT"]) 
 @permission_classes([IsAuthenticated])
+=======
+        q.options = options
+        q.save()
+        return JsonResponse({'success': True, 'question': {'id': q.id, 'text': q.text, 'type': q.type, 'options': q.options or []}})
+    except Question.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Question not found'}, status=404)
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def update_tracker_form_title_view(request, tracker_form_id):
     import json
     try:
@@ -251,8 +396,13 @@ def update_tracker_form_title_view(request, tracker_form_id):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+<<<<<<< HEAD
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["GET"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def tracker_form_view(request, tracker_form_id):
     try:
         form = TrackerForm.objects.get(pk=tracker_form_id)
@@ -260,8 +410,13 @@ def tracker_form_view(request, tracker_form_id):
     except TrackerForm.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'TrackerForm not found'}, status=404)
 
+<<<<<<< HEAD
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["GET"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def check_user_tracker_status_view(request):
     from apps.shared.models import User, TrackerResponse
     
@@ -271,8 +426,12 @@ def check_user_tracker_status_view(request):
     
     try:
         user = User.objects.get(user_id=user_id)
+<<<<<<< HEAD
         # Only check for FINAL submissions, not drafts
         existing_response = TrackerResponse.objects.filter(user=user, is_draft=False).first()
+=======
+        existing_response = TrackerResponse.objects.filter(user=user).first()
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
         
         return JsonResponse({
             'success': True, 
@@ -284,6 +443,7 @@ def check_user_tracker_status_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+<<<<<<< HEAD
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -409,6 +569,10 @@ def load_tracker_draft_view(request):
 
 @api_view(["POST"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["POST"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def submit_tracker_response_view(request):
     import json
     from django.utils import timezone
@@ -426,6 +590,7 @@ def submit_tracker_response_view(request):
         answers = json.loads(answers_json)
         user = User.objects.get(pk=user_id)
         
+<<<<<<< HEAD
         # Check if user has already submitted a FINAL response (not draft)
         existing_response = TrackerResponse.objects.filter(user=user, is_draft=False).first()
         if existing_response:
@@ -446,6 +611,15 @@ def submit_tracker_response_view(request):
             tr.save()  # This will trigger update_user_fields() because is_draft=False
         else:
             tr.save()  # Triggers update_user_fields() for new submission
+=======
+        # Check if user has already submitted a response
+        existing_response = TrackerResponse.objects.filter(user=user).first()
+        if existing_response:
+            return JsonResponse({'success': False, 'message': 'You have already submitted the tracker form'}, status=400)
+        
+        # Create the tracker response
+        tr = TrackerResponse.objects.create(user=user, answers=answers, submitted_at=timezone.now())
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
         
         # Handle file uploads
         uploaded_files = []
@@ -476,6 +650,7 @@ def submit_tracker_response_view(request):
                     )
                     uploaded_files.append(file_upload)
         
+<<<<<<< HEAD
         # Legacy direct writes to `User` have been removed.
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().
 
@@ -494,12 +669,17 @@ def submit_tracker_response_view(request):
         
         # Create a thank you notification
         thank_you_notification = Notification.objects.create(
+=======
+        # Create a thank you notification
+        Notification.objects.create(
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
             user=user,
             notif_type='CCICT',
             subject='Thank You for Completing the Tracker Form',
             notifi_content=f'Thank you {user.f_name} {user.l_name} for completing the alumni tracker form. Your response has been recorded successfully.',
             notif_date=timezone.now()
         )
+<<<<<<< HEAD
 
         # Broadcast thank you notification in real-time
         try:
@@ -530,6 +710,8 @@ def submit_tracker_response_view(request):
                     logger.error(f"Error broadcasting admin notification: {e}")
         except Exception as e:
             logger.error(f"Error creating admin notifications: {e}")
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
         
         return JsonResponse({
             'success': True, 
@@ -544,8 +726,13 @@ def submit_tracker_response_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+<<<<<<< HEAD
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["GET"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def tracker_accepting_responses_view(request, tracker_form_id):
     try:
         form = TrackerForm.objects.get(pk=tracker_form_id)
@@ -553,8 +740,13 @@ def tracker_accepting_responses_view(request, tracker_form_id):
     except TrackerForm.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'TrackerForm not found'}, status=404)
 
+<<<<<<< HEAD
 @api_view(["PUT"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["PUT"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def update_tracker_accepting_responses_view(request, tracker_form_id):
     try:
         form = TrackerForm.objects.get(pk=tracker_form_id)
@@ -570,6 +762,7 @@ def update_tracker_accepting_responses_view(request, tracker_form_id):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+<<<<<<< HEAD
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def get_active_tracker_form(request):
@@ -595,6 +788,18 @@ def get_active_tracker_form(request):
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
+=======
+@csrf_exempt
+@require_http_methods(["GET"])
+def get_active_tracker_form(request):
+    form = TrackerForm.objects.order_by('-tracker_form_id').first()  # or your own logic
+    if form:
+        return JsonResponse({'tracker_form_id': form.pk})
+    return JsonResponse({'tracker_form_id': None}, status=404)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 def file_upload_stats_view(request):
     """Get statistics about file uploads grouped by question type"""
     try:

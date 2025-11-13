@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from django.test import TestCase, Client
 from django.urls import reverse
 from apps.shared.models import User, AccountType, UserProfile
@@ -224,3 +225,8 @@ class ForgotPasswordTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         response_data = json.loads(response.content)
         self.assertTrue(response_data['success'])
+=======
+from django.test import TestCase
+
+# Create your tests here.
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

@@ -5,6 +5,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 django.setup()
 
 from apps.shared.models import User
+<<<<<<< HEAD
 from django.core.management import execute_from_command_line
 
 def delete_all_alumni():
@@ -39,6 +40,15 @@ def delete_all_alumni():
             continue
     
     print(f"Deletion completed. Successfully deleted: {deleted_count}, Failed: {failed_count}")
+=======
+
+def delete_all_alumni():
+    alumni_users = User.objects.filter(account_type__user=True)
+    count = alumni_users.count()
+    print(f"Deleting {count} alumni users...")
+    alumni_users.delete()
+    print("All alumni users deleted.")
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 if __name__ == "__main__":
     delete_all_alumni() 

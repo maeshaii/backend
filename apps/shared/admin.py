@@ -4,6 +4,7 @@ from .models import *
 
 # Register your models here.
 admin.site.register(AccountType)
+<<<<<<< HEAD
 # admin.site.register(Aacup)  # Model not found
 # admin.site.register(Ched)  # Model not found
 admin.site.register(Comment)
@@ -23,11 +24,35 @@ admin.site.register(Repost)
 # admin.site.register(Standard)  # Model not found
 # admin.site.register(Suc)  # Model not found
 # admin.site.register(TrackerForm)  # Model not found
+=======
+admin.site.register(Aacup)
+admin.site.register(Ched)
+admin.site.register(Comment)
+admin.site.register(CompTechJob)
+admin.site.register(ExportedFile)
+admin.site.register(Feed)
+admin.site.register(Forum)
+admin.site.register(HighPosition)
+admin.site.register(Import)
+admin.site.register(InfoTechJob)
+admin.site.register(InfoSystemJob)
+admin.site.register(Like)
+admin.site.register(Message)
+admin.site.register(Notification)
+admin.site.register(PostCategory)
+admin.site.register(Post)
+admin.site.register(Qpro)
+admin.site.register(Repost)
+admin.site.register(Standard)
+admin.site.register(Suc)
+admin.site.register(TrackerForm)
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 admin.site.register(User)
 admin.site.register(QuestionCategory)
 admin.site.register(Question)
 admin.site.register(TrackerResponse)
 
+<<<<<<< HEAD
 # PHASE 3: Enhanced admin interface for job title management
 from django.db.models import Count
 
@@ -107,6 +132,10 @@ class EmploymentHistoryAdmin(admin.ModelAdmin):
 # Custom filter for question types
 class QuestionTypeFilter(admin.SimpleListFilter):
     """Custom filter for filtering questions by document type in the admin interface."""
+=======
+# Custom filter for question types
+class QuestionTypeFilter(admin.SimpleListFilter):
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     title = 'Document Type'
     parameter_name = 'question_type'
 
@@ -122,7 +151,10 @@ class QuestionTypeFilter(admin.SimpleListFilter):
 
 @admin.register(TrackerFileUpload)
 class TrackerFileUploadAdmin(admin.ModelAdmin):
+<<<<<<< HEAD
     """Admin interface for TrackerFileUpload with custom display and filters."""
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     list_display = ('original_filename', 'user_name', 'question_text', 'question_id', 'file_size_mb', 'uploaded_at', 'download_link')
     list_filter = (QuestionTypeFilter, 'uploaded_at')
     search_fields = ('original_filename', 'response__user__f_name', 'response__user__l_name')
@@ -154,6 +186,7 @@ class TrackerFileUploadAdmin(admin.ModelAdmin):
             return format_html('<a href="{}" target="_blank">Download</a>', obj.file.url)
         return "No file"
     download_link.short_description = 'Download'
+<<<<<<< HEAD
 
 # Register rate limiting models
 @admin.register(UserActionLog)
@@ -249,3 +282,5 @@ class EngagementPointsSettingsAdmin(admin.ModelAdmin):
             settings = EngagementPointsSettings.objects.get(pk=1)
             return redirect(f'/admin/shared/engagementpointssettings/{settings.pk}/change/')
         return super().changelist_view(request, extra_context)
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

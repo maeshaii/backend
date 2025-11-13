@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Python
 __pycache__/
 *.py[cod]
@@ -118,3 +119,9 @@ jspm_packages/
 # Expo
 .expo/
 web-build/
+=======
+venv/
+__pycache__/
+*.pyc
+.env
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

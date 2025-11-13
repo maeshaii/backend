@@ -11,11 +11,14 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+<<<<<<< HEAD
 import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,6 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
+<<<<<<< HEAD
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-+koo^iomvn9!og7s955%f0=o+$2)a6l)e*^g#ka&j0#fzyb(b1')
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -33,6 +37,14 @@ DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'  # Default to True for deve
 
 # Accept requests from localhost, emulator, and all relevant LAN IPs (including mobile)
 ALLOWED_HOSTS = ['*']
+=======
+SECRET_KEY = 'django-insecure-+koo^iomvn9!og7s955%f0=o+$2)a6l)e*^g#ka&j0#fzyb(b1'
+
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = True
+
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "10.0.2.2", "0.0.0.0", "192.168.1.5"]
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 
 # Application definition
@@ -49,11 +61,16 @@ INSTALLED_APPS = [
     "apps.tracker",
     "apps.alumni_stats",
     "apps.alumni_users",
+<<<<<<< HEAD
     "apps.ojt_users",
     "apps.messaging",  # Add this new app
     "rest_framework",
     "corsheaders",
     "channels",  # Add this
+=======
+    "rest_framework",
+    "corsheaders",
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 ]
 
 MIDDLEWARE = [
@@ -61,12 +78,16 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+<<<<<<< HEAD
     'apps.api.middleware.APICSRFExemptMiddleware',  # Custom CSRF exemption for API
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+<<<<<<< HEAD
 # CORS Configuration - Robust development setup
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
@@ -130,6 +151,16 @@ CSRF_TRUSTED_ORIGINS = [
     "http://192.168.1.5:8000",
     "https://*.ngrok-free.app",
     "https://biogenetic-crissy-askew.ngrok-free.dev",
+=======
+CORS_ALLOW_ALL_ORIGINS = True  # or set a whitelist
+CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:8000",
+    "http://10.0.2.2:8000",
+    "http://192.168.1.5:8000",
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 ]
 ROOT_URLCONF = 'backend.urls'
 
@@ -150,17 +181,30 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'backend.wsgi.application'
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
     'default': {
+<<<<<<< HEAD
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
         'NAME': os.getenv('DB_NAME', 'wny'),
         'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
+=======
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'wny-db',
+        'USER': 'postgres',
+        'PASSWORD': '12345',
+        'HOST': 'localhost',
+        'PORT': '5432',
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     }
 }
 
@@ -168,9 +212,12 @@ DATABASES = {
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
+<<<<<<< HEAD
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -186,6 +233,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+<<<<<<< HEAD
 # Preferred password hashers (bcrypt prioritized)
 # Note: Requires the 'bcrypt' package to be installed
 PASSWORD_HASHERS = [
@@ -196,13 +244,19 @@ PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.ScryptPasswordHasher',
 ]
 
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
 
+<<<<<<< HEAD
 TIME_ZONE = os.getenv('TIME_ZONE', 'UTC')
+=======
+TIME_ZONE = 'UTC'
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 USE_I18N = True
 
@@ -212,6 +266,7 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
+<<<<<<< HEAD
 STATIC_URL = os.getenv('STATIC_URL', '/static/')
 
 # Media files (Uploaded files)
@@ -291,11 +346,20 @@ LOGGING = {
     },
 }
 
+=======
+STATIC_URL = 'static/'
+
+# Media files (Uploaded files)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+<<<<<<< HEAD
 # Default coordinator credentials (can be overridden via environment variables)
 DEFAULT_COORDINATOR_USERNAME = os.getenv('DEFAULT_COORDINATOR_USERNAME', 'ITCOORDINATOR')
 DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHERENAYOU')
@@ -325,10 +389,13 @@ CACHES = {
 #     }
 # }
 
+=======
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+<<<<<<< HEAD
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
@@ -394,3 +461,13 @@ else:
             'BACKEND': 'channels.layers.InMemoryChannelLayer',
         },
     }
+=======
+}
+
+SIMPLE_JWT = {
+    'USER_ID_FIELD': 'user_id',
+    'USER_ID_CLAIM': 'user_id',
+}
+
+AUTH_USER_MODEL = 'shared.User'
+>>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
