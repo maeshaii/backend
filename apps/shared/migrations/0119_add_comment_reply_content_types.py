@@ -12,10 +12,57 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='conversation',
-            name='request_initiator',
-            field=models.ForeignKey(blank=True, help_text='User who initiated the message request', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='initiated_message_requests', to=settings.AUTH_USER_MODEL),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql="""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'shared_conversation'
+                              AND column_name = 'request_initiator_id'
+                        ) THEN
+                            ALTER TABLE shared_conversation
+                            ADD COLUMN request_initiator_id INTEGER NULL
+                                REFERENCES shared_user(user_id) ON DELETE SET NULL;
+                        END IF;
+                        CREATE INDEX IF NOT EXISTS shared_conversation_request_initiator_id_idx
+                            ON shared_conversation(request_initiator_id);
+                    END;
+                    $$;
+                    """,
+                    reverse_sql="""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'shared_conversation'
+                              AND column_name = 'request_initiator_id'
+                        ) THEN
+                            DROP INDEX IF EXISTS shared_conversation_request_initiator_id_idx;
+                            ALTER TABLE shared_conversation
+                            DROP COLUMN request_initiator_id;
+                        END IF;
+                    END;
+                    $$;
+                    """,
+                )
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name='conversation',
+                    name='request_initiator',
+                    field=models.ForeignKey(
+                        blank=True,
+                        help_text='User who initiated the message request',
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name='initiated_message_requests',
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='contentimage',
