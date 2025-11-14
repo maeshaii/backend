@@ -4,27 +4,6 @@ from .models import *
 
 # Register your models here.
 admin.site.register(AccountType)
-<<<<<<< HEAD
-# admin.site.register(Aacup)  # Model not found
-# admin.site.register(Ched)  # Model not found
-admin.site.register(Comment)
-# admin.site.register(CompTechJob)  # Model not found
-# admin.site.register(ExportedFile)  # Model not found
-# admin.site.register(Feed)  # Model not found
-admin.site.register(Forum)
-# admin.site.register(HighPosition)  # Model not found
-# admin.site.register(Import)  # Model not found
-# admin.site.register(InfoTechJob)  # Model not found
-# admin.site.register(InfoSystemJob)  # Model not found
-admin.site.register(Like)
-admin.site.register(Notification)
-admin.site.register(Post)
-# admin.site.register(Qpro)  # Model not found
-admin.site.register(Repost)
-# admin.site.register(Standard)  # Model not found
-# admin.site.register(Suc)  # Model not found
-# admin.site.register(TrackerForm)  # Model not found
-=======
 admin.site.register(Aacup)
 admin.site.register(Ched)
 admin.site.register(Comment)
@@ -46,96 +25,13 @@ admin.site.register(Repost)
 admin.site.register(Standard)
 admin.site.register(Suc)
 admin.site.register(TrackerForm)
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 admin.site.register(User)
 admin.site.register(QuestionCategory)
 admin.site.register(Question)
 admin.site.register(TrackerResponse)
 
-<<<<<<< HEAD
-# PHASE 3: Enhanced admin interface for job title management
-from django.db.models import Count
-
-@admin.register(SimpleCompTechJob)
-class SimpleCompTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='comp_tech'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-@admin.register(SimpleInfoTechJob)
-class SimpleInfoTechJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='info_tech'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-@admin.register(SimpleInfoSystemJob)
-class SimpleInfoSystemJobAdmin(admin.ModelAdmin):
-    list_display = ['job_title', 'usage_count']
-    search_fields = ['job_title']
-    ordering = ['job_title']
-    
-    def usage_count(self, obj):
-        """Show how many alumni are using this job title"""
-        count = EmploymentHistory.objects.filter(
-            job_alignment_title=obj.job_title,
-            job_alignment_category='info_system'
-        ).count()
-        return count
-    usage_count.short_description = 'Alumni Using This Title'
-
-# Enhanced EmploymentHistory admin with job alignment info
-@admin.register(EmploymentHistory)
-class EmploymentHistoryAdmin(admin.ModelAdmin):
-    list_display = ['user_name', 'position_current', 'job_alignment_status', 'job_alignment_title', 'company_name_current']
-    list_filter = ['job_alignment_status', 'job_alignment_category', 'absorbed']
-    search_fields = ['user__f_name', 'user__l_name', 'position_current', 'company_name_current']
-    readonly_fields = ['job_alignment_status', 'job_alignment_category', 'job_alignment_title']
-    
-    def user_name(self, obj):
-        return f"{obj.user.f_name} {obj.user.l_name}"
-    user_name.short_description = 'Alumni Name'
-    
-    actions = ['recalculate_job_alignment']
-    
-    def recalculate_job_alignment(self, request, queryset):
-        """Recalculate job alignment for selected employment records"""
-        updated_count = 0
-        for employment in queryset:
-            employment.update_job_alignment()
-            employment.save()
-            updated_count += 1
-        
-        self.message_user(
-            request,
-            f'Successfully recalculated job alignment for {updated_count} employment records.'
-        )
-    recalculate_job_alignment.short_description = 'Recalculate job alignment'
-
 # Custom filter for question types
 class QuestionTypeFilter(admin.SimpleListFilter):
-    """Custom filter for filtering questions by document type in the admin interface."""
-=======
-# Custom filter for question types
-class QuestionTypeFilter(admin.SimpleListFilter):
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     title = 'Document Type'
     parameter_name = 'question_type'
 
@@ -151,10 +47,6 @@ class QuestionTypeFilter(admin.SimpleListFilter):
 
 @admin.register(TrackerFileUpload)
 class TrackerFileUploadAdmin(admin.ModelAdmin):
-<<<<<<< HEAD
-    """Admin interface for TrackerFileUpload with custom display and filters."""
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     list_display = ('original_filename', 'user_name', 'question_text', 'question_id', 'file_size_mb', 'uploaded_at', 'download_link')
     list_filter = (QuestionTypeFilter, 'uploaded_at')
     search_fields = ('original_filename', 'response__user__f_name', 'response__user__l_name')
@@ -186,101 +78,3 @@ class TrackerFileUploadAdmin(admin.ModelAdmin):
             return format_html('<a href="{}" target="_blank">Download</a>', obj.file.url)
         return "No file"
     download_link.short_description = 'Download'
-<<<<<<< HEAD
-
-# Register rate limiting models
-@admin.register(UserActionLog)
-class UserActionLogAdmin(admin.ModelAdmin):
-    """Admin interface for UserActionLog to monitor user actions and rate limiting."""
-    list_display = ['user', 'action_type', 'action_timestamp']
-    list_filter = ['action_type', 'action_timestamp']
-    search_fields = ['user__f_name', 'user__l_name', 'user__acc_username', 'action_type']
-    readonly_fields = ['action_timestamp']
-    ordering = ['-action_timestamp']
-    date_hierarchy = 'action_timestamp'
-    
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        return qs.select_related('user')
-
-
-@admin.register(EngagementPointsSettings)
-class EngagementPointsSettingsAdmin(admin.ModelAdmin):
-    """Admin interface for Engagement Points Settings and Rate Limiting."""
-    
-    def has_add_permission(self, request):
-        # Only allow one instance (singleton pattern)
-        return not EngagementPointsSettings.objects.exists()
-    
-    def has_delete_permission(self, request, obj=None):
-        # Don't allow deletion of settings
-        return False
-    
-    fieldsets = (
-        ('Points System', {
-            'fields': ('enabled',)
-        }),
-        ('Points Awarded Per Action', {
-            'fields': (
-                'like_points',
-                'comment_points',
-                'share_points',
-                'reply_points',
-                'post_points',
-                'post_with_photo_points',
-                'tracker_form_points',
-            ),
-            'description': 'Configure how many points users earn for each action type.'
-        }),
-        ('Rate Limiting (Anti-Spam)', {
-            'fields': ('rate_limiting_enabled',),
-            'description': 'Enable or disable rate limiting to prevent spam.'
-        }),
-        ('Daily Limits (Maximum actions per 24 hours)', {
-            'fields': (
-                'daily_like_limit',
-                'daily_comment_limit',
-                'daily_share_limit',
-                'daily_reply_limit',
-                'daily_post_limit',
-                'daily_post_with_photo_limit',
-                'daily_tracker_form_limit',
-            ),
-            'description': 'Maximum number of each action type a user can perform per day. Uses rolling 24-hour window.'
-        }),
-        ('Hourly Limits (Maximum actions per hour)', {
-            'fields': (
-                'hourly_like_limit',
-                'hourly_comment_limit',
-                'hourly_share_limit',
-                'hourly_reply_limit',
-                'hourly_post_limit',
-                'hourly_post_with_photo_limit',
-                'hourly_tracker_form_limit',
-            ),
-            'description': 'Maximum number of each action type a user can perform per hour. Uses rolling 60-minute window.'
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
-    )
-    
-    readonly_fields = ['created_at', 'updated_at']
-    
-    list_display = ['enabled', 'rate_limiting_enabled', 'updated_at']
-    
-    def get_object(self, request, object_id=None, from_field=None):
-        # Always return the singleton instance
-        obj, created = EngagementPointsSettings.objects.get_or_create(pk=1)
-        return obj
-    
-    def changelist_view(self, request, extra_context=None):
-        # Redirect to the edit page if settings exist
-        if EngagementPointsSettings.objects.exists():
-            from django.shortcuts import redirect
-            settings = EngagementPointsSettings.objects.get(pk=1)
-            return redirect(f'/admin/shared/engagementpointssettings/{settings.pk}/change/')
-        return super().changelist_view(request, extra_context)
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

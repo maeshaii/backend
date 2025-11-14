@@ -11,14 +11,6 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-<<<<<<< HEAD
-import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -28,23 +20,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-<<<<<<< HEAD
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-+koo^iomvn9!og7s955%f0=o+$2)a6l)e*^g#ka&j0#fzyb(b1')
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'  # Default to True for development
-
-
-# Accept requests from localhost, emulator, and all relevant LAN IPs (including mobile)
-ALLOWED_HOSTS = ['*']
-=======
 SECRET_KEY = 'django-insecure-+koo^iomvn9!og7s955%f0=o+$2)a6l)e*^g#ka&j0#fzyb(b1'
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 ALLOWED_HOSTS = ["127.0.0.1", "localhost", "10.0.2.2", "0.0.0.0", "192.168.1.5"]
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 
 # Application definition
@@ -61,16 +42,8 @@ INSTALLED_APPS = [
     "apps.tracker",
     "apps.alumni_stats",
     "apps.alumni_users",
-<<<<<<< HEAD
-    "apps.ojt_users",
-    "apps.messaging",  # Add this new app
     "rest_framework",
     "corsheaders",
-    "channels",  # Add this
-=======
-    "rest_framework",
-    "corsheaders",
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 ]
 
 MIDDLEWARE = [
@@ -78,80 +51,11 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-<<<<<<< HEAD
-    'apps.api.middleware.APICSRFExemptMiddleware',  # Custom CSRF exemption for API
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-<<<<<<< HEAD
-# CORS Configuration - Robust development setup
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'http://localhost:3001',
-    'http://127.0.0.1:3001',
-    'http://192.168.2.112:8000',
-    'http://192.168.101.70:8000',
-]
-CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
-
-# Do not use wildcard '*' when credentials are included. Prefer specific origins and regex for ngrok.
-# Enable this for mobile development - mobile apps don't send traditional origin headers
-CORS_ALLOW_ALL_ORIGINS = True
-
-# Allow typical headers/methods during development
-CORS_ALLOW_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-    'ngrok-skip-browser-warning',
-]
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
-# Permit any ngrok-free.app and ngrok-free.dev subdomain over https
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r'^https://[a-z0-9-]+\.ngrok-free\.app$',
-    r'^https://[a-z0-9-]+\.ngrok-free\.dev$'
-]
-
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:8000",
-    "http://10.0.2.2:8000",
-    "http://192.168.2.112:8000",
-    "http://192.168.101.70:8000",
-    "https://simultaneously-wrinkliest-dominik.ngrok-free.dev",
-    "http://172.16.59.112:8000",
-    "https://nxlclfy-akmia-8081.exp.direct",
-
-    "http://192.168.1.27:8000",
-    "http://192.168.1.18:8000",
-    "http://192.168.254.135:8000",
-
-    "http://192.168.1.5:8000",
-    "https://*.ngrok-free.app",
-    "https://biogenetic-crissy-askew.ngrok-free.dev",
-=======
 CORS_ALLOW_ALL_ORIGINS = True  # or set a whitelist
 CORS_ALLOW_CREDENTIALS = True
 
@@ -160,7 +64,6 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://10.0.2.2:8000",
     "http://192.168.1.5:8000",
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 ]
 ROOT_URLCONF = 'backend.urls'
 
@@ -181,30 +84,17 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'backend.wsgi.application'
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
     'default': {
-<<<<<<< HEAD
-        'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
-        'NAME': os.getenv('DB_NAME', 'wny'),
-        'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
-        'HOST': os.getenv('DB_HOST', 'localhost'),
-        'PORT': os.getenv('DB_PORT', '5432'),
-=======
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'wny-db',
+        'NAME': 'wny',
         'USER': 'postgres',
         'PASSWORD': '12345',
         'HOST': 'localhost',
         'PORT': '5432',
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
     }
 }
 
@@ -212,12 +102,6 @@ DATABASES = {
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
-<<<<<<< HEAD
-# Password validation
-# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
-
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -233,30 +117,13 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-<<<<<<< HEAD
-# Preferred password hashers (bcrypt prioritized)
-# Note: Requires the 'bcrypt' package to be installed
-PASSWORD_HASHERS = [
-    'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
-    'django.contrib.auth.hashers.PBKDF2PasswordHasher',
-    'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
-    'django.contrib.auth.hashers.Argon2PasswordHasher',
-    'django.contrib.auth.hashers.ScryptPasswordHasher',
-]
-
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
 
-<<<<<<< HEAD
-TIME_ZONE = os.getenv('TIME_ZONE', 'UTC')
-=======
 TIME_ZONE = 'UTC'
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 
 USE_I18N = True
 
@@ -266,202 +133,21 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-<<<<<<< HEAD
-STATIC_URL = os.getenv('STATIC_URL', '/static/')
-
-# Media files (Uploaded files)
-MEDIA_URL = os.getenv('MEDIA_URL', '/media/')
-MEDIA_ROOT = BASE_DIR / 'media'
-
-# AWS S3 Configuration for file storage
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME')
-AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME', 'us-east-1')
-AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN')  # For CDN
-AWS_S3_OBJECT_PARAMETERS = {
-    'CacheControl': 'max-age=86400',  # 24 hours
-}
-AWS_DEFAULT_ACL = 'private'
-AWS_S3_FILE_OVERWRITE = False
-AWS_QUERYSTRING_AUTH = True
-AWS_S3_VERIFY = True
-
-# Use S3 for file storage if configured
-if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_STORAGE_BUCKET_NAME:
-    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
-    STATICFILES_STORAGE = 'storages.backends.s3boto3.StaticS3Boto3Storage'
-    AWS_LOCATION = 'static'
-    STATIC_URL = f'https://{AWS_S3_CUSTOM_DOMAIN or f"{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com"}/{AWS_LOCATION}/'
-
-# Sentry Configuration for Error Tracking and Monitoring
-SENTRY_DSN = os.getenv('SENTRY_DSN')
-SENTRY_ENVIRONMENT = os.getenv('SENTRY_ENVIRONMENT', 'development')
-SENTRY_RELEASE = os.getenv('SENTRY_RELEASE', '1.0.0')
-SENTRY_TRACES_SAMPLE_RATE = float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0.1'))
-SENTRY_PROFILES_SAMPLE_RATE = float(os.getenv('SENTRY_PROFILES_SAMPLE_RATE', '0.1'))
-
-# Logging Configuration for Production Monitoring
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-    },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-        'file': {
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'messaging.log',
-            'maxBytes': 1024*1024*15,  # 15MB
-            'backupCount': 10,
-            'formatter': 'verbose',
-        },
-    },
-    'root': {
-        'handlers': ['console'],
-        'level': 'INFO',
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'apps.messaging': {
-            'handlers': ['console', 'file'],
-            'level': 'DEBUG',
-            'propagate': False,
-        },
-    },
-}
-
-=======
 STATIC_URL = 'static/'
 
 # Media files (Uploaded files)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-<<<<<<< HEAD
-# Default coordinator credentials (can be overridden via environment variables)
-DEFAULT_COORDINATOR_USERNAME = os.getenv('DEFAULT_COORDINATOR_USERNAME', 'ITCOORDINATOR')
-DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHERENAYOU')
-
-# CACHING CONFIGURATION
-# Phase 2 optimization: Cache statistics for better performance
-# Uses local memory cache by default (switch to Redis for production/multiple servers)
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-statistics-cache',
-        'OPTIONS': {
-            'MAX_ENTRIES': 1000,
-        }
-    }
-}
-# For production with Redis (uncomment and configure):
-# CACHES = {
-#     'default': {
-#         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-#         'LOCATION': 'redis://127.0.0.1:6379/1',
-#         'OPTIONS': {
-#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-#         },
-#         'KEY_PREFIX': 'alumni_stats',
-#         'TIMEOUT': 300,  # 5 minutes default
-#     }
-# }
-
-=======
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
-<<<<<<< HEAD
-    'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer',
-    ],
-    'DEFAULT_PARSER_CLASSES': [
-        'rest_framework.parsers.JSONParser',
-        'rest_framework.parsers.MultiPartParser',
-        'rest_framework.parsers.FormParser',
-    ],
-}
-
-SIMPLE_JWT = {
-    'USER_ID_FIELD': os.getenv('JWT_USER_ID_FIELD', 'user_id'),
-    'USER_ID_CLAIM': os.getenv('JWT_USER_ID_CLAIM', 'user_id'),
-}
-
-# Optional: Fernet key for encrypting initial/generated passwords for exports
-# If not provided, a key will be derived from SECRET_KEY at runtime
-INITIAL_PASSWORD_FERNET_KEY = os.getenv('INITIAL_PASSWORD_FERNET_KEY')
-
-AUTH_USER_MODEL = 'shared.User'
-DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv('DATA_UPLOAD_MAX_NUMBER_FIELDS', '10000'))
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
-FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
-
-# Email Configuration (Optional)
-if os.getenv('EMAIL_BACKEND'):
-    EMAIL_BACKEND = os.getenv('EMAIL_BACKEND')
-    EMAIL_HOST = os.getenv('EMAIL_HOST')
-    EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-    EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
-    EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
-    EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
-
-# Security Settings for Production
-if not DEBUG:
-    SECURE_BROWSER_XSS_FILTER = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_REDIRECT_EXEMPT = []
-    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'False').lower() == 'true'
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    X_FRAME_OPTIONS = 'DENY'
-
-
-# Add these at the bottom of the file
-ASGI_APPLICATION = 'backend.asgi.application'
-# Prefer Redis if available, otherwise fallback to in-memory for development
-REDIS_URL = os.getenv('REDIS_URL')
-if REDIS_URL:
-    CHANNEL_LAYERS = {
-        'default': {
-            'BACKEND': 'channels_redis.core.RedisChannelLayer',
-            'CONFIG': {
-                'hosts': [REDIS_URL],
-            },
-        },
-    }
-else:
-    CHANNEL_LAYERS = {
-        'default': {
-            'BACKEND': 'channels.layers.InMemoryChannelLayer',
-        },
-    }
-=======
 }
 
 SIMPLE_JWT = {
@@ -470,4 +156,3 @@ SIMPLE_JWT = {
 }
 
 AUTH_USER_MODEL = 'shared.User'
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a

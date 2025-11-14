@@ -22,17 +22,8 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('apps.api.urls')),  # Make sure your app URL is included here
-<<<<<<< HEAD
-    path('api/shared/', include('apps.shared.urls')),  # Job alignment endpoints
-    path('api/statistics/', include('apps.alumni_stats.urls')),
-    path('api/ojt-statistics/', include('apps.ojt_stats.urls')),
-    path('api/users/', include('apps.alumni_users.urls')),
-    path('api/ojt-users/', include('apps.ojt_users.urls')),
-    path('api/messaging/', include('apps.messaging.urls')),
-=======
     path('api/statistics/', include('apps.alumni_stats.urls')),
     path('api/users/', include('apps.alumni_users.urls')),
->>>>>>> 746e601016fd6b6113a8116f65f35a08788c789a
 ]
 
 # Serve media files in development
