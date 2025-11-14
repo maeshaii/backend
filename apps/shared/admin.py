@@ -155,25 +155,9 @@ class TrackerFileUploadAdmin(admin.ModelAdmin):
         return "No file"
     download_link.short_description = 'Download'
 
-# Register rate limiting models
-@admin.register(UserActionLog)
-class UserActionLogAdmin(admin.ModelAdmin):
-    """Admin interface for UserActionLog to monitor user actions and rate limiting."""
-    list_display = ['user', 'action_type', 'action_timestamp']
-    list_filter = ['action_type', 'action_timestamp']
-    search_fields = ['user__f_name', 'user__l_name', 'user__acc_username', 'action_type']
-    readonly_fields = ['action_timestamp']
-    ordering = ['-action_timestamp']
-    date_hierarchy = 'action_timestamp'
-    
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        return qs.select_related('user')
-
-
 @admin.register(EngagementPointsSettings)
 class EngagementPointsSettingsAdmin(admin.ModelAdmin):
-    """Admin interface for Engagement Points Settings and Rate Limiting."""
+    """Admin interface for Engagement Points Settings."""
     
     def has_add_permission(self, request):
         # Only allow one instance (singleton pattern)
@@ -195,37 +179,15 @@ class EngagementPointsSettingsAdmin(admin.ModelAdmin):
                 'reply_points',
                 'post_points',
                 'post_with_photo_points',
-                'tracker_form_points',
             ),
             'description': 'Configure how many points users earn for each action type.'
         }),
-        ('Rate Limiting (Anti-Spam)', {
-            'fields': ('rate_limiting_enabled',),
-            'description': 'Enable or disable rate limiting to prevent spam.'
-        }),
-        ('Daily Limits (Maximum actions per 24 hours)', {
+        ('Tracker Form Rewards', {
             'fields': (
-                'daily_like_limit',
-                'daily_comment_limit',
-                'daily_share_limit',
-                'daily_reply_limit',
-                'daily_post_limit',
-                'daily_post_with_photo_limit',
-                'daily_tracker_form_limit',
+                'tracker_form_enabled',
+                'tracker_form_points',
             ),
-            'description': 'Maximum number of each action type a user can perform per day. Uses rolling 24-hour window.'
-        }),
-        ('Hourly Limits (Maximum actions per hour)', {
-            'fields': (
-                'hourly_like_limit',
-                'hourly_comment_limit',
-                'hourly_share_limit',
-                'hourly_reply_limit',
-                'hourly_post_limit',
-                'hourly_post_with_photo_limit',
-                'hourly_tracker_form_limit',
-            ),
-            'description': 'Maximum number of each action type a user can perform per hour. Uses rolling 60-minute window.'
+            'description': 'Enable or disable tracker form rewards and configure points awarded for completing the tracker form.'
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -235,7 +197,7 @@ class EngagementPointsSettingsAdmin(admin.ModelAdmin):
     
     readonly_fields = ['created_at', 'updated_at']
     
-    list_display = ['enabled', 'rate_limiting_enabled', 'updated_at']
+    list_display = ['enabled', 'updated_at']
     
     def get_object(self, request, object_id=None, from_field=None):
         # Always return the singleton instance
