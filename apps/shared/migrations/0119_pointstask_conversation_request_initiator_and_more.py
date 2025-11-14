@@ -70,7 +70,7 @@ def reverse_userprofile_fields(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0118_merge_20251110_1818'),
+        ('shared', '0001_initial'),
     ]
 
     operations = [
