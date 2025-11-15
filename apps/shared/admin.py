@@ -78,3 +78,60 @@ class TrackerFileUploadAdmin(admin.ModelAdmin):
             return format_html('<a href="{}" target="_blank">Download</a>', obj.file.url)
         return "No file"
     download_link.short_description = 'Download'
+
+@admin.register(EngagementPointsSettings)
+class EngagementPointsSettingsAdmin(admin.ModelAdmin):
+    """Admin interface for Engagement Points Settings."""
+    
+    def has_add_permission(self, request):
+        # Only allow one instance (singleton pattern)
+        return not EngagementPointsSettings.objects.exists()
+    
+    def has_delete_permission(self, request, obj=None):
+        # Don't allow deletion of settings
+        return False
+    
+    fieldsets = (
+        ('Points System', {
+            'fields': ('enabled',)
+        }),
+        ('Points Awarded Per Action', {
+            'fields': (
+                'like_points',
+                'comment_points',
+                'share_points',
+                'reply_points',
+                'post_points',
+                'post_with_photo_points',
+            ),
+            'description': 'Configure how many points users earn for each action type.'
+        }),
+        ('Tracker Form Rewards', {
+            'fields': (
+                'tracker_form_enabled',
+                'tracker_form_points',
+            ),
+            'description': 'Enable or disable tracker form rewards and configure points awarded for completing the tracker form.'
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    readonly_fields = ['created_at', 'updated_at']
+    
+    list_display = ['enabled', 'updated_at']
+    
+    def get_object(self, request, object_id=None, from_field=None):
+        # Always return the singleton instance
+        obj, created = EngagementPointsSettings.objects.get_or_create(pk=1)
+        return obj
+    
+    def changelist_view(self, request, extra_context=None):
+        # Redirect to the edit page if settings exist
+        if EngagementPointsSettings.objects.exists():
+            from django.shortcuts import redirect
+            settings = EngagementPointsSettings.objects.get(pk=1)
+            return redirect(f'/admin/shared/engagementpointssettings/{settings.pk}/change/')
+        return super().changelist_view(request, extra_context)

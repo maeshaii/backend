@@ -1,7 +1,7 @@
 from django.urls import path, include
 from . import views
 from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view
+from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, profile_bio_view, update_alumni_profile, delete_alumni_profile_pic, search_alumni
 from apps.tracker.views import tracker_questions_view, tracker_responses_view, add_category_view, delete_category_view, delete_question_view, add_question_view, update_category_view, update_question_view, update_tracker_form_title_view, submit_tracker_response_view, tracker_responses_by_user_view, tracker_form_view, check_user_tracker_status_view, tracker_accepting_responses_view, update_tracker_accepting_responses_view, get_active_tracker_form, file_upload_stats_view
 from apps.alumni_users.views import alumni_list_view, alumni_detail_view
 from apps.shared.views import export_alumni_excel, import_alumni_excel, import_exported_alumni_excel
@@ -39,5 +39,79 @@ urlpatterns = [
     path('tracker/accepting/<int:tracker_form_id>/', tracker_accepting_responses_view, name='tracker_accepting_responses'),
     path('tracker/update-accepting/<int:tracker_form_id>/', update_tracker_accepting_responses_view, name='update_tracker_accepting_responses'),
     path('tracker/active-form/', get_active_tracker_form, name='get_active_tracker_form'),
+    path('admin/<int:user_id>/profile_bio/', profile_bio_view, name='profile_bio_view'),
+    path('alumni/profile/update/', update_alumni_profile, name='update_alumni_profile'),
+    path('alumni/profile/delete/', delete_alumni_profile_pic, name='delete_alumni_profile_pic'),
+    path('search/', search_alumni, name='search_alumni'),
+    path('alumni/search/', views.search_alumni, name='search_alumni'),
+    path('alumni/all/', views.get_all_alumni, name='get_all_alumni'),
+    path('following/mentions/', views.get_following_for_mentions, name='get_following_for_mentions'),
+    path('comments/<int:comment_id>/post/', views.get_post_from_comment, name='get_post_from_comment'),
+    path('replies/<int:reply_id>/comment/', views.get_comment_from_reply, name='get_comment_from_reply'),
+    path('users/alumni/', views.users_alumni_view, name='users_alumni'),
+    
+    # Used by Mobile: Posts API endpoints
+    path('posts/', views.posts_view, name='posts'),
+    path('posts/debug/', views.debug_posts_view, name='debug_posts'),
+    path('posts/by-user-type/', views.posts_by_user_type_view, name='posts_by_user_type'),
+    path('posts/<int:post_id>/like/', views.post_like_view, name='post_like'),
+    path('posts/<int:post_id>/comments/', views.post_comments_view, name='post_comments'),
+    path('posts/<int:post_id>/comments/<int:comment_id>/', views.comment_edit_view, name='comment_edit'),
+    # Reply API endpoints - Handle comment replies
+    path('comments/<int:comment_id>/replies/', views.comment_replies_view, name='comment_replies'),
+    path('comments/<int:comment_id>/replies/<int:reply_id>/', views.reply_edit_view, name='reply_edit'),
+    # Recent Search API endpoints
+    path('recent-searches/', views.recent_searches_view, name='recent_searches'),
+    path('recent-searches/<int:search_id>/', views.recent_search_delete_view, name='recent_search_delete'),
+    path('posts/<int:post_id>/likes/', views.post_likes_view, name='post_likes'),
+    # Used by Mobile: Repost interactions
+    path('reposts/<int:repost_id>/', views.repost_delete_view, name='repost_delete'),
+    path('reposts/<int:repost_id>/detail/', views.repost_detail_view, name='repost_detail'),
+    path('reposts/<int:repost_id>/like/', views.repost_like_view, name='repost_like'),
+    path('reposts/<int:repost_id>/likes/', views.repost_likes_list_view, name='repost_likes_list'),
+    path('reposts/<int:repost_id>/comments/', views.repost_comments_view, name='repost_comments'),
+    path('reposts/<int:repost_id>/comments/<int:comment_id>/', views.repost_comment_edit_view, name='repost_comment_edit'),
+    path('posts/<int:post_id>/', views.post_edit_view, name='post_edit'),
+    path('posts/<int:post_id>/detail/', views.post_detail_view, name='post_detail'),
+    path('posts/delete/<int:post_id>/', views.post_delete_view, name='post_delete'),
+    path('posts/<int:post_id>/repost/', views.post_repost_view, name='post_repost'),
+    # path('posts/user/<int:user_id>/', views.user_posts_view, name='user_posts'),
+    
+    # Used by Mobile: Forum API endpoints (separate storage)
+    path('forum/', views.forum_list_create_view, name='forum_list_create'),
+    path('forum/<int:forum_id>/', views.forum_detail_edit_view, name='forum_detail'),
+    path('forum/<int:forum_id>/like/', views.forum_like_view, name='forum_like'),
+    path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
+    path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
+    path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
+    # Removed duplicate route - reposts/<int:repost_id>/ is already defined above in line 110
+    
+    # User profile social media and email endpoints
+    path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
+    path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
+    
+    # Donation endpoints removed (legacy feature)
+    
+    # # User Management API endpoints (Admin only)
+    # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
+    # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
+    
+    # Engagement Points & Leaderboard
+    path('engagement/leaderboard/', views.engagement_leaderboard_view, name='engagement_leaderboard'),
+    path('engagement/tasks/', views.engagement_tasks_view, name='engagement_tasks'),
+    path('engagement/points-tasks/', views.points_tasks_view, name='points_tasks'),
+    path('engagement/points-settings/', views.engagement_points_settings_view, name='engagement_points_settings'),
+    path('engagement/milestone-tasks-points/', views.milestone_tasks_points_view, name='milestone_tasks_points'),
+    
+    # Reward Inventory Management
+    path('inventory/', views.inventory_items_view, name='inventory_items'),
+    path('inventory/<int:item_id>/', views.inventory_item_detail_view, name='inventory_item_detail'),
+    path('rewards/give/', views.give_reward_view, name='give_reward'),
+    path('rewards/history/', views.reward_history_view, name='reward_history'),
+    path('rewards/request/', views.request_reward_view, name='request_reward'),
+    path('rewards/requests/', views.reward_requests_list_view, name='reward_requests'),
+    path('rewards/requests/<int:request_id>/approve/', views.approve_reward_request_view, name='approve_reward_request'),
+    path('rewards/requests/<int:request_id>/claim/', views.claim_reward_request_view, name='claim_reward_request'),
+    path('rewards/requests/<int:request_id>/upload-voucher/', views.upload_voucher_file_view, name='upload_voucher_file'),
+    
 ]
-
