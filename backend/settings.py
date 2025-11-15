@@ -75,7 +75,6 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:3001',
     'http://192.168.2.112:8000',
     'http://192.168.101.70:8000',
-    'http://172.16.59.112:8000',
 ]
 CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
 
@@ -120,8 +119,8 @@ CSRF_TRUSTED_ORIGINS = [
     "http://10.0.2.2:8000",
     "http://192.168.2.112:8000",
     "http://192.168.101.70:8000",
+    "https://simultaneously-wrinkliest-dominik.ngrok-free.dev",
     "http://172.16.59.112:8000",
-    "https://nxlclfy-akmia-8081.exp.direct",
     "https://nxlclfy-akmia-8081.exp.direct",
 
     "http://192.168.1.27:8000",
@@ -159,19 +158,9 @@ DATABASES = {
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
         'NAME': os.getenv('DB_NAME', 'wny'),
         'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', '12345'),
+        'PASSWORD': os.getenv('DB_PASSWORD', '12345'),#@$%
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
-        'OPTIONS': {
-            # Connection timeout settings to handle stale connections
-            'connect_timeout': 10,
-            # Automatically reconnect if connection is lost
-            'options': '-c statement_timeout=30000',  # 30 second statement timeout
-        },
-        # Connection pooling: use short-lived connections to prevent stale connections
-        # Background threads (like APScheduler) will benefit from this
-        'CONN_MAX_AGE': 60,  # 60 seconds - short enough to avoid stale connections
-        'ATOMIC_REQUESTS': False,
     }
 }
 
@@ -306,6 +295,10 @@ LOGGING = {
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Default coordinator credentials (can be overridden via environment variables)
+DEFAULT_COORDINATOR_USERNAME = os.getenv('DEFAULT_COORDINATOR_USERNAME', 'ITCOORDINATOR')
+DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHERENAYOU')
 
 # CACHING CONFIGURATION
 # Phase 2 optimization: Cache statistics for better performance

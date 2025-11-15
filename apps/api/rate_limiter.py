@@ -62,6 +62,20 @@ class APIRateLimiter:
             Tuple of (allowed, rate_limit_info)
         """
         try:
+            # Allow bypassing when global rate limiting is disabled
+            try:
+                from apps.shared.models import EngagementPointsSettings
+                settings = EngagementPointsSettings.get_settings()
+                if not getattr(settings, "rate_limiting_enabled", False):
+                    return True, {
+                        'allowed': True,
+                        'limit': 'unlimited',
+                        'remaining': 'unlimited',
+                        'action': action_type
+                    }
+            except Exception as settings_error:
+                logger.debug(f"Skipping rate limit toggle check: {settings_error}")
+
             now = time.time()
             
             # Determine rate limit based on action type

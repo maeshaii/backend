@@ -611,3 +611,67 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'points': event['points']
 		}))
 		logger.info(f"NotificationConsumer: Sent points update to WebSocket client")
+
+	async def recent_search_update(self, event):
+		"""Handle recent search updates from group"""
+		logger.info(f"NotificationConsumer: Received recent_search_update event: {event}")
+		await self.send(text_data=json.dumps({
+			'type': 'recent_search_update',
+			'recent_searches': event.get('recent_searches', []),
+			'recent': event.get('recent', [])
+		}))
+		logger.info("NotificationConsumer: Sent recent search update to WebSocket client")
+
+
+class RecentSearchConsumer(AsyncWebsocketConsumer):
+	"""Standalone WebSocket consumer for recent search updates."""
+
+	async def connect(self):
+		self.user = self.scope.get('user')
+		user_id = getattr(self.user, 'user_id', None)
+
+		if not user_id:
+			logger.warning("RecentSearchConsumer connection denied: unauthenticated user %s", self.user)
+			await self.close()
+			return
+
+		await self.accept()
+		self.group_name = f"recent_searches_{user_id}"
+		await self.channel_layer.group_add(self.group_name, self.channel_name)
+		logger.info("RecentSearchConsumer connected for user %s (channel=%s)", user_id, self.channel_name)
+
+		await self.send(text_data=json.dumps({
+			'type': 'connection_established',
+			'user_id': user_id,
+			'timestamp': timezone.now().isoformat()
+		}))
+
+	async def disconnect(self, close_code):
+		if hasattr(self, 'group_name'):
+			await self.channel_layer.group_discard(self.group_name, self.channel_name)
+			logger.info("RecentSearchConsumer disconnected (channel=%s)", self.channel_name)
+
+	async def receive(self, text_data):
+		# This consumer is currently read-only; respond with pong for keep-alive.
+		try:
+			payload = json.loads(text_data)
+		except json.JSONDecodeError:
+			payload = {}
+
+		if payload.get('type') == 'ping':
+			await self.send(text_data=json.dumps({
+				'type': 'pong',
+				'timestamp': timezone.now().isoformat()
+			}))
+		else:
+			await self.send(text_data=json.dumps({
+				'type': 'error',
+				'message': 'Unsupported message type'
+			}))
+
+	async def recent_search_update(self, event):
+		await self.send(text_data=json.dumps({
+			'type': 'recent_search_update',
+			'recent_searches': event.get('recent_searches', []),
+			'recent': event.get('recent', [])
+		}))
