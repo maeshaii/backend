@@ -1648,6 +1648,23 @@ def mark_notification_as_read(request):
         notification = Notification.objects.get(notification_id=notification_id)
         notification.is_read = True
         notification.save()
+        
+        # Broadcast updated notification count immediately
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification_count
+            user = notification.user
+            # Calculate unread count based on user type
+            if hasattr(user.account_type, 'user') and user.account_type.user:
+                count = Notification.objects.filter(user_id=user.user_id, is_read=False).count()
+            elif hasattr(user.account_type, 'ojt') and user.account_type.ojt:
+                count = Notification.objects.filter(user_id=user.user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
+            else:
+                count = Notification.objects.filter(user_id=user.user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
+            
+            broadcast_notification_count(user.user_id, count)
+        except Exception as broadcast_error:
+            logger.error(f"Error broadcasting notification count after mark as read: {broadcast_error}")
+        
         return JsonResponse({'success': True, 'message': 'Notification marked as read'})
     except Notification.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Notification not found'}, status=404)
@@ -1663,6 +1680,14 @@ def mark_all_notifications_as_read(request):
     try:
         user = User.objects.get(user_id=user_id)
         count = Notification.objects.filter(user_id=user_id, is_read=False).update(is_read=True)
+        
+        # Broadcast updated notification count immediately (should be 0)
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification_count
+            broadcast_notification_count(user_id, 0)
+        except Exception as broadcast_error:
+            logger.error(f"Error broadcasting notification count after mark all as read: {broadcast_error}")
+        
         return JsonResponse({'success': True, 'message': f'{count} notifications marked as read', 'count': count})
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)

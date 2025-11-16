@@ -24,6 +24,7 @@ class NotificationBroadcaster:
     def broadcast_notification(self, notification):
         """
         Broadcast a single notification to the user's notification channel.
+        Also broadcasts the updated notification count immediately.
         
         Args:
             notification: Notification instance to broadcast
@@ -62,6 +63,24 @@ class NotificationBroadcaster:
             )
             
             logger.info(f"Successfully broadcasted notification {notification.notification_id} to user {notification.user.user_id}")
+            
+            # Calculate and broadcast updated notification count immediately
+            try:
+                user = notification.user
+                # Calculate unread count based on user type
+                if hasattr(user.account_type, 'user') and user.account_type.user:
+                    count = Notification.objects.filter(user_id=user.user_id, is_read=False).count()
+                elif hasattr(user.account_type, 'ojt') and user.account_type.ojt:
+                    count = Notification.objects.filter(user_id=user.user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
+                else:
+                    count = Notification.objects.filter(user_id=user.user_id, is_read=False).exclude(notif_type__iexact='tracker').count()
+                
+                # Broadcast count update immediately
+                self.broadcast_notification_count(user.user_id, count)
+                logger.info(f"Broadcasted immediate count update: {count} for user {user.user_id}")
+                
+            except Exception as count_error:
+                logger.error(f"Error broadcasting notification count after notification: {count_error}")
             
         except Exception as e:
             logger.error(f"Error broadcasting notification {notification.notification_id}: {e}")
