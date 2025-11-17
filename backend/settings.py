@@ -369,6 +369,26 @@ if os.getenv('EMAIL_BACKEND'):
     EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
     EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 
+# SMS Configuration - Philippine SMS Services
+SMS_PROVIDER = os.getenv('SMS_PROVIDER', 'globe').lower()  # 'globe', 'semaphore', or 'twilio'
+SMS_ENABLED = os.getenv('SMS_ENABLED', 'false').lower() == 'true'
+
+# Globe Labs SMS configuration (Philippine - Globe Telecom)
+GLOBE_APP_ID = os.getenv('GLOBE_APP_ID')
+GLOBE_APP_SECRET = os.getenv('GLOBE_APP_SECRET')
+GLOBE_SHORT_CODE = os.getenv('GLOBE_SHORT_CODE')
+GLOBE_PASSPHRASE = os.getenv('GLOBE_PASSPHRASE', '')
+
+# Semaphore SMS configuration (for Philippine numbers)
+SEMAPHORE_API_KEY = os.getenv('SEMAPHORE_API_KEY')
+SEMAPHORE_SENDER_NAME = os.getenv('SEMAPHORE_SENDER_NAME', 'CTU')
+
+# Twilio SMS configuration (legacy - kept for future use)
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_FROM_NUMBER = os.getenv('TWILIO_FROM_NUMBER')
+TWILIO_SMS_ENABLED = os.getenv('TWILIO_SMS_ENABLED', '').lower() == 'true'
+
 # Security Settings for Production
 if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True

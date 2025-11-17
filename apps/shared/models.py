@@ -12,6 +12,23 @@ from cryptography.fernet import Fernet
 import base64, hashlib
 
 
+class GlobeAccessToken(models.Model):
+    """Store Globe Labs OAuth access tokens for subscribed numbers"""
+    subscriber_number = models.CharField(max_length=20, unique=True, db_index=True)
+    access_token = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        db_table = 'globe_access_tokens'
+        verbose_name = 'Globe Access Token'
+        verbose_name_plural = 'Globe Access Tokens'
+    
+    def __str__(self):
+        return f"Globe Token for {self.subscriber_number}"
+
+
 def _normalize_text(value: Optional[str]) -> Optional[str]:
     if not value:
         return None

@@ -1403,6 +1403,392 @@ def send_email_reminder_view(request):
             'success': False,
             'message': f'Server error: {str(e)}'
         }, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_sms_reminder_view(request):
+    """
+    Send tracker form reminders via SMS using Semaphore (Philippine SMS service).
+    
+    Expected payload:
+    {
+        "user_ids": [1, 2, 3],
+        "message": "Text message with [User's Name] placeholder",
+        "tracker_link_base": "https://domain.com"
+    }
+    """
+    try:
+        # Check if SMS is enabled
+        if not getattr(settings, 'SMS_ENABLED', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'SMS is disabled on this server.'
+            }, status=503)
+        
+        # Check SMS provider
+        sms_provider = getattr(settings, 'SMS_PROVIDER', 'globe').lower()
+        
+        # Verify credentials based on provider
+        if sms_provider == 'globe':
+            if not all([
+                getattr(settings, 'GLOBE_APP_ID', None),
+                getattr(settings, 'GLOBE_APP_SECRET', None),
+                getattr(settings, 'GLOBE_SHORT_CODE', None)
+            ]):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Globe Labs credentials are not configured. Please contact the administrator.'
+                }, status=500)
+        elif sms_provider == 'semaphore':
+            if not getattr(settings, 'SEMAPHORE_API_KEY', None):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Semaphore API key is not configured. Please contact the administrator.'
+                }, status=500)
+        else:  # twilio
+            if not all([
+                getattr(settings, 'TWILIO_ACCOUNT_SID', None),
+                getattr(settings, 'TWILIO_AUTH_TOKEN', None),
+                getattr(settings, 'TWILIO_FROM_NUMBER', None)
+            ]):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'SMS credentials are not configured. Please contact the administrator.'
+                }, status=500)
+        
+        # Parse request data
+        data = json.loads(request.body)
+        user_ids = data.get('user_ids', [])
+        message = data.get('message', '')
+        tracker_link_base = data.get('tracker_link_base', '')
+        
+        # Validation
+        if not user_ids:
+            return JsonResponse({
+                'success': False,
+                'message': 'No users selected'
+            }, status=400)
+        
+        if not message:
+            return JsonResponse({
+                'success': False,
+                'message': 'Message content is required'
+            }, status=400)
+        
+        if not tracker_link_base:
+            return JsonResponse({
+                'success': False,
+                'message': 'Tracker link base URL is required'
+            }, status=400)
+        
+        # Helper function to normalize phone numbers
+        def normalize_phone_number(phone: str, provider: str = 'semaphore') -> str | None:
+            """
+            Convert Philippine phone numbers to the correct format for SMS provider.
+            Semaphore: 09171234567 (local format)
+            Twilio: +639171234567 (E.164 format)
+            """
+            if not phone:
+                return None
+            
+            # Remove all non-digit characters
+            digits = ''.join(filter(str.isdigit, phone))
+            
+            # Handle different Philippine phone formats
+            if digits.startswith('63'):
+                # Has country code (639171234567)
+                local_number = '0' + digits[2:]  # Convert to 09171234567
+            elif digits.startswith('0'):
+                # Already in local format (09171234567)
+                local_number = digits
+            elif len(digits) == 10:
+                # Missing leading 0 (9171234567)
+                local_number = '0' + digits
+            else:
+                return None
+            
+            # Return format based on provider
+            if provider == 'semaphore':
+                return local_number  # 09171234567
+            else:  # twilio
+                return f"+63{local_number[1:]}"  # +639171234567
+        
+        # Helper function to build SMS body (plain text, no HTML)
+        def build_sms_body(base_text: str, full_name: str, tracker_link: str) -> str:
+            """Convert HTML-like text to plain SMS and personalize it"""
+            import re
+            # Strip HTML tags
+            plain = re.sub(r'<[^>]+>', '', base_text)
+            # Replace placeholders
+            plain = plain.replace('[User\'s Name]', full_name)
+            # Replace the "Fill Out the Tracker Form" text with actual link
+            plain = plain.replace('👉 Fill Out the Tracker Form', f'👉 Fill out the form: {tracker_link}')
+            # Clean up extra whitespace
+            plain = re.sub(r'\n\s*\n', '\n\n', plain)
+            return plain.strip()
+        
+        # Helper function to send SMS via Semaphore
+        def send_sms_semaphore(phone_number: str, sms_body: str) -> dict:
+            """Send SMS using Semaphore API"""
+            import requests
+            
+            try:
+                response = requests.post(
+                    'https://api.semaphore.co/api/v4/messages',
+                    data={
+                        'apikey': settings.SEMAPHORE_API_KEY,
+                        'number': phone_number,  # Format: 09171234567
+                        'message': sms_body,
+                        'sendername': settings.SEMAPHORE_SENDER_NAME
+                    },
+                    timeout=10
+                )
+                
+                # Log the raw response for debugging
+                logger.info(f"Semaphore API response status: {response.status_code}")
+                logger.info(f"Semaphore API response text: {response.text[:200]}")
+                
+                # Check if response is empty
+                if not response.text or response.text.strip() == '':
+                    return {'success': False, 'error': 'Empty response from Semaphore API. Check your API key.'}
+                
+                try:
+                    result = response.json()
+                except ValueError as json_err:
+                    return {'success': False, 'error': f'Invalid JSON response: {response.text[:100]}'}
+                
+                if response.status_code == 200:
+                    # Semaphore returns different response formats
+                    if isinstance(result, list) and len(result) > 0:
+                        first_result = result[0]
+                        if first_result.get('status') == 'success' or first_result.get('message_id'):
+                            return {'success': True, 'message_id': first_result.get('message_id', 'N/A')}
+                        else:
+                            error_msg = first_result.get('message', 'Unknown error')
+                            return {'success': False, 'error': error_msg}
+                    elif isinstance(result, dict):
+                        if result.get('status') == 'success' or result.get('message_id'):
+                            return {'success': True, 'message_id': result.get('message_id', 'N/A')}
+                        else:
+                            error_msg = result.get('message', 'Unknown error')
+                            return {'success': False, 'error': error_msg}
+                    else:
+                        return {'success': False, 'error': f'Unexpected response format: {str(result)[:100]}'}
+                else:
+                    error_msg = result.get('message', f'HTTP {response.status_code}')
+                    return {'success': False, 'error': error_msg}
+                    
+            except requests.exceptions.Timeout:
+                return {'success': False, 'error': 'Request timeout - Semaphore API not responding'}
+            except requests.exceptions.RequestException as e:
+                return {'success': False, 'error': f'Network error: {str(e)}'}
+            except Exception as e:
+                return {'success': False, 'error': f'Unexpected error: {str(e)}'}
+        
+        # Helper function to send SMS via Globe Labs
+        def send_sms_globe(phone_number: str, sms_body: str) -> dict:
+            """Send SMS using Globe Labs API"""
+            import requests
+            from apps.shared.models import GlobeAccessToken
+            
+            try:
+                # Globe Labs uses subscriber number format (9171234567 without leading 0)
+                # Convert 09171234567 to 9171234567
+                if phone_number.startswith('0'):
+                    subscriber_number = phone_number[1:]
+                else:
+                    subscriber_number = phone_number
+                
+                # Get access token for this subscriber
+                try:
+                    token_obj = GlobeAccessToken.objects.get(
+                        subscriber_number=subscriber_number,
+                        is_active=True
+                    )
+                    access_token = token_obj.access_token
+                except GlobeAccessToken.DoesNotExist:
+                    return {
+                        'success': False,
+                        'error': f'No access token for {phone_number}. User must text INFO to 21665316 and reply YES to subscribe.'
+                    }
+                
+                # Globe Labs SMS API endpoint
+                url = f"https://devapi.globelabs.com.ph/smsmessaging/v1/outbound/{settings.GLOBE_SHORT_CODE}/requests"
+                
+                payload = {
+                    "outboundSMSMessageRequest": {
+                        "clientCorrelator": f"ctu_{subscriber_number}",
+                        "senderAddress": settings.GLOBE_SHORT_CODE,
+                        "outboundSMSTextMessage": {
+                            "message": sms_body
+                        },
+                        "address": subscriber_number
+                    }
+                }
+                
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {access_token}'
+                }
+                
+                response = requests.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=10
+                )
+                
+                # Log the response for debugging
+                logger.info(f"Globe Labs API response status: {response.status_code}")
+                logger.info(f"Globe Labs API response text: {response.text[:200]}")
+                
+                if response.status_code in [200, 201]:
+                    try:
+                        result = response.json()
+                        # Globe Labs returns outboundSMSMessageRequest with resourceURL
+                        if 'outboundSMSMessageRequest' in result:
+                            resource_url = result['outboundSMSMessageRequest'].get('resourceURL', 'N/A')
+                            return {'success': True, 'message_id': resource_url}
+                        else:
+                            return {'success': True, 'message_id': 'sent'}
+                    except ValueError:
+                        return {'success': True, 'message_id': 'sent'}
+                else:
+                    try:
+                        error_result = response.json()
+                        error_msg = error_result.get('error', {}).get('message', f'HTTP {response.status_code}')
+                    except:
+                        error_msg = f'HTTP {response.status_code}: {response.text[:100]}'
+                    return {'success': False, 'error': error_msg}
+                    
+            except requests.exceptions.Timeout:
+                return {'success': False, 'error': 'Request timeout - Globe Labs API not responding'}
+            except requests.exceptions.RequestException as e:
+                return {'success': False, 'error': f'Network error: {str(e)}'}
+            except Exception as e:
+                return {'success': False, 'error': f'Unexpected error: {str(e)}'}
+        
+        # Helper function to send SMS via Twilio (fallback)
+        def send_sms_twilio(phone_number: str, sms_body: str) -> dict:
+            """Send SMS using Twilio API"""
+            try:
+                from twilio.rest import Client as TwilioClient
+                
+                client = TwilioClient(
+                    settings.TWILIO_ACCOUNT_SID,
+                    settings.TWILIO_AUTH_TOKEN
+                )
+                
+                message_response = client.messages.create(
+                    body=sms_body,
+                    from_=settings.TWILIO_FROM_NUMBER,
+                    to=phone_number
+                )
+                
+                return {'success': True, 'message_id': message_response.sid}
+                
+            except Exception as e:
+                return {'success': False, 'error': str(e)}
+        
+        # Fetch users with their profiles
+        users = User.objects.filter(
+            user_id__in=user_ids
+        ).select_related('profile')
+        
+        sent_count = 0
+        failed_count = 0
+        no_phone_count = 0
+        errors = []
+        
+        for user in users:
+            try:
+                # Check if user has a profile with phone number
+                if not hasattr(user, 'profile') or not user.profile:
+                    no_phone_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': 'No profile found'
+                    })
+                    continue
+                
+                # Get phone number and normalize it
+                raw_phone = getattr(user.profile, 'phone_num', None)
+                phone_number = normalize_phone_number(raw_phone, sms_provider)
+                
+                if not phone_number:
+                    no_phone_count += 1
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': f'Invalid or missing phone number: {raw_phone}'
+                    })
+                    continue
+                
+                # Personalize the message
+                full_name = f"{user.f_name} {user.l_name}"
+                
+                # Generate tracker link
+                tracker_link = f"{tracker_link_base}/alumni/tracker?user_id={user.user_id}"
+                
+                # Build plain text SMS body
+                sms_body = build_sms_body(message, full_name, tracker_link)
+                
+                # Send SMS based on provider
+                if sms_provider == 'globe':
+                    result = send_sms_globe(phone_number, sms_body)
+                elif sms_provider == 'semaphore':
+                    result = send_sms_semaphore(phone_number, sms_body)
+                else:  # twilio
+                    result = send_sms_twilio(phone_number, sms_body)
+                
+                if result['success']:
+                    sent_count += 1
+                    logger.info(f"SMS sent successfully to {full_name} ({phone_number}) via {sms_provider.upper()}, ID: {result.get('message_id')}")
+                else:
+                    failed_count += 1
+                    error_msg = result.get('error', 'Unknown error')
+                    logger.error(f"Failed to send SMS to {full_name} ({phone_number}): {error_msg}")
+                    errors.append({
+                        'user': f"{user.f_name} {user.l_name}",
+                        'reason': error_msg
+                    })
+                
+            except Exception as e:
+                failed_count += 1
+                error_msg = str(e)
+                logger.error(f"Failed to send SMS to {user.f_name} {user.l_name}: {error_msg}")
+                errors.append({
+                    'user': f"{user.f_name} {user.l_name}",
+                    'reason': error_msg
+                })
+        
+        # Prepare response
+        response_data = {
+            'success': sent_count > 0,
+            'sent': sent_count,
+            'failed': failed_count,
+            'no_phone': no_phone_count,
+            'total': len(user_ids)
+        }
+        
+        if errors:
+            response_data['errors'] = errors
+        
+        return JsonResponse(response_data)
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON payload'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error in send_sms_reminder_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def notifications_view(request):
@@ -10118,6 +10504,55 @@ def upload_voucher_file_view(request, request_id):
     
     except Exception as e:
         logger.error(f"upload_voucher_file_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+# Globe Labs OAuth Callback
+@csrf_exempt
+@api_view(['GET', 'POST'])
+def globe_callback_view(request):
+    """
+    Globe Labs OAuth callback - receives access token when user subscribes
+    
+    When user texts INFO to 21665316 and replies YES,
+    Globe sends: access_token and subscriber_number to this endpoint
+    """
+    try:
+        # Globe sends data as GET parameters
+        access_token = request.GET.get('access_token') or request.POST.get('access_token')
+        subscriber_number = request.GET.get('subscriber_number') or request.POST.get('subscriber_number')
+        
+        logger.info(f'Globe callback received: token={access_token[:20] if access_token else None}..., number={subscriber_number}')
+        
+        if not access_token or not subscriber_number:
+            return JsonResponse({
+                'success': False,
+                'message': 'Missing access_token or subscriber_number'
+            }, status=400)
+        
+        # Store or update the access token
+        from apps.shared.models import GlobeAccessToken
+        
+        token_obj, created = GlobeAccessToken.objects.update_or_create(
+            subscriber_number=subscriber_number,
+            defaults={
+                'access_token': access_token,
+                'is_active': True
+            }
+        )
+        
+        action = 'created' if created else 'updated'
+        logger.info(f'Globe access token {action} for {subscriber_number}')
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Access token {action} successfully',
+            'subscriber_number': subscriber_number
+        })
+        
+    except Exception as e:
+        logger.error(f'Error in globe_callback_view: {str(e)}')
         return JsonResponse({
             'success': False,
             'message': f'Error: {str(e)}'
