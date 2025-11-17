@@ -286,7 +286,8 @@ class MessageSerializer(serializers.ModelSerializer):
         read_only_fields = ['message_id', 'sender', 'created_at']
 
 class ConversationSerializer(serializers.ModelSerializer):
-    participants = UserSerializer(many=True, read_only=True)
+    # FIX: Use SmallUserSerializer instead of full UserSerializer to avoid N+1 queries on nested data
+    participants = SmallUserSerializer(many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_participant = serializers.SerializerMethodField()
@@ -301,13 +302,17 @@ class ConversationSerializer(serializers.ModelSerializer):
         read_only_fields = ['conversation_id', 'created_at', 'updated_at']
     
     def get_last_message(self, obj):
+        # FIX: Use prefetched data if available
         last_msg = obj.get_last_message()
         if last_msg:
+            # Safely access sender data (should be prefetched from view)
+            sender_name = getattr(last_msg.sender, 'full_name', 'Unknown') if last_msg.sender else 'Unknown'
+            sender_id = getattr(last_msg.sender, 'user_id', None) if last_msg.sender else None
             return {
                 'message_id': last_msg.message_id,
                 'content': last_msg.content,
-                'sender_name': last_msg.sender.full_name,
-                'sender_id': last_msg.sender.user_id,
+                'sender_name': sender_name,
+                'sender_id': sender_id,
                 'created_at': last_msg.created_at,
                 'is_read': last_msg.is_read,
                 'message_type': last_msg.message_type,
@@ -323,6 +328,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     def get_other_participant(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
+            # FIX: Use prefetched participants to avoid extra queries
             other_user = obj.get_other_participant(request.user)
             if other_user:
                 from apps.api.views import build_profile_pic_url

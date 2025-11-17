@@ -12,8 +12,9 @@ urlpatterns = [
     path('csrf/', views.get_csrf_token, name='get_csrf_token'),
     # Used by Mobile: legacy login (mobile primarily uses /api/token/)
     path('login/', views.login_view, name='login_view'),
-    # Used by Mobile: forgot password flow
+    # Used by Mobile: forgot password flow (secure token-based)
     path('forgot-password/', views.forgot_password_view, name='forgot_password'),
+    path('reset-password/', views.reset_password_view, name='reset_password'),
     # Used by Mobile: JWT obtain (POST acc_username, acc_password)
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     # Used by Mobile: JWT refresh (POST refresh)
@@ -33,7 +34,7 @@ urlpatterns = [
     # OJT-specific routes for coordinators
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
-    path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
+    # path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),  # TODO: Implement this view
     path('ojt/students-by-company/', views.ojt_students_by_company_view, name='ojt_students_by_company'),
     path('ojt/students/', views.get_ojt_students_view, name='get_ojt_students'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
@@ -75,6 +76,8 @@ urlpatterns = [
     path('tracker/file-stats/', file_upload_stats_view, name='file_upload_stats'),
     path('send-reminder/', send_reminder_view, name='send_reminder'),
     path('send-email-reminder/', views.send_email_reminder_view, name='send_email_reminder'),
+    path('send-sms-reminder/', views.send_sms_reminder_view, name='send_sms_reminder'),
+    path('globe/callback/', views.globe_callback_view, name='globe_callback'),
     path('notifications/', notifications_view, name='notifications'),
     path('notifications/count/', views.notifications_count_view, name='notifications_count'),
     path('notifications/delete/', delete_notifications_view, name='delete_notifications'),

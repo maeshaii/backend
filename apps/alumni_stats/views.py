@@ -4,6 +4,8 @@ from django.shortcuts import render
 from django.http import JsonResponse
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+# Security: Role-based permissions
+from apps.api.permissions import IsAdminOrPeso, IsAdminOrCoordinator
 from apps.shared.models import User, TrackerResponse, Question
 from collections import Counter
 from django.db import models
@@ -64,9 +66,13 @@ def count_award_recipients(qs):
 
 @cache_statistics(timeout=30)  # Cache for 30 seconds
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrPeso])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Statistics for admins/PESO only
 def alumni_statistics_view(request):
-    """Simple overview of alumni employment status counts and available years."""
+    """
+    Simple overview of alumni employment status counts and available years - Admin/PESO only
+    
+    ⚠️ SECURITY: Restricted to Admin/PESO to protect aggregate alumni data
+    """
     try:
         year = request.GET.get('year')
         course = request.GET.get('program')
@@ -502,9 +508,13 @@ def generate_statistics_view(request):
         return JsonResponse({'success': False, 'message': 'Failed to generate statistics'}, status=500)
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrPeso])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Export for admins/PESO only
 def export_detailed_alumni_data(request):
-    """Export detailed alumni data for the current filter, including tracker answers."""
+    """
+    Export detailed alumni data - Admin/PESO only
+    
+    ⚠️ SECURITY: Restricted to Admin/PESO - Exports sensitive alumni data
+    """
     try:
         year = request.GET.get('year', 'ALL')
         course = request.GET.get('program', 'ALL')
