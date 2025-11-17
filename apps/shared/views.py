@@ -215,9 +215,40 @@ def import_exported_alumni_excel(request):
     from django.http import HttpResponse
     return HttpResponse("Import exported functionality not implemented", status=501)
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])  # TODO: Change to IsAdmin when implemented - EXPORTS PASSWORDS!
 def export_initial_passwords(request):
-    """Placeholder for initial passwords export functionality"""
+    """
+    Export initial passwords - CRITICAL SECURITY ENDPOINT
+    
+    ⚠️ SECURITY WARNING: This endpoint will export user passwords!
+    ⚠️ MUST be restricted to Admin only when implemented
+    ⚠️ Currently placeholder - returns 501 Not Implemented
+    
+    TODO when implementing:
+    1. Change @permission_classes to [IsAdmin]
+    2. Add security audit logging
+    3. Implement rate limiting
+    4. Add confirmation step
+    """
     from django.http import HttpResponse
+    
+    # SECURITY CHECK: Verify user is admin (extra layer of protection)
+    try:
+        account_type = getattr(request.user, 'account_type', None)
+        is_admin = account_type and getattr(account_type, 'admin', False)
+        
+        if not is_admin:
+            logger.warning(
+                f"CRITICAL: Non-admin user {request.user.user_id} ({request.user.acc_username}) "
+                f"attempted to access password export endpoint"
+            )
+            return HttpResponse("Forbidden - Admin access only", status=403)
+    except Exception as e:
+        logger.error(f"Error checking admin permission for password export: {e}")
+        return HttpResponse("Forbidden", status=403)
+    
+    # Placeholder - when implemented, add security logging here
     return HttpResponse("Export passwords functionality not implemented", status=501)
 
 

@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('shared', '0117_add_draft_fields_to_tracker_response'),
+        ('shared', '0126_add_tracker_form_enabled'),
     ]
 
     operations = [

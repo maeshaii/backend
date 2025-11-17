@@ -47,6 +47,11 @@ from django.core.mail import send_mail
 from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework_simplejwt.authentication import JWTAuthentication
+# 🔒 SECURITY: Import custom permission classes for role-based access control
+from apps.api.permissions import (
+    IsAdmin, IsPeso, IsCoordinator, IsAlumni, IsOJT,
+    IsAdminOrPeso, IsAdminOrCoordinator, IsAlumniOrOJT
+)
 from rest_framework.parsers import MultiPartParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import status
@@ -572,7 +577,7 @@ def get_current_user_from_request(request):
 # login has been removed. All authentication uses securely hashed passwords.
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+# 🔒 SECURITY FIX: Removed @permission_classes([IsAuthenticated]) - login should be accessible without auth
 def login_view(request):
     """Used by Mobile (legacy) – mobile prefers POST /api/token/ for JWT."""
     """
@@ -772,7 +777,7 @@ def change_password_view(request):
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 @api_view(["POST"])
 @authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX
 @csrf_exempt
 def import_alumni_view(request):
     if request.method == "OPTIONS":
@@ -1209,7 +1214,7 @@ def import_alumni_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': f'Server error: {str(e)}'}, status=500)
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrPeso])  # 🔒 SECURITY FIX
 def alumni_statistics_view(request):
     """Comprehensive alumni statistics including employment status counts and available years."""
     try:
@@ -1385,10 +1390,12 @@ def send_reminder_view(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX: Changed from IsAuthenticated
 def send_email_reminder_view(request):
     """
     Send tracker form reminders via email to selected users.
+    
+    🔒 SECURITY: Only admins and coordinators can send bulk emails.
     
     Expected payload:
     {
@@ -1551,10 +1558,12 @@ def send_email_reminder_view(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX: Changed from IsAuthenticated
 def send_sms_reminder_view(request):
     """
     Send tracker form reminders via SMS using Semaphore (Philippine SMS service).
+    
+    🔒 SECURITY: Only admins and coordinators can send bulk SMS.
     
     Expected payload:
     {
@@ -1940,6 +1949,21 @@ def notifications_view(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
+    
+    # 🔒 SECURITY: IDOR Protection - Verify user can access these notifications
+    requesting_user_id = request.user.user_id
+    is_admin = getattr(request.user.account_type, 'admin', False)
+    
+    if str(requesting_user_id) != str(user_id) and not is_admin:
+        logger.warning(
+            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} ({request.user.acc_username}) "
+            f"attempted to access notifications for user {user_id}"
+        )
+        return JsonResponse({
+            'success': False,
+            'error': 'Permission denied. You can only access your own notifications.'
+        }, status=403)
+    
     try:
         user = User.objects.get(user_id=user_id)
     except User.DoesNotExist:
@@ -1991,6 +2015,20 @@ def notifications_view(request):
 @permission_classes([IsAuthenticated])
 def notifications_count_view(request):
     user_id = request.GET.get('user_id')
+    if not user_id:
+        return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
+    
+    # 🔒 SECURITY: IDOR Protection
+    requesting_user_id = request.user.user_id
+    is_admin = getattr(request.user.account_type, 'admin', False)
+    
+    if str(requesting_user_id) != str(user_id) and not is_admin:
+        logger.warning(
+            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to access "
+            f"notification count for user {user_id}"
+        )
+        return JsonResponse({'success': False, 'error': 'Permission denied.'}, status=403)
+    
     if not user_id:
         return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
     try:
@@ -2122,7 +2160,7 @@ def delete_notifications_view(request):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 # OJT-specific import function for coordinators
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX
 def import_ojt_view(request):
     print("IMPORT OJT VIEW CALLED")  # Debug print
     if request.method == "OPTIONS":
@@ -4017,8 +4055,13 @@ def ojt_status_update_view(request):
 
 # Clear ALL OJT-related data imported (OJT users, OJTInfo, OJTImport, and AcademicInfo for OJT users)
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated to IsAdmin
 def ojt_clear_all_view(request):
+    # 🔒 SECURITY: Log this critical mass-deletion operation
+    logger.warning(
+        f"🔒 CRITICAL OPERATION: OJT Clear All requested by user {request.user.user_id} "
+        f"(username: {request.user.acc_username})"
+    )
     try:
         from apps.shared.models import (
             OJTImport, OJTInfo, AcademicInfo, OJTCompanyProfile,
@@ -4696,6 +4739,16 @@ def profile_bio_view(request, user_id):
         if request.method == "GET":
             return JsonResponse({'profile_bio': profile.profile_bio or ''})
         elif request.method == "PUT":
+            # 🔒 SECURITY: IDOR Protection for profile updates
+            requesting_user_id = request.user.user_id
+            is_admin = getattr(request.user.account_type, 'admin', False)
+            
+            if str(requesting_user_id) != str(user_id) and not is_admin:
+                logger.warning(
+                    f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update bio of user {user_id}"
+                )
+                return JsonResponse({'success': False, 'error': 'Permission denied'}, status=403)
+            
             data = json.loads(request.body)
             profile.profile_bio = data.get('profile_bio', '')
             profile.save()
@@ -4710,6 +4763,16 @@ def update_alumni_profile(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return Response({'message': 'Missing user_id'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # 🔒 SECURITY: IDOR Protection
+    requesting_user_id = request.user.user_id
+    is_admin = getattr(request.user.account_type, 'admin', False)
+    
+    if str(requesting_user_id) != str(user_id) and not is_admin:
+        logger.warning(
+            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update profile of user {user_id}"
+        )
+        return Response({'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         user = User.objects.get(user_id=user_id)
@@ -4845,6 +4908,17 @@ def alumni_employment_view(request, user_id):
         from apps.shared.services import UserService
         
         user = User.objects.get(user_id=user_id)
+        
+        # 🔒 SECURITY: IDOR Protection
+        requesting_user_id = request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+        
+        if request.method == 'PUT':
+            if str(requesting_user_id) != str(user_id) and not is_admin:
+                logger.warning(
+                    f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update employment of user {user_id}"
+                )
+                return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         # Determine account type
         is_alumni = user.account_type.user if hasattr(user.account_type, 'user') else False
@@ -5246,6 +5320,16 @@ def delete_alumni_profile_pic(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return Response({'message': 'Missing user_id'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # 🔒 SECURITY: IDOR Protection
+    requesting_user_id = request.user.user_id
+    is_admin = getattr(request.user.account_type, 'admin', False)
+    
+    if str(requesting_user_id) != str(user_id) and not is_admin:
+        logger.warning(
+            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to delete profile pic of user {user_id}"
+        )
+        return Response({'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         user = User.objects.get(user_id=user_id)
@@ -8465,8 +8549,19 @@ def userprofile_email_view(request, user_id):
 @api_view(["POST"])
 def forgot_password_view(request):
     """
-    Forgot password endpoint - validates user credentials and generates temporary password.
+    🔐 SECURE Password Reset Request - Step 1 of 2
+    
+    Validates user email and sends a secure password reset link.
     Only available for alumni (user=True) and OJT (ojt=True) account types.
+    
+    Security Features:
+    - Only requires email (reduces information exposure)
+    - Generates secure one-time token (expires in 1 hour)
+    - Sends reset link via email (not password itself)
+    - Rate-limited per user (prevents abuse)
+    - Generic error messages (prevents user enumeration)
+    
+    Expected payload: { "email": "user@example.com" }
     """
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
@@ -8477,91 +8572,402 @@ def forgot_password_view(request):
 
     try:
         data = json.loads(request.body)
-        ctu_id = data.get('ctu_id', '').strip()
         email = data.get('email', '').strip()
-        last_name = data.get('last_name', '').strip()
-        first_name = data.get('first_name', '').strip()
-        middle_name = data.get('middle_name', '').strip()
 
-        # Validate required fields
-        if not all([ctu_id, email, last_name, first_name]):
+        # Validate email field
+        if not email:
             return JsonResponse({
                 'success': False, 
-                'message': 'All fields are required: CTU ID, Email, Last Name, First Name'
+                'message': 'Email is required'
             }, status=400)
 
-        # Find user by CTU ID
-        try:
-            user = User.objects.select_related('profile', 'account_type').get(acc_username=ctu_id)
-        except User.DoesNotExist:
-            logger.warning(f"Forgot password failed: CTU ID {ctu_id} does not exist.")
+        # Basic email format validation
+        import re
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, email):
             return JsonResponse({
-                'success': False, 
-                'message': 'Invalid credentials. Please check your information and try again.'
-            }, status=404)
+                'success': False,
+                'message': 'Please enter a valid email address'
+            }, status=400)
+
+        # 🔒 SECURITY: Rate Limiting - Prevent brute force/spam attacks
+        from django.core.cache import cache
+        
+        # Get client IP address
+        def get_client_ip(request):
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+            if x_forwarded_for:
+                ip = x_forwarded_for.split(',')[0]
+            else:
+                ip = request.META.get('REMOTE_ADDR')
+            return ip
+        
+        client_ip = get_client_ip(request)
+        
+        # Rate limit by email (max 3 per hour)
+        email_cache_key = f"password_reset_email_{email.lower()}"
+        email_attempts = cache.get(email_cache_key, 0)
+        
+        # Rate limit by IP (max 5 per hour across all emails)
+        ip_cache_key = f"password_reset_ip_{client_ip}"
+        ip_attempts = cache.get(ip_cache_key, 0)
+        
+        if email_attempts >= 3:
+            logger.warning(f"🔒 SECURITY: Rate limit exceeded for email: {email}")
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
+        
+        if ip_attempts >= 5:
+            logger.warning(f"🔒 SECURITY: Rate limit exceeded for IP: {client_ip}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Too many password reset attempts. Please try again later.'
+            }, status=429)
+        
+        # Increment counters (expire in 1 hour)
+        cache.set(email_cache_key, email_attempts + 1, 3600)
+        cache.set(ip_cache_key, ip_attempts + 1, 3600)
+
+        # Check if email is configured on server
+        if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
+            logger.error("Password reset failed: Email not configured on server")
+            return JsonResponse({
+                'success': False,
+                'message': 'Email service is not configured. Please contact the administrator.'
+            }, status=500)
+
+        # Find user by email
+        # 🔒 SECURITY: Use generic error message to prevent user enumeration
+        try:
+            user = User.objects.select_related('profile', 'account_type').get(
+                profile__email__iexact=email
+            )
+        except User.DoesNotExist:
+            # 🔒 SECURITY LOG: Track attempts to non-existent emails (for monitoring abuse)
+            logger.warning(
+                f"🔒 SECURITY: Password reset attempt for NON-EXISTENT email: {email} "
+                f"from IP: {client_ip}"
+            )
+            # Return success message anyway to prevent user enumeration
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
 
         # Check if user is alumni or OJT (not admin, peso, or coordinator)
         if not (user.account_type.user or user.account_type.ojt):
-            logger.warning(f"Forgot password denied: User {ctu_id} is not alumni or OJT.")
+            logger.warning(f"Password reset denied: User {user.acc_username} is not alumni or OJT.")
+            # Return generic message for security
             return JsonResponse({
-                'success': False, 
-                'message': 'Password reset is only available for alumni and OJT students.'
-            }, status=403)
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
 
-        # Validate credentials against user data
-        profile = getattr(user, 'profile', None)
-        user_email = getattr(profile, 'email', None) if profile else None
-        
-        # Case-insensitive comparison for names and email
-        # Check middle name if provided, otherwise allow empty middle name
-        middle_name_match = True
-        if middle_name:  # If middle name is provided, it must match
-            user_middle_name = user.m_name or ''
-            middle_name_match = user_middle_name.lower() == middle_name.lower()
-        
-        if (user.f_name.lower() != first_name.lower() or 
-            user.l_name.lower() != last_name.lower() or
-            not middle_name_match or
-            (user_email and user_email.lower() != email.lower())):
-            logger.warning(f"Forgot password failed: Credential mismatch for user {ctu_id}.")
-            return JsonResponse({
-                'success': False, 
-                'message': 'Invalid credentials. Please check your information and try again.'
-            }, status=400)
+        # 🔒 SECURITY: Invalidate any existing active tokens for this user
+        from apps.shared.models import PasswordResetToken
+        PasswordResetToken.objects.filter(
+            user=user,
+            used=False,
+            expires_at__gt=timezone.now()
+        ).update(used=True, used_at=timezone.now())
 
-        # Generate temporary password
-        alphabet = string.ascii_letters + string.digits
-        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        # Generate secure reset token
+        token = PasswordResetToken.generate_token()
+        expires_at = timezone.now() + timedelta(hours=1)  # 1 hour expiration
         
-        # Update user password
-        user.set_password(temp_password)
-        user.save()
-        
-        # Store temporary password for tracking
+        # Create password reset token
+        reset_token = PasswordResetToken.objects.create(
+            user=user,
+            token=token,
+            expires_at=expires_at
+        )
+
+        # Generate reset link
+        # 🔒 SECURITY: Use frontend URL (not backend) for the reset page
+        # Get frontend URL from settings or environment variable
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        reset_url = f"{frontend_url}/reset-password?token={token}"
+
+        # Send email with reset link
         try:
-            initial_password, created = UserInitialPassword.objects.get_or_create(user=user)
-            initial_password.set_plaintext(temp_password)
-            initial_password.is_active = True
-            initial_password.save()
-        except Exception as e:
-            logger.error(f"Failed to store initial password for user {ctu_id}: {e}")
-            # Continue anyway - password was already updated
+            from django.core.mail import EmailMultiAlternatives
+            
+            subject = "Password Reset Request - CTU Alumni System"
+            
+            # Plain text version
+            text_message = f"""
+Hello {user.f_name},
 
-        logger.info(f"Temporary password generated for user {ctu_id} ({user.full_name})")
-        
+You requested to reset your password for the CTU Alumni Management System.
+
+Click the link below to reset your password:
+{reset_url}
+
+This link will expire in 1 hour.
+
+If you did not request this password reset, please ignore this email and your password will remain unchanged.
+
+---
+CTU CCICT Alumni Management System
+This is an automated message, please do not reply.
+            """
+            
+            # HTML version with better styling
+            html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
+    <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+        <div style="background-color:#1e4c7a;color:#ffffff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
+            <h1 style="margin:0;font-size:24px;">🔐 Password Reset Request</h1>
+        </div>
+        <div style="padding:30px;color:#333333;line-height:1.6;">
+            <p>Hello <strong>{user.f_name}</strong>,</p>
+            <p>You requested to reset your password for the CTU Alumni Management System.</p>
+            <p>Click the button below to reset your password:</p>
+            <div style="text-align:center;margin:30px 0;">
+                <a href="{reset_url}" style="display:inline-block;background-color:#1e4c7a;color:#ffffff;padding:12px 30px;text-decoration:none;border-radius:5px;font-weight:bold;">Reset Password</a>
+            </div>
+            <p style="font-size:14px;color:#666;">Or copy and paste this link into your browser:</p>
+            <p style="font-size:12px;color:#999;word-break:break-all;background-color:#f8f9fa;padding:10px;border-radius:4px;">{reset_url}</p>
+            <p style="margin-top:30px;padding-top:20px;border-top:1px solid #eee;color:#666;font-size:14px;">
+                ⏱️ <strong>This link will expire in 1 hour.</strong>
+            </p>
+            <p style="color:#666;font-size:14px;">
+                If you did not request this password reset, please ignore this email and your password will remain unchanged.
+            </p>
+        </div>
+        <div style="background-color:#f8f9fa;padding:20px;border-radius:0 0 8px 8px;text-align:center;font-size:12px;color:#666;">
+            <p style="margin:0;">This is an automated message from CTU CCICT Alumni Management System</p>
+            <p style="margin:5px 0 0 0;">Please do not reply to this email</p>
+        </div>
+    </div>
+</body>
+</html>
+            """
+            
+            email_msg = EmailMultiAlternatives(
+                subject=subject,
+                body=text_message,
+                from_email=settings.EMAIL_HOST_USER,
+                to=[email],
+            )
+            email_msg.attach_alternative(html_message, "text/html")
+            email_msg.send()
+            
+            logger.info(
+                f"🔒 SECURITY: Password reset email sent to {email} "
+                f"for user {user.acc_username} from IP: {client_ip}"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to send password reset email to {email}: {e}")
+            # Delete the token since email failed
+            reset_token.delete()
+            return JsonResponse({
+                'success': False,
+                'message': 'Failed to send reset email. Please try again later.'
+            }, status=500)
+
+        # Return success response (generic message for security)
         return JsonResponse({
             'success': True,
-            'message': 'Temporary password generated successfully',
-            'temp_password': temp_password,
-            'user_name': user.full_name
+            'message': 'If an account with that email exists, a password reset link has been sent.'
         })
 
     except json.JSONDecodeError:
-        logger.error("Forgot password failed: Invalid JSON in request body.")
+        logger.error("Password reset failed: Invalid JSON in request body.")
         return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
     except Exception as e:
-        logger.error(f"Forgot password failed: Unexpected error: {e}")
+        logger.error(f"Password reset failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
+
+
+@api_view(["GET", "POST"])
+def reset_password_view(request):
+    """
+    🔐 SECURE Password Reset - Step 2 of 2
+    
+    Validates reset token and updates user password.
+    
+    GET: Validates token and returns user info (for display on reset form)
+    POST: Validates token and updates password
+    
+    Security Features:
+    - Token is one-time use only
+    - Token expires after 1 hour
+    - Password complexity requirements
+    - Token invalidated after successful reset
+    - All tokens invalidated on successful password change
+    
+    GET params: ?token=<reset_token>
+    POST payload: { "token": "<reset_token>", "new_password": "secure123", "confirm_password": "secure123" }
+    """
+    if request.method == "OPTIONS":
+        response = JsonResponse({'detail': 'OK'})
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
+        return response
+
+    from apps.shared.models import PasswordResetToken
+
+    if request.method == "GET":
+        # Validate token and return user info for the reset form
+        token_str = request.GET.get('token', '').strip()
+        
+        if not token_str:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reset token is required'
+            }, status=400)
+
+        try:
+            reset_token = PasswordResetToken.objects.select_related('user').get(token=token_str)
+            
+            if not reset_token.is_valid():
+                if reset_token.used:
+                    message = 'This reset link has already been used. Please request a new password reset.'
+                else:
+                    message = 'This reset link has expired. Please request a new password reset.'
+                
+                return JsonResponse({
+                    'success': False,
+                    'message': message,
+                    'expired': True
+                }, status=400)
+            
+            # Token is valid, return user info
+            return JsonResponse({
+                'success': True,
+                'user': {
+                    'name': reset_token.user.f_name,
+                    'email': reset_token.user.profile.email if hasattr(reset_token.user, 'profile') else None
+                },
+                'expires_in_minutes': int((reset_token.expires_at - timezone.now()).total_seconds() / 60)
+            })
+            
+        except PasswordResetToken.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid reset link. Please request a new password reset.',
+                'expired': True
+            }, status=400)
+        except Exception as e:
+            logger.error(f"Token validation error: {e}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Error validating reset link'
+            }, status=500)
+
+    elif request.method == "POST":
+        # Process password reset
+        try:
+            data = json.loads(request.body)
+            token_str = data.get('token', '').strip()
+            new_password = data.get('new_password', '').strip()
+            confirm_password = data.get('confirm_password', '').strip()
+
+            # Validate inputs
+            if not token_str:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Reset token is required'
+                }, status=400)
+
+            if not new_password or not confirm_password:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Both password fields are required'
+                }, status=400)
+
+            if new_password != confirm_password:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Passwords do not match'
+                }, status=400)
+
+            # Password strength validation
+            if len(new_password) < 8:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Password must be at least 8 characters long'
+                }, status=400)
+
+            # Check for at least one letter and one number
+            import re
+            if not re.search(r'[A-Za-z]', new_password) or not re.search(r'\d', new_password):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Password must contain at least one letter and one number'
+                }, status=400)
+
+            # Validate token
+            try:
+                reset_token = PasswordResetToken.objects.select_related('user').get(token=token_str)
+                
+                if not reset_token.is_valid():
+                    if reset_token.used:
+                        message = 'This reset link has already been used. Please request a new password reset.'
+                    else:
+                        message = 'This reset link has expired. Please request a new password reset.'
+                    
+                    return JsonResponse({
+                        'success': False,
+                        'message': message,
+                        'expired': True
+                    }, status=400)
+
+                # Update password
+                user = reset_token.user
+                user.set_password(new_password)
+                user.save()
+
+                # Mark token as used
+                reset_token.mark_as_used()
+
+                # 🔒 SECURITY: Invalidate ALL other reset tokens for this user
+                PasswordResetToken.objects.filter(
+                    user=user,
+                    used=False
+                ).exclude(id=reset_token.id).update(used=True, used_at=timezone.now())
+
+                # Update UserInitialPassword to mark password as changed
+                try:
+                    if hasattr(user, 'initial_password'):
+                        user.initial_password.is_active = False
+                        user.initial_password.save()
+                except Exception:
+                    pass  # Non-critical
+
+                logger.info(f"Password successfully reset for user {user.acc_username} ({user.full_name})")
+
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Password reset successful! You can now login with your new password.'
+                })
+
+            except PasswordResetToken.DoesNotExist:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid reset link. Please request a new password reset.',
+                    'expired': True
+                }, status=400)
+
+        except json.JSONDecodeError:
+            logger.error("Password reset failed: Invalid JSON in request body.")
+            return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
+        except Exception as e:
+            logger.error(f"Password reset failed: Unexpected error: {e}")
+            return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
+
+
 @api_view(['GET', 'POST', 'DELETE'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])

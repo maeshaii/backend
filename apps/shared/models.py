@@ -598,6 +598,55 @@ class UserInitialPassword(models.Model):
         self.save(update_fields=['exported_at'])
 
 
+class PasswordResetToken(models.Model):
+    """Secure password reset tokens with expiration.
+    
+    When a user requests password reset:
+    1. A unique token is generated and sent via email
+    2. Token expires after 1 hour
+    3. Token is single-use (deleted after successful reset)
+    4. User can only have one active token at a time
+    """
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='password_reset_tokens')
+    token = models.CharField(max_length=100, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+    used_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'password_reset_tokens'
+        verbose_name = 'Password Reset Token'
+        verbose_name_plural = 'Password Reset Tokens'
+        indexes = [
+            models.Index(fields=['token', 'used', 'expires_at']),
+            models.Index(fields=['user', 'created_at']),
+        ]
+    
+    def is_valid(self) -> bool:
+        """Check if token is still valid (not used and not expired)"""
+        if self.used:
+            return False
+        if timezone.now() > self.expires_at:
+            return False
+        return True
+    
+    def mark_as_used(self) -> None:
+        """Mark token as used"""
+        self.used = True
+        self.used_at = timezone.now()
+        self.save(update_fields=['used', 'used_at'])
+    
+    @staticmethod
+    def generate_token() -> str:
+        """Generate a secure random token"""
+        import secrets
+        return secrets.token_urlsafe(32)
+    
+    def __str__(self):
+        return f"Password Reset Token for {self.user.full_name} - {'Valid' if self.is_valid() else 'Invalid'}"
+
+
 class UserPoints(models.Model):
     """Tracks engagement points for users (alumni and OJT students)."""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='points')

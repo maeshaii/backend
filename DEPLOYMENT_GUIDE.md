@@ -1,394 +1,291 @@
-# Messaging System Deployment Guide
-
-## Overview
-
-This guide provides comprehensive instructions for deploying the enterprise-grade messaging system to production with Redis, AWS S3, and monitoring infrastructure.
-
-## Table of Contents
-
-1. [Prerequisites](#prerequisites)
-2. [Environment Setup](#environment-setup)
-3. [Database Configuration](#database-configuration)
-4. [Redis Configuration](#redis-configuration)
-5. [AWS S3 Configuration](#aws-s3-configuration)
-6. [Sentry Configuration](#sentry-configuration)
-7. [Django Deployment](#django-deployment)
-8. [Frontend Deployment](#frontend-deployment)
-9. [Mobile App Deployment](#mobile-app-deployment)
-10. [Monitoring Setup](#monitoring-setup)
-11. [Security Configuration](#security-configuration)
-12. [Performance Optimization](#performance-optimization)
-13. [Troubleshooting](#troubleshooting)
+# 🚀 Production Deployment Guide
+**CTU Alumni Messaging System - Senior Developer Edition**
 
 ---
 
-## Prerequisites
+## 📋 **PRE-DEPLOYMENT CHECKLIST**
 
-### System Requirements
-- **Server**: Ubuntu 20.04+ or CentOS 8+
-- **Python**: 3.11+
-- **Node.js**: 18+
-- **PostgreSQL**: 13+
-- **Redis**: 6.0+
-- **Nginx**: 1.18+
+### **1. Environment Setup**
 
-### Cloud Services
-- **AWS S3**: For file storage
-- **Sentry**: For error tracking
-- **Domain**: SSL certificate required
+- [ ] **Production Server Ready**
+  - Ubuntu 20.04+ or Windows Server 2019+
+  - Python 3.11+ installed
+  - PostgreSQL 13+ installed and running
+  - Redis 6+ installed and running
+  - Nginx installed (for reverse proxy)
 
----
+- [ ] **Environment Variables Configured**
+  ```bash
+  # Create .env file with:
+  SECRET_KEY=<generate-strong-random-key>
+  DEBUG=False
+  ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com
+  
+  # Database
+  DB_ENGINE=django.db.backends.postgresql
+  DB_NAME=ctu_alumni_prod
+  DB_USER=ctu_admin
+  DB_PASSWORD=<strong-password>
+  DB_HOST=localhost
+  DB_PORT=5432
+  
+  # Redis
+  REDIS_URL=redis://127.0.0.1:6379/0
+  
+  # Frontend URL
+  FRONTEND_URL=https://yourdomain.com
+  
+  # Email (Gmail example)
+  EMAIL_HOST=smtp.gmail.com
+  EMAIL_PORT=587
+  EMAIL_USE_TLS=True
+  EMAIL_HOST_USER=your-email@gmail.com
+  EMAIL_HOST_PASSWORD=your-app-password
+  
+  # SMS (if using)
+  SEMAPHORE_API_KEY=your-api-key
+  
+  # AWS S3 (if using cloud storage)
+  AWS_ACCESS_KEY_ID=your-access-key
+  AWS_SECRET_ACCESS_KEY=your-secret-key
+  AWS_STORAGE_BUCKET_NAME=your-bucket-name
+  AWS_S3_REGION_NAME=us-east-1
+  ```
 
-## Environment Setup
+### **2. Code Preparation**
 
-### 1. Create Environment File
-Create `.env` file in the backend directory:
+- [ ] **Latest Code Deployed**
+  ```bash
+  git clone https://github.com/your-repo/ctu-alumni.git
+  cd ctu-alumni/backend
+  ```
 
-```bash
-# Django Settings
-SECRET_KEY=your-super-secret-key-here
-DEBUG=False
-ALLOWED_HOSTS=your-domain.com,www.your-domain.com
+- [ ] **Virtual Environment Created**
+  ```bash
+  python -m venv venv
+  source venv/bin/activate  # Linux/Mac
+  # or
+  .\venv\Scripts\Activate.ps1  # Windows
+  ```
 
-# Database
-DATABASE_URL=postgresql://username:password@localhost:5432/messaging_db
+- [ ] **Dependencies Installed**
+  ```bash
+  pip install -r requirements.txt
+  pip install gunicorn  # For production server
+  pip install psycopg2-binary  # For PostgreSQL
+  ```
 
-# Redis
-REDIS_URL=redis://localhost:6379/0
+### **3. Database Setup**
 
-# AWS S3
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_STORAGE_BUCKET_NAME=your-messaging-bucket
-AWS_S3_REGION_NAME=us-east-1
-AWS_S3_CUSTOM_DOMAIN=your-cdn-domain.com
+- [ ] **Database Created**
+  ```sql
+  CREATE DATABASE ctu_alumni_prod;
+  CREATE USER ctu_admin WITH PASSWORD 'strong-password';
+  GRANT ALL PRIVILEGES ON DATABASE ctu_alumni_prod TO ctu_admin;
+  ```
 
-# Sentry
-SENTRY_DSN=https://your-sentry-dsn@sentry.io/project-id
-SENTRY_ENVIRONMENT=production
-SENTRY_RELEASE=1.0.0
+- [ ] **Migrations Run**
+  ```bash
+  python manage.py migrate
+  ```
 
-# CORS
-CORS_ALLOW_CREDENTIALS=True
-CORS_ALLOWED_ORIGINS=https://your-domain.com,https://www.your-domain.com
+- [ ] **Static Files Collected**
+  ```bash
+  python manage.py collectstatic --no-input
+  ```
 
-# Email (Optional)
-EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_USE_TLS=True
-EMAIL_HOST_USER=your-email@gmail.com
-EMAIL_HOST_PASSWORD=your-app-password
-```
+- [ ] **Superuser Created**
+  ```bash
+  python manage.py createsuperuser
+  ```
 
-### 2. Install Dependencies
-```bash
-# Backend
-cd backend
-pip install -r requirements.txt
+### **4. Redis Configuration**
 
-# Frontend
-cd frontend
-npm install
+- [ ] **Redis Running**
+  ```bash
+  # Check Redis status
+  redis-cli ping  # Should return "PONG"
+  ```
 
-# Mobile
-cd mobile
-npm install
-```
+- [ ] **Redis Persistence Configured**
+  Edit `/etc/redis/redis.conf`:
+  ```conf
+  # Enable AOF persistence
+  appendonly yes
+  appendfilename "appendonly.aof"
+  
+  # Or RDB snapshots
+  save 900 1
+  save 300 10
+  save 60 10000
+  ```
 
----
+- [ ] **Redis Memory Limit Set**
+  ```conf
+  maxmemory 512mb
+  maxmemory-policy allkeys-lru
+  ```
 
-## Database Configuration
+### **5. Security Configuration**
 
-### 1. PostgreSQL Setup
-```bash
-# Install PostgreSQL
-sudo apt update
-sudo apt install postgresql postgresql-contrib
+- [ ] **SECRET_KEY Generated**
+  ```python
+  from django.core.management.utils import get_random_secret_key
+  print(get_random_secret_key())
+  ```
 
-# Create database and user
-sudo -u postgres psql
-CREATE DATABASE messaging_db;
-CREATE USER messaging_user WITH PASSWORD 'secure_password';
-GRANT ALL PRIVILEGES ON DATABASE messaging_db TO messaging_user;
-\q
-```
+- [ ] **DEBUG=False** in production
 
-### 2. Run Migrations
-```bash
-cd backend
-python manage.py makemigrations
-python manage.py migrate
-python manage.py collectstatic --noinput
-```
+- [ ] **ALLOWED_HOSTS** configured with your domain
 
-### 3. Create Superuser
-```bash
-python manage.py createsuperuser
-```
-
----
-
-## Redis Configuration
-
-### 1. Install Redis
-```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install redis-server
-
-# CentOS/RHEL
-sudo yum install redis
-```
-
-### 2. Configure Redis
-Edit `/etc/redis/redis.conf`:
-
-```conf
-# Bind to localhost and private IP
-bind 127.0.0.1 10.0.0.1
-
-# Set password
-requirepass your-redis-password
-
-# Configure memory policy
-maxmemory 2gb
-maxmemory-policy allkeys-lru
-
-# Enable persistence
-save 900 1
-save 300 10
-save 60 10000
-
-# Configure logging
-loglevel notice
-logfile /var/log/redis/redis-server.log
-```
-
-### 3. Start Redis
-```bash
-sudo systemctl enable redis-server
-sudo systemctl start redis-server
-sudo systemctl status redis-server
-```
-
-### 4. Test Redis Connection
-```bash
-redis-cli ping
-# Should return: PONG
-```
-
----
-
-## AWS S3 Configuration
-
-### 1. Create S3 Bucket
-```bash
-# Using AWS CLI
-aws s3 mb s3://your-messaging-bucket --region us-east-1
-
-# Set bucket policy for public read access to uploaded files
-aws s3api put-bucket-policy --bucket your-messaging-bucket --policy '{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "PublicReadGetObject",
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::your-messaging-bucket/*"
-    }
+- [ ] **CORS Settings** configured:
+  ```python
+  CORS_ALLOWED_ORIGINS = [
+      "https://yourdomain.com",
+      "https://www.yourdomain.com",
   ]
-}'
-```
+  ```
 
-### 2. Configure CORS
-```bash
-aws s3api put-bucket-cors --bucket your-messaging-bucket --cors-configuration '{
-  "CORSRules": [
-    {
-      "AllowedHeaders": ["*"],
-      "AllowedMethods": ["GET", "PUT", "POST", "DELETE"],
-      "AllowedOrigins": ["https://your-domain.com"],
-      "ExposeHeaders": ["ETag"],
-      "MaxAgeSeconds": 3000
-    }
+- [ ] **CSRF Settings** configured:
+  ```python
+  CSRF_TRUSTED_ORIGINS = [
+      "https://yourdomain.com",
+      "https://www.yourdomain.com",
   ]
-}'
-```
-
-### 3. Create IAM User
-```bash
-# Create IAM user for S3 access
-aws iam create-user --user-name messaging-s3-user
-
-# Create policy for S3 access
-aws iam create-policy --policy-name MessagingS3Policy --policy-document '{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
-      ],
-      "Resource": "arn:aws:s3:::your-messaging-bucket/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket"
-      ],
-      "Resource": "arn:aws:s3:::your-messaging-bucket"
-    }
-  ]
-}'
-
-# Attach policy to user
-aws iam attach-user-policy --user-name messaging-s3-user --policy-arn arn:aws:iam::account:policy/MessagingS3Policy
-
-# Create access keys
-aws iam create-access-key --user-name messaging-s3-user
-```
+  ```
 
 ---
 
-## Sentry Configuration
+## 🔧 **DEPLOYMENT STEPS**
 
-### 1. Create Sentry Project
-1. Go to [Sentry.io](https://sentry.io)
-2. Create new project
-3. Select Django as the platform
-4. Copy the DSN
+### **OPTION A: Gunicorn + Nginx (Recommended for Linux)**
 
-### 2. Configure Sentry in Django
-The Sentry configuration is already included in `settings.py`. Just set the environment variables:
+#### **1. Create Gunicorn Service**
 
-```bash
-SENTRY_DSN=https://your-sentry-dsn@sentry.io/project-id
-SENTRY_ENVIRONMENT=production
-SENTRY_RELEASE=1.0.0
-```
-
-### 3. Test Sentry Integration
-```bash
-cd backend
-python manage.py shell
->>> import sentry_sdk
->>> sentry_sdk.capture_message("Test message from Django")
-```
-
----
-
-## Django Deployment
-
-### 1. Install Gunicorn
-```bash
-pip install gunicorn
-```
-
-### 2. Create Gunicorn Configuration
-Create `gunicorn.conf.py`:
-
-```python
-bind = "0.0.0.0:8000"
-workers = 4
-worker_class = "sync"
-worker_connections = 1000
-max_requests = 1000
-max_requests_jitter = 100
-timeout = 30
-keepalive = 2
-preload_app = True
-```
-
-### 3. Create Systemd Service
-Create `/etc/systemd/system/messaging.service`:
+Create `/etc/systemd/system/ctu-alumni.service`:
 
 ```ini
 [Unit]
-Description=Messaging System Django App
+Description=CTU Alumni Messaging System
 After=network.target
 
 [Service]
+Type=notify
 User=www-data
 Group=www-data
-WorkingDirectory=/path/to/your/backend
-Environment="PATH=/path/to/your/venv/bin"
-ExecStart=/path/to/your/venv/bin/gunicorn --config gunicorn.conf.py backend.wsgi:application
-ExecReload=/bin/kill -s HUP $MAINPID
-Restart=always
-RestartSec=3
+WorkingDirectory=/var/www/ctu-alumni/backend
+Environment="PATH=/var/www/ctu-alumni/backend/venv/bin"
+ExecStart=/var/www/ctu-alumni/backend/venv/bin/gunicorn \
+    --workers 4 \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --bind 0.0.0.0:8000 \
+    --timeout 60 \
+    --access-logfile /var/log/ctu-alumni/access.log \
+    --error-logfile /var/log/ctu-alumni/error.log \
+    backend.asgi:application
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### 4. Start Django Service
+**Start the service:**
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable messaging
-sudo systemctl start messaging
-sudo systemctl status messaging
+sudo systemctl enable ctu-alumni
+sudo systemctl start ctu-alumni
+sudo systemctl status ctu-alumni
 ```
 
----
+#### **2. Create Daphne Service (for WebSockets)**
 
-## Frontend Deployment
+Create `/etc/systemd/system/ctu-alumni-ws.service`:
 
-### 1. Build Frontend
+```ini
+[Unit]
+Description=CTU Alumni WebSocket Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/ctu-alumni/backend
+Environment="PATH=/var/www/ctu-alumni/backend/venv/bin"
+ExecStart=/var/www/ctu-alumni/backend/venv/bin/daphne \
+    -b 0.0.0.0 \
+    -p 8001 \
+    backend.asgi:application
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Start the service:**
 ```bash
-cd frontend
-npm run build
+sudo systemctl daemon-reload
+sudo systemctl enable ctu-alumni-ws
+sudo systemctl start ctu-alumni-ws
+sudo systemctl status ctu-alumni-ws
 ```
 
-### 2. Configure Nginx
-Create `/etc/nginx/sites-available/messaging`:
+#### **3. Configure Nginx**
+
+Create `/etc/nginx/sites-available/ctu-alumni`:
 
 ```nginx
+upstream django_app {
+    server 127.0.0.1:8000;
+}
+
+upstream websocket_app {
+    server 127.0.0.1:8001;
+}
+
 server {
     listen 80;
-    server_name your-domain.com www.your-domain.com;
+    server_name yourdomain.com www.yourdomain.com;
+    
+    # Redirect HTTP to HTTPS
     return 301 https://$server_name$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name your-domain.com www.your-domain.com;
-
-    ssl_certificate /path/to/your/certificate.crt;
-    ssl_certificate_key /path/to/your/private.key;
+    server_name yourdomain.com www.yourdomain.com;
+    
+    # SSL Configuration (use Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-
-    # Frontend
-    location / {
-        root /path/to/your/frontend/build;
-        try_files $uri $uri/ /index.html;
-        
-        # Security headers
-        add_header X-Frame-Options "SAMEORIGIN" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header X-XSS-Protection "1; mode=block" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' wss: https:;" always;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    
+    client_max_body_size 50M;
+    
+    # Static files
+    location /static/ {
+        alias /var/www/ctu-alumni/backend/staticfiles/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
     }
-
-    # API
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect off;
+    
+    # Media files
+    location /media/ {
+        alias /var/www/ctu-alumni/backend/media/;
+        expires 7d;
+        add_header Cache-Control "public";
     }
-
-    # WebSocket
+    
+    # WebSocket connections
     location /ws/ {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://websocket_app;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -396,342 +293,340 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect off;
+        proxy_read_timeout 86400;
     }
-
-    # Static files
-    location /static/ {
-        alias /path/to/your/backend/staticfiles/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+    
+    # API endpoints
+    location /api/ {
+        proxy_pass http://django_app;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
     }
-
-    # Media files
-    location /media/ {
-        alias /path/to/your/backend/media/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+    
+    # Admin interface
+    location /admin/ {
+        proxy_pass http://django_app;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Health checks (no auth required)
+    location /api/messaging/health/ {
+        proxy_pass http://django_app;
+        proxy_set_header Host $host;
+        access_log off;
     }
 }
 ```
 
-### 3. Enable Site
+**Enable the site:**
 ```bash
-sudo ln -s /etc/nginx/sites-available/messaging /etc/nginx/sites-enabled/
-sudo nginx -t
+sudo ln -s /etc/nginx/sites-available/ctu-alumni /etc/nginx/sites-enabled/
+sudo nginx -t  # Test configuration
 sudo systemctl reload nginx
 ```
 
----
+#### **4. SSL Certificate (Let's Encrypt)**
 
-## Mobile App Deployment
-
-### 1. Build Android APK
 ```bash
-cd mobile
-npx expo build:android --type apk
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
 ```
-
-### 2. Build iOS IPA
-```bash
-cd mobile
-npx expo build:ios --type archive
-```
-
-### 3. Deploy to App Stores
-- **Google Play Store**: Upload APK/AAB
-- **Apple App Store**: Upload IPA through Xcode or App Store Connect
 
 ---
 
-## Monitoring Setup
+### **OPTION B: Daphne Only (Simpler, all-in-one)**
 
-### 1. System Monitoring
+If you prefer a single server for both HTTP and WebSocket:
+
 ```bash
-# Install monitoring tools
-sudo apt install htop iotop nethogs
+# Install daphne
+pip install daphne
 
-# Monitor system resources
-htop
-iotop
-nethogs
+# Run daphne
+daphne -b 0.0.0.0 -p 8000 backend.asgi:application
 ```
 
-### 2. Application Monitoring
+Then configure Nginx to proxy to port 8000 for both HTTP and WebSocket.
+
+---
+
+## 📊 **POST-DEPLOYMENT VERIFICATION**
+
+### **1. Health Checks**
+
 ```bash
-# Check Django logs
-sudo journalctl -u messaging -f
+# Basic health check
+curl https://yourdomain.com/api/messaging/health/
 
-# Check Nginx logs
-sudo tail -f /var/log/nginx/access.log
-sudo tail -f /var/log/nginx/error.log
+# Detailed health check
+curl https://yourdomain.com/api/messaging/health/detailed/
 
-# Check Redis logs
-sudo tail -f /var/log/redis/redis-server.log
+# Expected response:
+{
+  "status": "healthy",
+  "checks": {
+    "database": {"status": "healthy"},
+    "redis_cache": {"status": "healthy"},
+    "channel_layer": {"status": "healthy"},
+    "configuration": {"status": "healthy"},
+    "circuit_breakers": {"status": "healthy"}
+  }
+}
 ```
 
-### 3. Database Monitoring
-```bash
-# Monitor PostgreSQL
-sudo -u postgres psql -c "SELECT * FROM pg_stat_activity;"
-sudo -u postgres psql -c "SELECT * FROM pg_stat_database;"
+### **2. WebSocket Connection Test**
+
+```javascript
+// Open browser console on your site and run:
+const ws = new WebSocket('wss://yourdomain.com/ws/notifications/');
+ws.onopen = () => console.log('✅ WebSocket connected!');
+ws.onerror = (e) => console.error('❌ WebSocket error:', e);
+ws.onclose = () => console.log('🔌 WebSocket closed');
 ```
 
-### 4. Performance Monitoring
+### **3. Load Testing**
+
 ```bash
-# Run performance tests
+# Install locust
+pip install locust
+
+# Run load test
 cd backend
-python manage.py run_messaging_tests --verbose --report
+locust -f locustfile.py --host=https://yourdomain.com \
+    --users 100 --spawn-rate 10 --run-time 5m --headless
+```
 
-# Check system health
-python manage.py messaging_monitoring --health-check
+**Expected Results:**
+- ✅ Success rate: >99%
+- ✅ Avg response time: <200ms
+- ✅ No database connection errors
+- ✅ No Redis failures
 
-# View performance metrics
-python manage.py performance_metrics --summary
+### **4. Database Performance Check**
+
+```sql
+-- Check slow queries
+SELECT query, mean_exec_time, calls
+FROM pg_stat_statements
+ORDER BY mean_exec_time DESC
+LIMIT 10;
+
+-- Check index usage
+SELECT schemaname, tablename, indexname, idx_scan
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0 AND indexname NOT LIKE 'pg_toast%'
+ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+### **5. Redis Performance Check**
+
+```bash
+redis-cli INFO stats | grep -E "total_commands_processed|instantaneous_ops_per_sec"
+redis-cli INFO memory | grep -E "used_memory_human|maxmemory_human"
 ```
 
 ---
 
-## Security Configuration
+## 🔒 **SECURITY HARDENING**
 
-### 1. Firewall Setup
+### **1. Firewall Configuration**
+
 ```bash
-# Install UFW
-sudo apt install ufw
-
-# Configure firewall
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
+# Ubuntu UFW
+sudo ufw allow 22/tcp  # SSH
+sudo ufw allow 80/tcp  # HTTP
+sudo ufw allow 443/tcp  # HTTPS
 sudo ufw enable
 ```
 
-### 2. SSL Certificate
+### **2. Fail2Ban (DDoS Protection)**
+
 ```bash
-# Install Certbot
-sudo apt install certbot python3-certbot-nginx
-
-# Obtain SSL certificate
-sudo certbot --nginx -d your-domain.com -d www.your-domain.com
-
-# Auto-renewal
-sudo crontab -e
-# Add: 0 12 * * * /usr/bin/certbot renew --quiet
+sudo apt install fail2ban
+sudo systemctl enable fail2ban
+sudo systemctl start fail2ban
 ```
 
-### 3. Security Headers
-Add to Nginx configuration:
-```nginx
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-XSS-Protection "1; mode=block" always;
-add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' wss: https:;" always;
+### **3. Database Security**
+
+```sql
+-- Disable remote access (if not needed)
+-- Edit postgresql.conf:
+listen_addresses = 'localhost'
+
+-- Revoke public schema privileges
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+### **4. Redis Security**
+
+Edit `/etc/redis/redis.conf`:
+```conf
+# Bind to localhost only
+bind 127.0.0.1
+
+# Require password
+requirepass your-strong-redis-password
+
+# Disable dangerous commands
+rename-command FLUSHDB ""
+rename-command FLUSHALL ""
+rename-command CONFIG ""
+```
+
+Update `REDIS_URL` in `.env`:
+```bash
+REDIS_URL=redis://:your-strong-redis-password@127.0.0.1:6379/0
 ```
 
 ---
 
-## Performance Optimization
+## 📈 **MONITORING & LOGGING**
 
-### 1. Database Optimization
+### **1. Application Logs**
+
 ```bash
-# Create indexes
-cd backend
-python manage.py dbshell
-CREATE INDEX CONCURRENTLY idx_message_conversation_created ON shared_message(conversation_id, created_at);
-CREATE INDEX CONCURRENTLY idx_message_sender_created ON shared_message(sender_id, created_at);
-CREATE INDEX CONCURRENTLY idx_conversation_updated ON shared_conversation(updated_at);
+# Create log directory
+sudo mkdir -p /var/log/ctu-alumni
+sudo chown www-data:www-data /var/log/ctu-alumni
+
+# View logs
+sudo tail -f /var/log/ctu-alumni/access.log
+sudo tail -f /var/log/ctu-alumni/error.log
 ```
 
-### 2. Redis Optimization
+### **2. System Monitoring**
+
+Install monitoring tools:
 ```bash
-# Configure Redis for performance
-sudo nano /etc/redis/redis.conf
-# Set: maxmemory 2gb
-# Set: maxmemory-policy allkeys-lru
-# Set: save 900 1
+# Install htop for process monitoring
+sudo apt install htop
+
+# Install iotop for disk I/O monitoring
+sudo apt install iotop
+
+# Install netstat for network monitoring
+sudo apt install net-tools
 ```
 
-### 3. Nginx Optimization
-```nginx
-# Add to nginx.conf
-worker_processes auto;
-worker_connections 1024;
-keepalive_timeout 65;
-gzip on;
-gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-```
+### **3. Sentry Integration** (Error Tracking)
 
----
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. WebSocket Connection Failed
+Already configured in `monitoring.py`. Just add to `.env`:
 ```bash
-# Check WebSocket configuration
-sudo systemctl status messaging
-sudo journalctl -u messaging -f
-
-# Check Nginx WebSocket proxy
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-#### 2. Redis Connection Issues
-```bash
-# Check Redis status
-sudo systemctl status redis-server
-redis-cli ping
-
-# Check Redis logs
-sudo tail -f /var/log/redis/redis-server.log
-```
-
-#### 3. S3 Upload Failures
-```bash
-# Test S3 connection
-aws s3 ls s3://your-messaging-bucket
-
-# Check IAM permissions
-aws iam list-attached-user-policies --user-name messaging-s3-user
-```
-
-#### 4. Database Connection Issues
-```bash
-# Check PostgreSQL status
-sudo systemctl status postgresql
-
-# Test database connection
-sudo -u postgres psql -c "SELECT version();"
-```
-
-#### 5. Performance Issues
-```bash
-# Check system resources
-htop
-free -h
-df -h
-
-# Check application logs
-sudo journalctl -u messaging -f
-```
-
-### Debug Commands
-```bash
-# Run comprehensive tests
-cd backend
-python manage.py run_messaging_tests --verbose --report
-
-# Check system health
-python manage.py messaging_monitoring --health-check
-
-# View performance metrics
-python manage.py performance_metrics --summary
-
-# Check WebSocket connections
-python manage.py websocket_analytics
-
-# Monitor rate limits
-python manage.py websocket_rate_limits
+SENTRY_DSN=https://your-sentry-dsn@sentry.io/project-id
 ```
 
 ---
 
-## Maintenance
+## 🔄 **CONTINUOUS DEPLOYMENT**
 
-### Daily Tasks
-- Monitor system health and performance
-- Check error logs and Sentry alerts
-- Verify backup systems
+### **Deployment Script**
 
-### Weekly Tasks
-- Review performance metrics
-- Update dependencies
-- Check security updates
+Create `deploy.sh`:
 
-### Monthly Tasks
-- Full system backup
-- Performance optimization review
-- Security audit
-
----
-
-## Backup Strategy
-
-### 1. Database Backup
 ```bash
-# Create backup script
 #!/bin/bash
-DATE=$(date +%Y%m%d_%H%M%S)
-pg_dump messaging_db > /backups/messaging_db_$DATE.sql
-aws s3 cp /backups/messaging_db_$DATE.sql s3://your-backup-bucket/
+set -e
+
+echo "🚀 Starting deployment..."
+
+# Pull latest code
+echo "📥 Pulling latest code..."
+git pull origin main
+
+# Activate virtual environment
+echo "🐍 Activating virtual environment..."
+source venv/bin/activate
+
+# Install dependencies
+echo "📦 Installing dependencies..."
+pip install -r requirements.txt
+
+# Run migrations
+echo "🗄️  Running migrations..."
+python manage.py migrate --no-input
+
+# Collect static files
+echo "📂 Collecting static files..."
+python manage.py collectstatic --no-input
+
+# Restart services
+echo "🔄 Restarting services..."
+sudo systemctl restart ctu-alumni
+sudo systemctl restart ctu-alumni-ws
+
+# Health check
+echo "🏥 Running health check..."
+sleep 5
+curl -f http://localhost:8000/api/messaging/health/ || exit 1
+
+echo "✅ Deployment complete!"
 ```
 
-### 2. Redis Backup
+Make it executable:
 ```bash
-# Redis automatically creates snapshots
-# Manual backup
-redis-cli BGSAVE
-```
-
-### 3. File Backup
-```bash
-# S3 files are automatically backed up by AWS
-# Local files backup
-tar -czf /backups/media_$DATE.tar.gz /path/to/media/
-aws s3 cp /backups/media_$DATE.tar.gz s3://your-backup-bucket/
+chmod +x deploy.sh
 ```
 
 ---
 
-## Scaling
+## 📞 **TROUBLESHOOTING**
 
-### Horizontal Scaling
-- Use load balancer (AWS ALB, Nginx)
-- Multiple Django instances
-- Redis cluster for high availability
-- Database read replicas
+### **WebSocket Not Connecting**
 
-### Vertical Scaling
-- Increase server resources
-- Optimize database queries
-- Add more Redis memory
-- Use CDN for static files
+1. Check Nginx WebSocket proxy configuration
+2. Verify Daphne is running: `sudo systemctl status ctu-alumni-ws`
+3. Check firewall: `sudo ufw status`
+4. Test WebSocket endpoint: `wscat -c wss://yourdomain.com/ws/notifications/`
+
+### **High Database Load**
+
+1. Check slow queries (see Database Performance Check above)
+2. Verify indexes are being used
+3. Consider adding more database connections in settings.py:
+   ```python
+   DATABASES['default']['CONN_MAX_AGE'] = 600
+   ```
+
+### **Redis Out of Memory**
+
+1. Check memory usage: `redis-cli INFO memory`
+2. Increase maxmemory in redis.conf
+3. Verify eviction policy: `maxmemory-policy allkeys-lru`
+
+### **High Response Times**
+
+1. Check Gunicorn workers: Increase if CPU allows
+2. Enable query logging: `LOGGING['handlers']['file']`
+3. Use Django Debug Toolbar in staging
+4. Run load test to identify bottlenecks
 
 ---
 
-## Support
+## 🎯 **SUCCESS CRITERIA**
 
-For deployment support:
-1. Check this documentation
-2. Review logs and monitoring
-3. Run diagnostic commands
-4. Check system health endpoints
+Your deployment is successful if:
 
-The messaging system is now production-ready with enterprise-grade features! 🚀
+- ✅ Health check returns `{"status": "healthy"}`
+- ✅ WebSocket connections work from browser
+- ✅ Load test shows >99% success rate
+- ✅ Response times < 200ms average
+- ✅ No errors in application logs
+- ✅ Redis and database are healthy
+- ✅ SSL certificate is valid
+- ✅ All tests pass
 
+---
 
+**🎉 Congratulations! Your CTU Alumni Messaging System is production-ready!**
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+For support, refer to:
+- `WEBSOCKET_OPTIMIZATION_COMPLETE.md` - Performance optimizations
+- `backend/apps/messaging/health.py` - Health check implementation
+- `locustfile.py` - Load testing configuration
