@@ -122,6 +122,50 @@ def evaluate_and_award_milestones(user_points: UserPoints) -> List[dict]:
     return awarded
 
 
+def _generate_dynamic_description(base_description: str, required_count: int, spec: MilestoneSpec) -> str:
+    """
+    Generate dynamic description based on required_count.
+    Replaces hardcoded numbers in descriptions with the actual required_count.
+    """
+    import re
+    
+    # First, replace patterns like "10 posts", "5 posts", "10 users", etc.
+    description = re.sub(r'\d+\s+(posts?|users?)', f'{required_count} \\1', base_description, flags=re.IGNORECASE)
+    
+    # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+    if description == base_description:
+        # Pattern: "10" followed by "posts" or "users" (with possible words in between)
+        description = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required_count), base_description, flags=re.IGNORECASE)
+    
+    # If still no replacement, replace the first number found
+    if description == base_description:
+        description = re.sub(r'\b\d+\b', str(required_count), base_description, count=1)
+    
+    return description
+
+
+def _generate_dynamic_title(base_title: str, required_count: int) -> str:
+    """
+    Generate dynamic title based on required_count.
+    Replaces hardcoded numbers in titles with the actual required_count.
+    """
+    import re
+    
+    # First, replace patterns like "10 posts", "5 posts", "10 users", etc.
+    title = re.sub(r'\d+\s+(posts?|users?)', f'{required_count} \\1', base_title, flags=re.IGNORECASE)
+    
+    # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+    if title == base_title:
+        # Pattern: "10" followed by "posts" or "users" (with possible words in between)
+        title = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required_count), base_title, flags=re.IGNORECASE)
+    
+    # If still no replacement, replace the first number found
+    if title == base_title:
+        title = re.sub(r'\b\d+\b', str(required_count), base_title, count=1)
+    
+    return title
+
+
 def get_milestone_status(user_points: UserPoints) -> List[dict]:
     """
     Build a milestone status payload for API consumers.
@@ -154,12 +198,16 @@ def get_milestone_status(user_points: UserPoints) -> List[dict]:
         percent_complete = 100 if required == 0 else min(
             100, int((current_value / required) * 100)
         )
+        
+        # Generate dynamic title and description based on required_count
+        dynamic_title = _generate_dynamic_title(task.title, required)
+        dynamic_description = _generate_dynamic_description(task.description, required, spec)
 
         status_list.append(
             {
                 'task_type': spec.task_type,
-                'title': task.title,
-                'description': task.description,
+                'title': dynamic_title,
+                'description': dynamic_description,
                 'category': spec.category,
                 'points': task.points,
                 'icon': task.icon_name,

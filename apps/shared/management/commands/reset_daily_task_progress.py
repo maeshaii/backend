@@ -41,3 +41,4 @@ class Command(BaseCommand):
             logger.error(f"Error in reset_daily_task_progress command: {e}", exc_info=True)
             raise
 
+
