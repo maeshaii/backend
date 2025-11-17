@@ -7868,6 +7868,613 @@ def donation_repost_view(request, donation_id):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_requests_view(request):
+    """Handle donation request listing and creation"""
+    if request.method == 'GET':
+        try:
+            # Get all donation requests with user info and images
+            donations = DonationRequest.objects.select_related('user').all()
+            logger.info(f"Found {donations.count()} donation requests in database")
+            
+            donation_data = []
+            for donation in donations:
+                # Get likes and comments for this donation
+                likes = Like.objects.filter(donation_request=donation)
+                comments = Comment.objects.filter(donation_request=donation).select_related('user')
+                # Get reposts for this donation
+                reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
+                
+                # Get images from ContentImage model
+                try:
+                    content_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).order_by('order')
+                except Exception as img_error:
+                    logger.warning(f"Could not load ContentImage for donation {donation.donation_id}: {img_error}")
+                    content_images = []
+                
+                donation_info = {
+                    'donation_id': donation.donation_id,
+                    'user': {
+                        'user_id': donation.user.user_id,
+                        'f_name': donation.user.f_name,
+                        'm_name': donation.user.m_name,
+                        'l_name': donation.user.l_name,
+                        'profile_pic': build_profile_pic_url(donation.user),
+                        'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                    },
+                    'description': donation.description,
+                    'status': donation.status,
+                    'created_at': donation.created_at.isoformat(),
+                    'updated_at': donation.updated_at.isoformat(),
+                    'images': [
+                        {
+                            'image_id': img.image_id,
+                            'image_url': img.image.url,
+                            'order': img.order
+                        } for img in content_images
+                    ],
+                    'likes_count': likes.count(),
+                    'comments_count': comments.count(),
+                    'reposts_count': reposts.count(),
+                    'likes': [
+                        {
+                            'like_id': like.like_id,
+                            'user': {
+                                'user_id': like.user.user_id,
+                                'f_name': like.user.f_name,
+                                'm_name': like.user.m_name,
+                                'l_name': like.user.l_name,
+                                'profile_pic': build_profile_pic_url(like.user)
+                            }
+                        } for like in likes
+                    ],
+                    'comments': [
+                        {
+                            'comment_id': comment.comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat(),
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': build_profile_pic_url(comment.user)
+                            }
+                        } for comment in comments
+                    ],
+                    'reposts': [
+                        {
+                            'repost_id': repost.repost_id,
+                            'repost_date': repost.repost_date.isoformat(),
+                            'repost_caption': repost.caption,
+                            'user': {
+                                'user_id': repost.user.user_id,
+                                'f_name': repost.user.f_name,
+                                'm_name': repost.user.m_name,
+                                'l_name': repost.user.l_name,
+                                'profile_pic': build_profile_pic_url(repost.user),
+                            },
+                            'likes_count': Like.objects.filter(repost=repost).count(),
+                            'comments_count': Comment.objects.filter(repost=repost).count(),
+                            'likes': [
+                                {
+                                    'like_id': like.like_id,
+                                    'user': {
+                                        'user_id': like.user.user_id,
+                                        'f_name': like.user.f_name,
+                                        'm_name': like.user.m_name,
+                                        'l_name': like.user.l_name,
+                                        'profile_pic': build_profile_pic_url(like.user)
+                                    }
+                                } for like in Like.objects.filter(repost=repost)
+                            ],
+                            'comments': [
+                                {
+                                    'comment_id': comment.comment_id,
+                                    'comment_content': comment.comment_content,
+                                    'date_created': comment.date_created.isoformat(),
+                                    'user': {
+                                        'user_id': comment.user.user_id,
+                                        'f_name': comment.user.f_name,
+                                        'm_name': comment.user.m_name,
+                                        'l_name': comment.user.l_name,
+                                        'profile_pic': build_profile_pic_url(comment.user)
+                                    }
+                                } for comment in Comment.objects.filter(repost=repost).select_related('user')
+                            ]
+                        } for repost in reposts
+                    ]
+                }
+                donation_data.append(donation_info)
+            
+            response_data = {
+                'success': True,
+                'donations': donation_data
+            }
+            
+            logger.info(f"Returning {len(donation_data)} donations to frontend")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error fetching donation requests: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to fetch donation requests'}, status=500)
+    
+    elif request.method == 'POST':
+        try:
+            data = request.data
+            description = data.get('description')
+            images = data.get('images', [])
+            
+            logger.info(f"Creating donation request for user {request.user.user_id}: {description[:50] if description else ''}...")
+            
+            if not description or not description.strip():
+                logger.warning("Donation request failed: Description is required")
+                return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
+            
+            # Create donation request
+            donation = DonationRequest.objects.create(
+                user=request.user,
+                description=description.strip()
+            )
+            
+            # Notify OJT and alumni users if post author is admin or PESO
+            notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
+            
+            # Handle image uploads if any
+            if images:
+                for index, image_data in enumerate(images):
+                    if image_data and image_data.startswith('data:image'):
+                        # Handle base64 image data
+                        try:
+                            format, imgstr = image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            imgdata = base64.b64decode(imgstr)
+                            
+                            # Create a unique filename
+                            filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
+                            
+                            # Save the image using ContentImage
+                            donation_image = ContentImage.objects.create(
+                                content_type='donation',
+                                content_id=donation.donation_id,
+                                order=index
+                            )
+                            donation_image.image.save(filename, ContentFile(imgdata), save=True)
+                            
+                        except Exception as e:
+                            logger.error(f"Error saving donation image {index}: {e}")
+                            # Continue with other images even if one fails
+                            continue
+            
+            # Handle FormData file uploads (mobile app)
+            if request.FILES:
+                image_files = []
+                for key, file in request.FILES.items():
+                    if key.startswith('images') and file:
+                        image_files.append((key, file))
+                
+                # Sort by key to ensure consistent ordering
+                image_files.sort(key=lambda x: x[0])
+                
+                for order_index, (key, file) in enumerate(image_files):
+                    try:
+                        # Create ContentImage instance for donation
+                        donation_image = ContentImage.objects.create(
+                            content_type='donation',
+                            content_id=donation.donation_id,
+                            order=order_index
+                        )
+                        donation_image.image.save(file.name, file, save=True)
+                        logger.info(f'Saved FormData donation image {order_index}: {donation_image.image.url}')
+                    except Exception as e:
+                        logger.error(f'Error saving FormData donation image {order_index}: {e}')
+            
+            # Award engagement points for creating donation
+            try:
+                # Check if donation has images
+                has_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).exists()
+                if has_images:
+                    award_engagement_points(request.user, 'post_with_photo')
+                else:
+                    award_engagement_points(request.user, 'post')
+            except Exception as e:
+                logger.warning(f"Could not check ContentImage for donation creation points: {e}")
+            
+            # Return the created donation with full details
+            likes = Like.objects.filter(donation_request=donation)
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            reposts = Repost.objects.filter(donation_request=donation)
+            
+            # Get images from ContentImage model
+            try:
+                content_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).order_by('order')
+            except Exception as img_error:
+                logger.warning(f"Could not load ContentImage for donation: {img_error}")
+                content_images = []
+            
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'm_name': donation.user.m_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': build_profile_pic_url(donation.user),
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                'images': [
+                    {
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    } for img in content_images
+                ],
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'likes': [],
+                'comments': [],
+                'reposts': []
+            }
+            
+            response_data = {
+                'success': True,
+                'message': 'Donation request created successfully',
+                'donation': donation_info
+            }
+            
+            logger.info(f"Successfully created donation request {donation.donation_id} for user {request.user.user_id}")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error creating donation request: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to create donation request'}, status=500)
+
+
+@api_view(['POST', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_like_view(request, donation_id):
+    """Handle donation like/unlike"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'POST':
+            # Like the donation
+            like, created = Like.objects.get_or_create(
+                donation_request=donation,
+                user=request.user
+            )
+            
+            if created:
+                # Award engagement points for liking
+                award_engagement_points(request.user, 'like')
+                return JsonResponse({'success': True, 'message': 'Donation liked'})
+            else:
+                return JsonResponse({'success': False, 'message': 'Already liked'})
+        
+        elif request.method == 'DELETE':
+            # Unlike the donation
+            try:
+                like = Like.objects.get(donation_request=donation, user=request.user)
+                like.delete()
+                return JsonResponse({'success': True, 'message': 'Donation unliked'})
+            except Like.DoesNotExist:
+                return JsonResponse({'success': False, 'message': 'Not liked'})
+                
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation like: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comments_view(request, donation_id):
+    """Handle donation comments"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'GET':
+            # Get all comments for this donation
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            
+            comments_data = [
+                {
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat(),
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': build_profile_pic_url(comment.user)
+                    }
+                } for comment in comments
+            ]
+            
+            return JsonResponse({
+                'success': True,
+                'comments': comments_data
+            })
+        
+        elif request.method == 'POST':
+            # Create a new comment
+            data = request.data
+            comment_content = data.get('comment_content', '').strip()
+            
+            if not comment_content:
+                return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
+            
+            comment = Comment.objects.create(
+                donation_request=donation,
+                user=request.user,
+                comment_content=comment_content,
+                date_created=timezone.now()
+            )
+            
+            # Award engagement points for commenting
+            award_engagement_points(request.user, 'comment')
+            
+            # Create notification for donation owner (only if the commenter is not the donation owner)
+            if request.user.user_id != donation.user.user_id:
+                donation_comment_notification = Notification.objects.create(
+                    user=donation.user,
+                    notif_type='comment',
+                    subject='New Comment on Donation',
+                    notifi_content=f"{request.user.full_name} commented on your donation request<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                    notif_date=timezone.now()
+                )
+                
+                # Broadcast donation comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(donation_comment_notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting donation comment notification: {e}")
+            
+            # Return the full comment data
+            comment_data = {
+                'comment_id': comment.comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat(),
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'm_name': comment.user.m_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': build_profile_pic_url(comment.user)
+                }
+            }
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Comment added successfully',
+                'comment': comment_data
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comments: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
+
+
+@api_view(['PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comment_edit_view(request, donation_id, comment_id):
+    """Handle donation comment edit/delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
+        
+        # Allow comment owner OR donation owner to delete/edit comment
+        comment_owner = comment.user.user_id == request.user.user_id
+        donation_owner = donation.user.user_id == request.user.user_id
+        
+        if not (comment_owner or donation_owner):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+            
+        if request.method == 'PUT':
+            # Only comment owner can edit
+            if not comment_owner:
+                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
+            data = request.data
+            content = data.get('comment_content')
+            if content is None:
+                return JsonResponse({'error': 'No content provided'}, status=400)
+            comment.comment_content = content
+            comment.save()
+            return JsonResponse({'success': True})
+        else:
+            # Both comment owner and donation owner can delete
+            comment.delete()
+            return JsonResponse({'success': True})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'error': 'Donation request not found'}, status=404)
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comment edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comment operation'}, status=500)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_detail_edit_view(request, donation_id):
+    """Handle donation detail view, edit, and delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        # Check if user owns the donation or is admin
+        if donation.user != request.user and not (hasattr(request.user, 'account_type') and request.user.account_type.admin):
+            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
+        
+        if request.method == 'GET':
+            # Get likes, comments, and reposts for this donation
+            likes = Like.objects.filter(donation_request=donation).select_related('user')
+            comments = Comment.objects.filter(donation_request=donation).select_related('user').order_by('-date_created')
+            reposts = Repost.objects.filter(donation_request=donation).select_related('user')
+            is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
+            
+            # Get images from ContentImage model
+            try:
+                content_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).order_by('order')
+            except Exception as img_error:
+                logger.warning(f"Could not load ContentImage for donation: {img_error}")
+                content_images = []
+            
+            # Return donation details with full interaction data
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'post_id': donation.donation_id,  # Add for compatibility with frontend
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'm_name': donation.user.m_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': build_profile_pic_url(donation.user),
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                'images': [
+                    {
+                        'image_id': img.image_id,
+                        'image_url': img.image.url,
+                        'order': img.order
+                    } for img in content_images
+                ],
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'liked_by_user': is_liked,
+                'likes': [{
+                    'user_id': l.user.user_id,
+                    'f_name': l.user.f_name,
+                    'l_name': l.user.l_name,
+                    'profile_pic': build_profile_pic_url(l.user),
+                    'initials': None if build_profile_pic_url(l.user) else (
+                        ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                        if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                    ),
+                } for l in likes],
+                'comments': [{
+                    'comment_id': c.comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat() if c.date_created else None,
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                } for c in comments],
+                'reposts': [{
+                    'repost_id': r.repost_id,
+                    'repost_date': r.repost_date.isoformat() if r.repost_date else None,
+                    'repost_caption': r.caption,
+                    'likes_count': Like.objects.filter(repost=r).count(),
+                    'comments_count': Comment.objects.filter(repost=r).count(),
+                    'likes': [{
+                        'user_id': l.user.user_id,
+                        'f_name': l.user.f_name,
+                        'm_name': l.user.m_name,
+                        'l_name': l.user.l_name,
+                        'profile_pic': build_profile_pic_url(l.user),
+                        'initials': None if build_profile_pic_url(l.user) else (
+                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                        ),
+                    } for l in Like.objects.filter(repost=r).select_related('user')],
+                    'comments': [{
+                        'comment_id': c.comment_id,
+                        'comment_content': c.comment_content,
+                        'date_created': c.date_created.isoformat() if c.date_created else None,
+                        'user': {
+                            'user_id': c.user.user_id,
+                            'f_name': c.user.f_name,
+                            'm_name': c.user.m_name,
+                            'l_name': c.user.l_name,
+                            'profile_pic': build_profile_pic_url(c.user),
+                        }
+                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
+                    'user': {
+                        'user_id': r.user.user_id,
+                        'f_name': r.user.f_name,
+                        'l_name': r.user.l_name,
+                        'profile_pic': build_profile_pic_url(r.user),
+                    },
+                    'original_donation': {
+                        'donation_id': donation.donation_id,
+                        'description': donation.description,
+                        'created_at': donation.created_at.isoformat(),
+                        'user': {
+                            'user_id': donation.user.user_id,
+                            'f_name': donation.user.f_name,
+                            'l_name': donation.user.l_name,
+                            'profile_pic': build_profile_pic_url(donation.user),
+                        }
+                    }
+                } for r in reposts]
+            }
+            
+            return JsonResponse(donation_info)
+            
+        elif request.method == 'PUT':
+            # Update donation
+            data = request.data
+            
+            if 'description' in data:
+                donation.description = data['description']
+            
+            if 'status' in data:
+                donation.status = data['status']
+            
+            donation.updated_at = timezone.now()
+            donation.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation updated successfully',
+                'donation_id': donation.donation_id
+            })
+            
+        elif request.method == 'DELETE':
+            # Delete donation
+            donation.delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation deleted successfully'
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error in donation detail/edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
+
+
 @api_view(["DELETE"]) 
 @permission_classes([IsAuthenticated])
 def forum_repost_delete_view(request, repost_id):
