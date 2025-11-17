@@ -4510,6 +4510,13 @@ def alumni_employment_view(request, user_id):
             academic_info = employment_data.get('academic_info')
             tracker_data = employment_data.get('tracker_data')
             
+            # Fallback: If tracker_data doesn't exist, try to get it directly
+            if not tracker_data:
+                try:
+                    tracker_data = TrackerData.objects.get(user=user)
+                except TrackerData.DoesNotExist:
+                    tracker_data = None
+            
             # For OJT accounts, return data from OJTCompanyProfile
             if is_ojt:
                 # Get OJT company profile
@@ -4544,13 +4551,97 @@ def alumni_employment_view(request, user_id):
                     'has_employment_data': bool(ojt_company_profile and ojt_company_profile.company_name and ojt_company_profile.company_name.strip() != '')
                 })
             
-            # For Alumni accounts, temporarily return coming soon placeholder
+            # For Alumni accounts, return Part III tracker data
             if is_alumni:
-                return JsonResponse({
+                # Check if tracker data exists and has Part III data
+                has_tracker_data = tracker_data is not None
+                has_part_iii_data = False
+                tracker_submitted = False
+                is_employed = False
+                is_unemployed = False
+                has_part_iii_fields = False
+                employment_status = ''
+                
+                if tracker_data:
+                    # Check if tracker was submitted
+                    tracker_submitted = tracker_data.tracker_submitted_at is not None
+                    
+                    # Check if user is employed (Part III is only shown for employed users)
+                    employment_status = (tracker_data.q_employment_status or '').lower().strip()
+                    is_employed = employment_status in ['yes', 'employed', 'y', '1', 'true']
+                    is_unemployed = employment_status in ['no', 'n', '0', 'false', 'unemployed']
+                    
+                    # Check if any Part III fields are filled
+                    has_part_iii_fields = bool(
+                        tracker_data.q_employment_type or
+                        tracker_data.q_company_name or
+                        tracker_data.q_current_position or
+                        tracker_data.q_sector_current or
+                        tracker_data.q_scope_current or
+                        tracker_data.q_employment_duration or
+                        tracker_data.q_salary_range or
+                        tracker_data.q_employment_permanent
+                    )
+                    
+                    # Part III data exists if:
+                    # 1. Any Part III fields are filled, OR
+                    # 2. Tracker was submitted AND user is marked as employed
+                    # 3. Tracker was submitted AND employment status is not "no" (show it even if incomplete)
+                    has_part_iii_data = (
+                        has_part_iii_fields or
+                        (tracker_submitted and is_employed) or
+                        (tracker_submitted and not is_unemployed and employment_status != '')
+                    )
+                
+                response_data = {
                     'account_type': 'alumni',
-                    'message': 'Coming soon',
-                    'has_tracker_data': False
-                })
+                    'has_tracker_data': has_tracker_data,
+                    'has_part_iii_data': has_part_iii_data,
+                    # Debug info (can be removed later)
+                    'debug': {
+                        'employment_status': tracker_data.q_employment_status if tracker_data else None,
+                        'tracker_submitted_at': tracker_data.tracker_submitted_at.isoformat() if tracker_data and tracker_data.tracker_submitted_at else None,
+                        'is_employed': is_employed,
+                        'tracker_submitted': tracker_submitted,
+                        'has_part_iii_fields': has_part_iii_fields,
+                        'q_employment_type': tracker_data.q_employment_type if tracker_data else None,
+                        'q_company_name': tracker_data.q_company_name if tracker_data else None,
+                        'q_current_position': tracker_data.q_current_position if tracker_data else None,
+                    }
+                }
+                
+                # If Part III data exists, include all the fields
+                if has_part_iii_data and tracker_data:
+                    # Handle file URLs safely
+                    awards_doc_url = ''
+                    if tracker_data.q_awards_document:
+                        try:
+                            awards_doc_url = tracker_data.q_awards_document.url
+                        except (ValueError, AttributeError):
+                            awards_doc_url = ''
+                    
+                    employment_doc_url = ''
+                    if tracker_data.q_employment_document:
+                        try:
+                            employment_doc_url = tracker_data.q_employment_document.url
+                        except (ValueError, AttributeError):
+                            employment_doc_url = ''
+                    
+                    response_data.update({
+                        'employment_type': tracker_data.q_employment_type or '',
+                        'current_employment_status': tracker_data.q_employment_permanent or '',
+                        'current_company_name': tracker_data.q_company_name or '',
+                        'current_position': tracker_data.q_current_position or '',
+                        'current_sector': tracker_data.q_sector_current or '',
+                        'current_scope': tracker_data.q_scope_current or '',
+                        'employment_duration': tracker_data.q_employment_duration or '',
+                        'salary_range': tracker_data.q_salary_range or '',
+                        'received_awards': tracker_data.q_awards_received or '',
+                        'awards_supporting_doc': awards_doc_url,
+                        'employment_supporting_doc': employment_doc_url,
+                    })
+                
+                return JsonResponse(response_data)
             else:
                 # OJT without employment - return empty EmploymentHistory fields only
                 return JsonResponse({
