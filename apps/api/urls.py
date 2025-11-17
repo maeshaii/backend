@@ -145,13 +145,7 @@ urlpatterns = [
     path('userprofile/<int:user_id>/social_media/', views.userprofile_social_media_view, name='userprofile_social_media'),
     path('userprofile/<int:user_id>/email/', views.userprofile_email_view, name='userprofile_email'),
     
-    # Donation API endpoints
-    path('donations/', views.donation_requests_view, name='donation_requests'),
-    path('donations/<int:donation_id>/', views.donation_detail_edit_view, name='donation_detail_edit'),
-    path('donations/<int:donation_id>/like/', views.donation_like_view, name='donation_like'),
-    path('donations/<int:donation_id>/comments/', views.donation_comments_view, name='donation_comments'),
-    path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
-    path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
+    # Donation endpoints removed (legacy feature)
     
     # # User Management API endpoints (Admin only)
     # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
@@ -159,7 +153,10 @@ urlpatterns = [
     
     # Engagement Points & Leaderboard
     path('engagement/leaderboard/', views.engagement_leaderboard_view, name='engagement_leaderboard'),
+    path('engagement/tasks/', views.engagement_tasks_view, name='engagement_tasks'),
+    path('engagement/points-tasks/', views.points_tasks_view, name='points_tasks'),
     path('engagement/points-settings/', views.engagement_points_settings_view, name='engagement_points_settings'),
+    path('engagement/milestone-tasks-points/', views.milestone_tasks_points_view, name='milestone_tasks_points'),
     
     # Reward Inventory Management
     path('inventory/', views.inventory_items_view, name='inventory_items'),

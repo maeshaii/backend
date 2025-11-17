@@ -67,23 +67,34 @@ class Command(BaseCommand):
                 
                 self.stdout.write(f'  Found {ojt_user_count} OJT users to delete')
                 
-                # Delete OJT-specific records
-                ojt_info_count = OJTInfo.objects.all().count()
-                ojt_company_count = OJTCompanyProfile.objects.all().count()
-                ojt_import_count = OJTImport.objects.all().count()
-                send_date_count = SendDate.objects.all().count()
+                # Delete OJT-specific records (with error handling for missing tables)
+                try:
+                    ojt_info_count = OJTInfo.objects.all().count()
+                    OJTInfo.objects.all().delete()
+                    self.stdout.write(f'  ✓ Deleted {ojt_info_count} OJT Info records')
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f'  ⚠️  OJT Info table not found or error: {str(e)[:50]}'))
                 
-                OJTInfo.objects.all().delete()
-                self.stdout.write(f'  ✓ Deleted {ojt_info_count} OJT Info records')
+                try:
+                    ojt_company_count = OJTCompanyProfile.objects.all().count()
+                    OJTCompanyProfile.objects.all().delete()
+                    self.stdout.write(f'  ✓ Deleted {ojt_company_count} OJT Company Profile records')
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f'  ⚠️  OJT Company Profile table not found or error: {str(e)[:50]}'))
                 
-                OJTCompanyProfile.objects.all().delete()
-                self.stdout.write(f'  ✓ Deleted {ojt_company_count} OJT Company Profile records')
+                try:
+                    ojt_import_count = OJTImport.objects.all().count()
+                    OJTImport.objects.all().delete()
+                    self.stdout.write(f'  ✓ Deleted {ojt_import_count} OJT Import records')
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f'  ⚠️  OJT Import table not found or error: {str(e)[:50]}'))
                 
-                OJTImport.objects.all().delete()
-                self.stdout.write(f'  ✓ Deleted {ojt_import_count} OJT Import records')
-                
-                SendDate.objects.all().delete()
-                self.stdout.write(f'  ✓ Deleted {send_date_count} Send Date records')
+                try:
+                    send_date_count = SendDate.objects.all().count()
+                    SendDate.objects.all().delete()
+                    self.stdout.write(f'  ✓ Deleted {send_date_count} Send Date records')
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f'  ⚠️  Send Date table not found or error: {str(e)[:50]}'))
                 
                 # Delete OJT users and their related data
                 deleted_users = 0

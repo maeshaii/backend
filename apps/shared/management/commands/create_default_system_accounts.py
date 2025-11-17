@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.conf import settings
 from apps.shared.models import User, AccountType
 
 
@@ -9,8 +10,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--admin-username', type=str, default='admin')
         parser.add_argument('--admin-password', type=str, default='wherenayou2025')
-        parser.add_argument('--coord-username', type=str, default='coordinator')
-        parser.add_argument('--coord-password', type=str, default='coordiwherenayou2025')
+        parser.add_argument('--coord-username', type=str, default=settings.DEFAULT_COORDINATOR_USERNAME)
+        parser.add_argument('--coord-password', type=str, default=settings.DEFAULT_COORDINATOR_PASSWORD)
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -49,7 +50,7 @@ class Command(BaseCommand):
         coord_user, created = User.objects.get_or_create(
             acc_username=coord_username,
             defaults={
-                'f_name': 'System',
+                'f_name': 'BSIT',
                 'l_name': 'Coordinator',
                 'gender': 'Other',
                 'user_status': 'active',

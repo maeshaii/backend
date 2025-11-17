@@ -1,5 +1,5 @@
 """
-Automatic Scheduler for OJT Send Dates Processing
+Automatic Scheduler for OJT Send Dates Processing and Daily Task Resets
 This runs automatically when Django server starts
 """
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -8,6 +8,32 @@ from django.conf import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+def reset_daily_task_progress_job():
+    """
+    Job to reset daily engagement task progress for all users.
+    Resets count fields and milestone completions so users can earn points again.
+    """
+    try:
+        # Close old database connections to prevent stale connection errors
+        from django.db import close_old_connections
+        close_old_connections()
+        
+        from apps.shared.points_milestones import reset_daily_task_progress
+        logger.info("🔄 Running daily task progress reset...")
+        result = reset_daily_task_progress()
+        logger.info(f"✅ Daily task progress reset completed: {result}")
+    except Exception as e:
+        logger.error(f"❌ Error in daily task progress reset: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Always close connections after the job completes
+        try:
+            from django.db import close_old_connections
+            close_old_connections()
+        except Exception:
+            pass
 
 def process_send_dates_job():
     """
@@ -53,6 +79,16 @@ def start_scheduler():
     logger.info(f"🌍 Scheduler timezone: {timezone}")
     logger.info(f"⏰ Current time: {datetime.now(timezone)}")
     
+    # Add job: Reset daily task progress at 12:00 AM (start of day)
+    scheduler.add_job(
+        reset_daily_task_progress_job,
+        trigger=CronTrigger(hour=0, minute=0),  # 12:00 AM daily
+        id='reset_daily_task_progress',
+        name='Reset Daily Task Progress',
+        replace_existing=True,
+        max_instances=1  # Only one instance at a time
+    )
+    
     # Add job: Run every day at 12:01 AM (Daily production schedule)
     scheduler.add_job(
         process_send_dates_job,
@@ -74,7 +110,8 @@ def start_scheduler():
     )
     
     scheduler.start()
-    logger.info("🚀 APScheduler started - OJT processing schedules:")
+    logger.info("🚀 APScheduler started - Scheduled jobs:")
+    logger.info("   🔄 TASK RESET: Every day at 12:00 AM")
     logger.info("   ⚡ FREQUENT: Every 3 minutes (for testing)")
     logger.info("   📅 DAILY: Every day at 12:01 AM")
     

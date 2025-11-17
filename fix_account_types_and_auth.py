@@ -23,6 +23,7 @@ from datetime import datetime
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 django.setup()
 
+from django.conf import settings
 from apps.shared.models import User, AccountType, UserInitialPassword
 from django.db import transaction
 
@@ -136,24 +137,24 @@ def create_coordinator_account(account_types):
     coord_type = account_types[3]  # Coordinator account type
     
     # Delete existing coordinator if exists
-    User.objects.filter(acc_username='coordinator').delete()
+    User.objects.filter(acc_username=settings.DEFAULT_COORDINATOR_USERNAME).delete()
     
     # Create new coordinator
     coord_user = User.objects.create(
-        acc_username='coordinator',
-        f_name='System',
+        acc_username=settings.DEFAULT_COORDINATOR_USERNAME,
+        f_name='BSIT',
         l_name='Coordinator',
         gender='Other',
         user_status='active',
         account_type=coord_type,
     )
     
-    coord_password = 'coordiwherenayou2025'
+    coord_password = settings.DEFAULT_COORDINATOR_PASSWORD
     coord_user.set_password(coord_password)
     coord_user.save()
     
     print(f"   ✅ Coordinator account created")
-    print(f"   📋 Username: coordinator")
+    print(f"   📋 Username: {settings.DEFAULT_COORDINATOR_USERNAME}")
     print(f"   🔑 Password: {coord_password}")
     
     return coord_user
@@ -225,8 +226,8 @@ def verify_authentication_system():
     
     # Test coordinator login
     try:
-        coord = User.objects.get(acc_username='coordinator')
-        coord_login_works = coord.check_password('coordiwherenayou2025')
+        coord = User.objects.get(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)
+        coord_login_works = coord.check_password(settings.DEFAULT_COORDINATOR_PASSWORD)
         print(f"   {'✅' if coord_login_works else '❌'} Coordinator login: {'WORKS' if coord_login_works else 'FAILED'}")
     except User.DoesNotExist:
         print("   ❌ Coordinator user not found")
@@ -281,7 +282,7 @@ def main():
         print("=" * 50)
         print("📋 SYSTEM CREDENTIALS:")
         print("   Admin: admin / wherenayou2025")
-        print("   Coordinator: coordinator / coordiwherenayou2025")
+        print(f"   Coordinator: {settings.DEFAULT_COORDINATOR_USERNAME} / {settings.DEFAULT_COORDINATOR_PASSWORD}")
         print("   PESO: peso / pesopassword2025")
         print("   Alumni: Check exported password file")
         print("\n✅ All authentication issues have been resolved!")

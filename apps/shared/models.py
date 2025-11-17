@@ -599,15 +599,7 @@ class UserInitialPassword(models.Model):
 
 
 class UserPoints(models.Model):
-    """Tracks engagement points for users (alumni and OJT students).
-    
-    Points are awarded for:
-    - Like a post: +1 pt
-    - Comment on a post: +3 pts
-    - Share a post (repost): +5 pts
-    - Reply to a comment: +2 pts
-    - Post with photo: +15 pts
-    """
+    """Tracks engagement points for users (alumni and OJT students)."""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='points')
     total_points = models.IntegerField(default=0)
     
@@ -619,6 +611,7 @@ class UserPoints(models.Model):
     points_from_posts = models.IntegerField(default=0)
     points_from_posts_with_photos = models.IntegerField(default=0)
     points_from_tracker_form = models.IntegerField(default=0)
+    points_from_milestones = models.IntegerField(default=0)
     
     # Track counts for analytics
     like_count = models.IntegerField(default=0)
@@ -628,6 +621,8 @@ class UserPoints(models.Model):
     post_count = models.IntegerField(default=0)
     post_with_photo_count = models.IntegerField(default=0)
     tracker_form_count = models.IntegerField(default=0)
+    milestone_count = models.IntegerField(default=0)
+    follow_count = models.IntegerField(default=0)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -644,8 +639,20 @@ class UserPoints(models.Model):
     def __str__(self):
         return f"{self.user.full_name}: {self.total_points} pts"
     
+    def _recalculate_total_points(self) -> None:
+        self.total_points = (
+            self.points_from_likes +
+            self.points_from_comments +
+            self.points_from_shares +
+            self.points_from_replies +
+            self.points_from_posts +
+            self.points_from_posts_with_photos +
+            self.points_from_tracker_form +
+            self.points_from_milestones
+        )
+    
     def add_points(self, action_type: str, points: int = 0) -> None:
-        """Add points for a specific action type"""
+        """Add points for a specific action type and increment counts."""
         if action_type == 'like':
             self.points_from_likes += points
             self.like_count += 1
@@ -667,18 +674,97 @@ class UserPoints(models.Model):
         elif action_type == 'tracker_form':
             self.points_from_tracker_form += points
             self.tracker_form_count += 1
-        
-        # Update total points
-        self.total_points = (
-            self.points_from_likes +
-            self.points_from_comments +
-            self.points_from_shares +
-            self.points_from_replies +
-            self.points_from_posts +
-            self.points_from_posts_with_photos +
-            self.points_from_tracker_form
-        )
+        elif action_type == 'milestone':
+            self.points_from_milestones += points
+            if points > 0:
+                self.milestone_count += 1
+        self._recalculate_total_points()
         self.save()
+    
+    def add_milestone_points(self, points: int) -> None:
+        """Award milestone points and increment milestone counters."""
+        if points <= 0:
+            return
+        self.points_from_milestones += points
+        self.milestone_count += 1
+        self._recalculate_total_points()
+        self.save(update_fields=[
+            'points_from_milestones',
+            'milestone_count',
+            'total_points',
+            'updated_at',
+        ])
+    
+    def deduct_points(self, action_type: str, points: int = 0) -> None:
+        """Deduct points for a specific action type (e.g., when unliking)."""
+        if action_type == 'like':
+            self.points_from_likes = max(0, self.points_from_likes - points)
+            self.like_count = max(0, self.like_count - 1)
+        elif action_type == 'comment':
+            self.points_from_comments = max(0, self.points_from_comments - points)
+            self.comment_count = max(0, self.comment_count - 1)
+        elif action_type == 'share':
+            self.points_from_shares = max(0, self.points_from_shares - points)
+            self.share_count = max(0, self.share_count - 1)
+        elif action_type == 'reply':
+            self.points_from_replies = max(0, self.points_from_replies - points)
+            self.reply_count = max(0, self.reply_count - 1)
+        elif action_type == 'post':
+            self.points_from_posts = max(0, self.points_from_posts - points)
+            self.post_count = max(0, self.post_count - 1)
+        elif action_type == 'post_with_photo':
+            self.points_from_posts_with_photos = max(0, self.points_from_posts_with_photos - points)
+            self.post_with_photo_count = max(0, self.post_with_photo_count - 1)
+        elif action_type == 'tracker_form':
+            self.points_from_tracker_form = max(0, self.points_from_tracker_form - points)
+            self.tracker_form_count = max(0, self.tracker_form_count - 1)
+        self._recalculate_total_points()
+        self.save()
+    
+    def set_follow_count(self, count: int) -> None:
+        """Update cached follow count used when evaluating milestones."""
+        if count < 0:
+            count = 0
+        if self.follow_count != count:
+            self.follow_count = count
+            self.save(update_fields=['follow_count', 'updated_at'])
+    
+    def get_breakdown(self) -> dict:
+        """Return a standardized points breakdown for API consumers."""
+        return {
+            'likes': {
+                'points': self.points_from_likes,
+                'count': self.like_count,
+            },
+            'comments': {
+                'points': self.points_from_comments,
+                'count': self.comment_count,
+            },
+            'shares': {
+                'points': self.points_from_shares,
+                'count': self.share_count,
+            },
+            'replies': {
+                'points': self.points_from_replies,
+                'count': self.reply_count,
+            },
+            'posts': {
+                'points': self.points_from_posts,
+                'count': self.post_count,
+            },
+            'posts_with_photos': {
+                'points': self.points_from_posts_with_photos,
+                'count': self.post_with_photo_count,
+            },
+            'tracker_form': {
+                'points': self.points_from_tracker_form,
+                'count': self.tracker_form_count,
+            },
+            'milestones': {
+                'points': self.points_from_milestones,
+                'count': self.milestone_count,
+            },
+        }
 
 
 class EngagementPointsSettings(models.Model):
@@ -687,15 +773,17 @@ class EngagementPointsSettings(models.Model):
     Only one instance should exist (singleton pattern).
     """
     enabled = models.BooleanField(default=True, help_text="Enable or disable the points system")
+    milestone_tasks_enabled = models.BooleanField(default=True, help_text="Enable or disable milestone tasks feature")
+    tracker_form_enabled = models.BooleanField(default=True, help_text="Enable or disable tracker form rewards")
     
     # Points awarded per action
     like_points = models.IntegerField(default=1, help_text="Points for liking a post")
-    comment_points = models.IntegerField(default=3, help_text="Points for commenting on a post")
-    share_points = models.IntegerField(default=5, help_text="Points for sharing/reposting a post")
-    reply_points = models.IntegerField(default=2, help_text="Points for replying to a comment")
-    post_points = models.IntegerField(default=0, help_text="Points for posting without photos")
-    post_with_photo_points = models.IntegerField(default=15, help_text="Points for posting with photos")
-    tracker_form_points = models.IntegerField(default=0, help_text="Points for completing tracker form")
+    comment_points = models.IntegerField(default=2, help_text="Points for commenting on a post")
+    share_points = models.IntegerField(default=3, help_text="Points for sharing/reposting a post")
+    reply_points = models.IntegerField(default=3, help_text="Points for replying to a comment")
+    post_points = models.IntegerField(default=5, help_text="Points for posting without photos")
+    post_with_photo_points = models.IntegerField(default=10, help_text="Points for posting with photos")
+    tracker_form_points = models.IntegerField(default=10, help_text="Points for completing tracker form")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -715,13 +803,15 @@ class EngagementPointsSettings(models.Model):
             pk=1,
             defaults={
                 'enabled': True,
+                'milestone_tasks_enabled': True,
+                'tracker_form_enabled': True,
                 'like_points': 1,
                 'comment_points': 3,
                 'share_points': 5,
                 'reply_points': 2,
                 'post_points': 0,
                 'post_with_photo_points': 15,
-                'tracker_form_points': 0
+                'tracker_form_points': 10,
             }
         )
         return settings
@@ -745,6 +835,8 @@ class UserProfile(models.Model):
     profile_pic = models.ImageField(upload_to='profile_pics/', null=True, blank=True)
     profile_bio = models.TextField(null=True, blank=True)
     profile_resume = models.FileField(upload_to='resumes/', null=True, blank=True)
+    email_verified = models.BooleanField(default=False, help_text='Whether the user has verified their email address')
+    preferences_completed = models.BooleanField(default=False, help_text='Whether the user has completed their preferences')
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1353,6 +1445,7 @@ class OJTInfo(models.Model):
 class OJTCompanyProfile(models.Model):
     """OJT Company Profile - Stores company information for OJT students"""
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='ojt_company_profile')
+    coordinator = models.CharField(max_length=100, null=True, blank=True)  # Track which coordinator imported this profile
     company_name = models.CharField(max_length=255, null=True, blank=True)
     company_address = models.TextField(null=True, blank=True)
     company_email = models.EmailField(null=True, blank=True)
@@ -1369,6 +1462,7 @@ class OJTCompanyProfile(models.Model):
             models.Index(fields=['company_name']),
             models.Index(fields=['start_date']),
             models.Index(fields=['end_date']),
+            models.Index(fields=['coordinator']),
         ]
     
     def __str__(self):
@@ -1824,3 +1918,55 @@ class ReportSettings(models.Model):
     def get_active_settings(cls):
         """Return the most recently updated settings"""
         return cls.objects.order_by('-updated_at').first()
+
+
+class PointsTask(models.Model):
+    """Tasks that users can complete to earn points."""
+    task_id = models.AutoField(primary_key=True)
+    task_type = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text='Unique identifier for the task (e.g., verify_email, milestone_post_10)',
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    points = models.IntegerField(help_text='Points awarded for completing this task')
+    max_points = models.IntegerField(null=True, blank=True, help_text='Maximum points (for variable point tasks like "up to X points")')
+    icon_name = models.CharField(max_length=100, default='envelope', help_text='Icon identifier for frontend')
+    is_active = models.BooleanField(default=True)
+    order = models.IntegerField(default=0, help_text='Display order')
+    required_count = models.IntegerField(null=True, blank=True, help_text='Number of actions required to complete this task')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'shared_pointstask'
+        verbose_name = 'Points Task'
+        verbose_name_plural = 'Points Tasks'
+        ordering = ['order', 'task_id']
+    
+    def __str__(self):
+        return f"{self.title} ({self.points} points)"
+
+
+class UserTaskCompletion(models.Model):
+    """Track which tasks users have completed"""
+    completion_id = models.AutoField(primary_key=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='task_completions')
+    task = models.ForeignKey('PointsTask', on_delete=models.CASCADE, related_name='completions')
+    points_awarded = models.IntegerField()
+    completed_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'shared_usertaskcompletion'
+        verbose_name = 'User Task Completion'
+        verbose_name_plural = 'User Task Completions'
+        unique_together = [['user', 'task']]
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['task']),
+            models.Index(fields=['-completed_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.full_name} completed {self.task.title} ({self.points_awarded} points)"

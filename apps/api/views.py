@@ -6,6 +6,7 @@ Uses shared models and serializers for data representation. If this file continu
 import logging
 import uuid
 import os
+import re
 logger = logging.getLogger(__name__)
 
 from django.conf import settings
@@ -19,8 +20,13 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile
+from apps.shared.models import Follow
 from apps.shared.services import UserService
+from apps.shared.points_milestones import (
+    evaluate_and_award_milestones,
+    get_milestone_status,
+)
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -53,6 +59,19 @@ import tempfile
 from django.http import FileResponse
 from django.db import transaction
 from typing import Optional
+
+
+def _table_exists(table_name: str) -> bool:
+    """
+    Safely check if a database table exists.
+    Prevents runtime errors when migrations haven't been applied yet.
+    """
+    try:
+        with connection.cursor() as cursor:
+            tables = connection.introspection.table_names(cursor)
+        return table_name in tables
+    except Exception:
+        return False
 
 # --- Helper Functions ---
 
@@ -123,27 +142,153 @@ def award_engagement_points(user, action_type):
         
         # Check if points system is enabled
         if not settings.enabled:
-            return
+            return {'success': True, 'message': 'Points system is disabled'}
         
         # Only award points to Alumni or OJT users
         if not hasattr(user, 'account_type'):
-            return
+            return {'success': False, 'message': 'User account type not found'}
         
         account_type = user.account_type
         is_alumni = getattr(account_type, 'user', False)
         is_ojt = getattr(account_type, 'ojt', False)
         
         if not (is_alumni or is_ojt):
-            return
+            return {'success': False, 'message': 'User is not eligible for points'}
         
         # OJT users cannot receive tracker_form points
         if is_ojt and action_type == 'tracker_form':
-            return
+            return {'success': False, 'message': 'OJT users cannot receive tracker form points'}
+        
+        # Check if tracker form rewards are enabled
+        if action_type == 'tracker_form' and not settings.tracker_form_enabled:
+            return {'success': True, 'message': 'Tracker form rewards are disabled'}
         
         # Get or create user points
         user_points, created = UserPoints.objects.get_or_create(user=user)
         
-        # Award points based on action type using settings from database
+        points_map = {
+            'like': settings.like_points,
+            'comment': settings.comment_points,
+            'share': settings.share_points,
+            'reply': settings.reply_points,
+            'post': settings.post_points,
+            'post_with_photo': settings.post_with_photo_points,
+            'tracker_form': settings.tracker_form_points
+        }
+        
+        if action_type not in points_map:
+            return {'success': True, 'message': 'No points awarded for this action type'}
+        
+        action_points = points_map[action_type]
+
+        # Suppress direct action-based points; milestone bonuses handle rewards.
+        # Note: tracker_form points are now controlled by tracker_form_enabled setting
+        suppressed_actions = {
+            'like',
+            'comment',
+            'share',
+            'reply',
+            'post',
+            'post_with_photo',
+        }
+        if action_type in suppressed_actions:
+            action_points = 0
+
+        user_points.add_points(action_type, action_points)
+        
+        awarded_milestones = evaluate_and_award_milestones(user_points)
+        milestone_points = sum(item['points'] for item in awarded_milestones)
+        total_awarded = action_points + milestone_points
+        
+        if action_points > 0:
+            # Log the points award
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Awarded {action_points} points to {user.full_name} for {action_type}")
+        
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_points_update
+            from django.db.models import Q
+            
+            # Refresh from DB to ensure totals reflect milestone updates
+            user_points.refresh_from_db()
+            
+            # Calculate rank
+            higher_points_count = UserPoints.objects.filter(
+                Q(user__account_type__user=True) | Q(user__account_type__ojt=True),
+                total_points__gt=user_points.total_points
+            ).count()
+            rank = higher_points_count + 1
+            
+            broadcast_points_update(user.user_id, {
+                'user_id': user.user_id,
+                'total_points': user_points.total_points,
+                'rank': rank,
+                'points_breakdown': user_points.get_breakdown()
+            })
+        except Exception as broadcast_error:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error broadcasting points update for user {user.user_id}: {broadcast_error}")
+        
+        message_parts = []
+        if action_points > 0:
+            message_parts.append(f'{action_points} engagement points')
+        if milestone_points > 0:
+            message_parts.append(f'{milestone_points} milestone points')
+        message = 'Points recorded.' if not message_parts else f"Awarded {' and '.join(message_parts)}."
+        
+        return {
+            'success': True,
+            'message': message,
+            'points_awarded': total_awarded,
+            'milestones_unlocked': awarded_milestones,
+            'total_points': user_points.total_points
+        }
+            
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error awarding engagement points: {e}")
+        return {'success': False, 'message': f'Error awarding points: {str(e)}'}
+
+
+def deduct_engagement_points(user, action_type):
+    """
+    Deduct engagement points from a user when they undo an action (e.g., unlike).
+    
+    Points are configurable via EngagementPointsSettings model.
+    Deducts points from Alumni and OJT users.
+    """
+    try:
+        # Get points settings
+        from apps.shared.models import EngagementPointsSettings
+        from django.utils import timezone
+        settings = EngagementPointsSettings.get_settings()
+        
+        # Check if points system is enabled
+        if not settings.enabled:
+            return {'success': True, 'message': 'Points system is disabled'}
+        
+        # Only deduct points from Alumni or OJT users
+        if not hasattr(user, 'account_type'):
+            return {'success': False, 'message': 'User account type not found'}
+        
+        account_type = user.account_type
+        is_alumni = getattr(account_type, 'user', False)
+        is_ojt = getattr(account_type, 'ojt', False)
+        
+        if not (is_alumni or is_ojt):
+            return {'success': False, 'message': 'User is not eligible for points'}
+        
+        # Get or create user points
+        user_points, created = UserPoints.objects.get_or_create(user=user)
+        
+        # If user points were just created, they have no points to deduct
+        if created:
+            return {'success': True, 'message': 'No points to deduct'}
+        
+        # Deduct points based on action type using settings from database
         points_map = {
             'like': settings.like_points,
             'comment': settings.comment_points,
@@ -156,8 +301,12 @@ def award_engagement_points(user, action_type):
         
         points = points_map.get(action_type, 0)
         if points > 0:
-            user_points.add_points(action_type, points)
-            logger.info(f"Awarded {points} points to {user.full_name} for {action_type}")
+            user_points.deduct_points(action_type, points)
+            
+            # Log the points deduction
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Deducted {points} points from {user.full_name} for {action_type}")
             
             # Broadcast points update via WebSocket for real-time updates
             try:
@@ -174,49 +323,31 @@ def award_engagement_points(user, action_type):
                 ).count()
                 rank = higher_points_count + 1
                 
-                # Build points breakdown
-                points_breakdown = {
-                    'likes': {
-                        'points': user_points.points_from_likes,
-                        'count': user_points.like_count
-                    },
-                    'comments': {
-                        'points': user_points.points_from_comments,
-                        'count': user_points.comment_count
-                    },
-                    'shares': {
-                        'points': user_points.points_from_shares,
-                        'count': user_points.share_count
-                    },
-                    'replies': {
-                        'points': user_points.points_from_replies,
-                        'count': user_points.reply_count
-                    },
-                    'posts': {
-                        'points': user_points.points_from_posts,
-                        'count': user_points.post_count
-                    },
-                    'posts_with_photos': {
-                        'points': user_points.points_from_posts_with_photos,
-                        'count': user_points.post_with_photo_count
-                    },
-                    'tracker_form': {
-                        'points': user_points.points_from_tracker_form,
-                        'count': user_points.tracker_form_count
-                    }
-                }
-                
                 broadcast_points_update(user.user_id, {
                     'user_id': user.user_id,
                     'total_points': user_points.total_points,
                     'rank': rank,
-                    'points_breakdown': points_breakdown
+                    'points_breakdown': user_points.get_breakdown()
                 })
-            except Exception as e:
-                logger.error(f"Error broadcasting points update for user {user.user_id}: {e}")
-    
+            except Exception as broadcast_error:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error broadcasting points update for user {user.user_id}: {broadcast_error}")
+            
+            return {
+                'success': True,
+                'message': f'Points deducted: {points}',
+                'points_deducted': points,
+                'total_points': user_points.total_points
+            }
+        else:
+            return {'success': True, 'message': 'No points to deduct for this action type'}
+            
     except Exception as e:
-        logger.error(f"Error awarding points to user {user.user_id}: {e}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error deducting engagement points: {e}")
+        return {'success': False, 'message': f'Error deducting points: {str(e)}'}
 
 
 def get_content_images_safe(content_id, content_type):
@@ -397,6 +528,20 @@ def build_image_url(image_field, request=None):
         print(f'build_image_url - error: {e}')
         pass
     return ""
+
+
+def extract_points_from_value(value: Optional[str]) -> int:
+    """Extract integer points value from reward descriptors like '100 pts' or 'PHP 100'."""
+    if not value:
+        return 0
+    try:
+        matches = re.findall(r'\d+', str(value))
+        if not matches:
+            return 0
+        return int(matches[0])
+    except Exception:
+        return 0
+
 
 # Utility: extract current user from Authorization header (Bearer/JWT) robustly
 def get_current_user_from_request(request):
@@ -2333,12 +2478,10 @@ def import_ojt_view(request):
                     old_user.save(update_fields=['user_status'])
                     reactivated_count += 1
                     print(f"🟢 Reactivated student: {old_ctu_id} (in new import)")
-        
         print(f"📊 Batch import summary:")
         print(f"   - Deactivated {deactivated_count} old batch students")
         print(f"   - Reactivated {reactivated_count} students (will be updated)")
         print(f"   - Processing {len(new_import_ctu_ids)} students from new import")
-        # ===== END NEW BATCH IMPORT LOGIC =====
         
         for index, row in df.iterrows():
             print(f"--- Processing Row {index+2} ---")
@@ -2457,6 +2600,46 @@ def import_ojt_view(request):
                 existing_user_check = User.objects.filter(acc_username=ctu_id).first()
                 
                 print(f"Row {index+2} - CTU_ID: {ctu_id}, User exists: {existing_user_check is not None}")
+                
+                # IMPORTANT: Check if this CTU_ID was imported by a different coordinator
+                if existing_user_check:
+                    # Check if user has academic_info (OJT students should have this)
+                    if hasattr(existing_user_check, 'academic_info') and existing_user_check.academic_info:
+                        user_year = existing_user_check.academic_info.year_graduated
+                        user_section = getattr(existing_user_check.academic_info, 'section', None) or ''
+                        
+                        # Find which coordinator(s) imported this user's year+section
+                        existing_imports = OJTImport.objects.filter(
+                            batch_year=user_year,
+                            section=user_section
+                        )
+                        
+                        if existing_imports.exists():
+                            # Check all imports for this year+section
+                            coordinators_for_this_batch = set()
+                            for imp in existing_imports:
+                                coordinators_for_this_batch.add(imp.coordinator)
+                            
+                            # If any coordinator other than current one imported this batch, block it
+                            other_coordinators = coordinators_for_this_batch - {coordinator_username}
+                            if other_coordinators:
+                                original_coordinator = list(other_coordinators)[0]  # Get first other coordinator
+                                error_msg = f"Row {index + 2}: CTU_ID {ctu_id} was already imported by {original_coordinator} (batch {user_year}, section {user_section}). Cannot import to {coordinator_username}."
+                                print(f"❌ BLOCKED: {error_msg}")
+                                errors.append(error_msg)
+                                skipped_count += 1
+                                continue
+                            else:
+                                print(f"✅ CTU_ID {ctu_id} was imported by same coordinator ({coordinator_username}) - allowing update")
+                        else:
+                            # User exists but no import record - might be from old system
+                            # Check if user is OJT type - if yes, block it to prevent conflicts
+                            if existing_user_check.account_type and existing_user_check.account_type.ojt:
+                                error_msg = f"Row {index + 2}: CTU_ID {ctu_id} already exists as OJT student (batch {user_year}, section {user_section}) but has no import record. Cannot import to prevent conflicts."
+                                print(f"❌ BLOCKED: {error_msg}")
+                                errors.append(error_msg)
+                                skipped_count += 1
+                                continue
                 
                 if not existing_user_check:
                     # NEW USER - require all fields (including personal info AND company info)
@@ -2593,10 +2776,15 @@ def import_ojt_view(request):
                             print(f"Row {index+2} - No Section in Excel, keeping existing section: {academic.section}")
                         
                         ojt_info, _ = OJTInfo.objects.get_or_create(user=existing_user)
-                        employment, _ = EmploymentHistory.objects.get_or_create(user=existing_user)
                         
-                        # Check if employment already has a company (for detecting first vs second import)
-                        has_existing_company = employment.company_name_current and str(employment.company_name_current).strip()
+                        # Check if OJTCompanyProfile already has a company (for detecting first vs second import)
+                        from apps.shared.models import OJTCompanyProfile
+                        from django.db.utils import ProgrammingError
+                        try:
+                            existing_company_profile = existing_user.ojt_company_profile
+                            has_existing_company = existing_company_profile.company_name and str(existing_company_profile.company_name).strip()
+                        except (OJTCompanyProfile.DoesNotExist, ProgrammingError, AttributeError):
+                            has_existing_company = False
                         
                         # Check if user has initial password record (indicates account was already created)
                         from apps.shared.models import UserInitialPassword
@@ -2662,8 +2850,6 @@ def import_ojt_view(request):
                         has_new_company_info = pd.notna(company_name) and str(company_name).strip()
                         
                         if has_new_company_info:
-                            employment.company_name_current = str(company_name).strip()
-                            
                             # If this is SECOND import (has new company but didn't have one before)
                             # Set start date to TODAY automatically
                             if not has_existing_company:
@@ -2682,39 +2868,7 @@ def import_ojt_view(request):
                                     ojt_end_date = send_date_obj.send_date
                                     print(f"Row {index+2} - Auto-calculated end_date from SendDate: {ojt_end_date}")
                         
-                        # Update company detail fields (after column normalization)
-                        company_address = row.get('Company_Address')
-                        company_email = row.get('Company_Email')
-                        company_contact = row.get('Company_Contact')
-                        contact_person = row.get('Contact_Person')  # Normalized from Contact_Person_Name
-                        position = row.get('Position')  # Normalized from Contact_Person_Position
-                        
-                        print(f"Row {index+2} - 📦 Reading company details from normalized columns:")
-                        print(f"  Company_Address: '{company_address}' (notna: {pd.notna(company_address)}, type: {type(company_address)})")
-                        print(f"  Company_Email: '{company_email}' (notna: {pd.notna(company_email)}, type: {type(company_email)})")
-                        print(f"  Company_Contact: '{company_contact}' (notna: {pd.notna(company_contact)}, type: {type(company_contact)})")
-                        print(f"  Contact_Person: '{contact_person}' (notna: {pd.notna(contact_person)}, type: {type(contact_person)})")
-                        print(f"  Position: '{position}' (notna: {pd.notna(position)}, type: {type(position)})")
-                        
-                        if pd.notna(company_address) and str(company_address).strip():
-                            employment.company_address = str(company_address).strip()
-                            print(f"  -> Set company_address to: '{employment.company_address}'")
-                        if pd.notna(company_email) and str(company_email).strip():
-                            employment.company_email = str(company_email).strip()
-                            print(f"  -> Set company_email to: '{employment.company_email}'")
-                        if pd.notna(company_contact) and str(company_contact).strip():
-                            employment.company_contact = str(company_contact).strip()
-                            print(f"  -> Set company_contact to: '{employment.company_contact}'")
-                        if pd.notna(contact_person) and str(contact_person).strip():
-                            employment.contact_person = str(contact_person).strip()
-                            print(f"  -> Set contact_person to: '{employment.contact_person}'")
-                        if pd.notna(position) and str(position).strip():
-                            employment.position = str(position).strip()
-                            print(f"  -> Set position to: '{employment.position}'")
-                        
-                        if 'ojt_start_date' in locals() and ojt_start_date:
-                            employment.date_started = ojt_start_date
-                        employment.save()
+                        # Company data will be saved to OJTCompanyProfile only, not EmploymentHistory
 
                         # Update OJT info (status, dates if parsed)
                         # STATUS is ONLY changeable if start_date exists
@@ -2739,6 +2893,7 @@ def import_ojt_view(request):
                             ojt_company_profile, created = OJTCompanyProfile.objects.get_or_create(
                                 user=existing_user,
                                 defaults={
+                                    'coordinator': coordinator_username,  # Track which coordinator imported this
                                     'company_name': str(company_name).strip().upper() if has_new_company_info else None,
                                     'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
                                     'end_date': ojt_end_date if 'ojt_end_date' in locals() else None,
@@ -2746,7 +2901,8 @@ def import_ojt_view(request):
                             )
                             
                             if not created:
-                                # Update existing profile
+                                # Update existing profile - also update coordinator if it's being updated
+                                ojt_company_profile.coordinator = coordinator_username  # Update coordinator on each import
                                 if has_new_company_info:
                                     ojt_company_profile.company_name = str(company_name).strip().upper()
                                 if 'ojt_start_date' in locals() and ojt_start_date:
@@ -2874,6 +3030,7 @@ def import_ojt_view(request):
                     from apps.shared.models import OJTCompanyProfile
                     ojt_company_kwargs = {
                         'user': ojt_user,
+                        'coordinator': coordinator_username,  # Track which coordinator imported this
                         'company_name': str(company_name_new).strip().upper() if pd.notna(company_name_new) and str(company_name_new).strip() else None,
                         'start_date': ojt_start_date if 'ojt_start_date' in locals() else None,
                         'end_date': ojt_end_date,
@@ -2983,6 +3140,9 @@ def ojt_statistics_view(request):
         year_section_counts = {}
         try:
             from apps.shared.models import OJTImport
+            from django.db.models import Q
+            
+            # Get imports filtered by coordinator
             import_filter = OJTImport.objects.all()
             if coordinator_username:
                 import_filter = import_filter.filter(coordinator=coordinator_username)
@@ -2990,7 +3150,7 @@ def ojt_statistics_view(request):
             print(f"DEBUG: Filtering by coordinator: {coordinator_username}")
             print(f"DEBUG: Found {import_filter.count()} import records")
             
-            # Get unique year+section combinations (don't count duplicates)
+            # Get unique year+section combinations from imports (ONLY from this coordinator's imports)
             unique_year_sections = {}
             for imp in import_filter:
                 y = getattr(imp, 'batch_year', None)
@@ -3002,46 +3162,66 @@ def ojt_statistics_view(request):
             
             print(f"DEBUG: Unique year+section combinations from imports: {unique_year_sections.keys()}")
             
-            # ALSO get year+section combinations from actual users in database
-            # This ensures we show cards even if import records were deleted
-            from django.db.models import Q
-            actual_users = User.objects.filter(
-                account_type__ojt=True
-            ).exclude(
-                acc_username='coordinator'
-            ).exclude(
-                f_name='Coordinator'
-            ).select_related('academic_info')
+            # If coordinator is specified, ONLY show year+section combinations from their imports
+            # Don't add users from other coordinators
+            if not coordinator_username:
+                # Admin view - can see all users, but still only from import records
+                # Add year+section from actual users that have import records
+                all_imports = OJTImport.objects.all()
+                all_import_year_sections = set()
+                for imp in all_imports:
+                    y = getattr(imp, 'batch_year', None)
+                    section = getattr(imp, 'section', None) or 'Unknown'
+                    if y is not None:
+                        all_import_year_sections.add((y, section))
+                
+                # Only add users that match import records
+                actual_users = User.objects.filter(
+                    account_type__ojt=True
+                ).exclude(
+                    acc_username=settings.DEFAULT_COORDINATOR_USERNAME
+                ).exclude(
+                    f_name='Coordinator'
+                ).select_related('academic_info')
+                
+                for user in actual_users:
+                    if hasattr(user, 'academic_info') and user.academic_info:
+                        year = user.academic_info.year_graduated
+                        section = user.academic_info.section or 'Unknown'
+                        if year and (year, section) in all_import_year_sections:
+                            unique_year_sections[(year, section)] = True
             
-            if coordinator_username:
-                # For coordinators, we need to match by their managed year+sections
-                # But since import records might be deleted, let's just show all OJT users
-                pass
-            
-            # Add year+section from actual users
-            for user in actual_users:
-                if hasattr(user, 'academic_info') and user.academic_info:
-                    year = user.academic_info.year_graduated
-                    section = user.academic_info.section or 'Unknown'
-                    if year:
-                        unique_year_sections[(year, section)] = True
-            
-            print(f"DEBUG: Unique year+section combinations (with users): {unique_year_sections.keys()}")
+            print(f"DEBUG: Unique year+section combinations (final): {unique_year_sections.keys()}")
             
             # Now count actual OJT users for each year and section (exclude alumni and coordinators)
             for (year, section) in unique_year_sections.keys():
                 # Count actual OJT users in database for this year AND section
                 # Only count active OJT students, NOT alumni
-                ojt_count = User.objects.filter(
+                user_query = User.objects.filter(
                     academic_info__year_graduated=year,
                     academic_info__section=section,
                     account_type__ojt=True,  # Only count OJT students, not alumni
                     user_status__iexact='Active'  # Only count active students
                 ).exclude(
-                    acc_username='coordinator'  # Exclude coordinator users
+                    acc_username=settings.DEFAULT_COORDINATOR_USERNAME  # Exclude coordinator users
                 ).exclude(
                     f_name='Coordinator'  # Exclude any user with name "Coordinator"
-                ).count()
+                )
+                
+                # If coordinator is specified, ensure users match their imports
+                if coordinator_username:
+                    # Double-check: verify this year+section was imported by this coordinator
+                    coordinator_has_import = OJTImport.objects.filter(
+                        coordinator=coordinator_username,
+                        batch_year=year,
+                        section=section
+                    ).exists()
+                    
+                    if not coordinator_has_import:
+                        # Skip this year+section if coordinator didn't import it
+                        continue
+                
+                ojt_count = user_query.count()
                 
                 # Only show cards with actual OJT students (don't count alumni)
                 if ojt_count > 0:
@@ -3091,22 +3271,70 @@ def ojt_by_year_view(request):
         except Exception:
             return JsonResponse({'success': False, 'message': 'Invalid year parameter'}, status=400)
 
+        # Get coordinator's imported year+section combinations if coordinator is specified
+        coordinator_year_sections = set()
+        coordinator_year_sections_normalized = set()  # For flexible matching
+        if coordinator_username:
+            try:
+                from apps.shared.models import OJTImport
+                coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+                for imp in coordinator_imports:
+                    y = getattr(imp, 'batch_year', None)
+                    s = getattr(imp, 'section', None)
+                    # Normalize section: strip whitespace, handle None
+                    s_normalized = s.strip() if s else ''
+                    if y:
+                        coordinator_year_sections.add((y, s_normalized))
+                        # Also add with original value for flexible matching
+                        coordinator_year_sections_normalized.add((y, s_normalized))
+                        if s and s.strip() and s.strip() != s_normalized:
+                            coordinator_year_sections_normalized.add((y, s.strip()))
+                print(f"DEBUG: Coordinator {coordinator_username} has imports for: {coordinator_year_sections}")
+            except Exception as e:
+                print(f"ERROR getting coordinator imports: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Normalize section for comparison (empty string or None both become '')
+        normalized_section = section.strip() if section else ''
+        # Check if the OJT company profile table is available (some environments may be mid-migration)
+        ojt_company_profile_exists = _table_exists(OJTCompanyProfile._meta.db_table)
+        select_related_fields = ['profile', 'academic_info', 'ojt_info', 'employment', 'initial_password']
+        if ojt_company_profile_exists:
+            select_related_fields.append('ojt_company_profile')
+        
         # Filter by section if provided
-        if section:
-            print(f"DEBUG: Filtering by section: {section}")
+        if normalized_section:
+            print(f"DEBUG: Filtering by section: {normalized_section}")
             # Filter by actual section stored in AcademicInfo - ONLY OJT STUDENTS
             ojt_data = (
                 User.objects
                 .filter(
                     academic_info__year_graduated=year_int, 
-                    academic_info__section=section,
+                    academic_info__section=normalized_section,
                     account_type__ojt=True  # Only OJT students, not alumni
                 )
-                .exclude(acc_username='coordinator')  # Exclude coordinator user
+                .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
                 .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
+                .select_related(*select_related_fields)
                 .order_by('l_name', 'f_name')
             )
+            
+            # If coordinator is specified, ensure this year+section was imported by them
+            if coordinator_username:
+                # Check if this year+section combination exists in coordinator's imports
+                # Try both exact match and normalized match
+                section_key = normalized_section
+                section_found = (
+                    (year_int, section_key) in coordinator_year_sections or
+                    (year_int, section_key) in coordinator_year_sections_normalized
+                )
+                
+                if not section_found:
+                    # This year+section was not imported by this coordinator, return empty
+                    ojt_data = User.objects.none()
+                    print(f"DEBUG: Year {year_int}, Section {section_key} not imported by {coordinator_username}")
+                    print(f"DEBUG: Available sections: {[s for y, s in coordinator_year_sections if y == year_int]}")
         else:
             # No section filter - show all users for the year
             # If no coordinator is specified, this is likely an admin request
@@ -3120,56 +3348,87 @@ def ojt_by_year_view(request):
                         ojt_info__is_sent_to_admin=True,
                         account_type__ojt=True  # Only OJT students
                     )
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
+                    .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
                     .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
+                    .select_related(*select_related_fields)
                     .order_by('l_name', 'f_name')
                 )
             else:
-                # Coordinator request - show all OJT users for the year
-                ojt_data = (
-                    User.objects
-                    .filter(
-                        academic_info__year_graduated=year_int,
-                        account_type__ojt=True  # Only OJT students, not alumni
-                    )
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('l_name', 'f_name')
-                )
+                # Coordinator request - show only OJT users for year+section combinations they imported
+                from django.db.models import Q
+                year_section_filters = Q()
+                has_filters = False
+                for (y, s) in coordinator_year_sections:
+                    if y == year_int:  # Only include sections for this year
+                        has_filters = True
+                        s_normalized = s or ''  # Normalize None to empty string
+                        if s_normalized:
+                            year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s_normalized)
+                        else:
+                            year_section_filters |= Q(academic_info__year_graduated=y)
+                
+                if has_filters and year_section_filters:
+                    try:
+                        ojt_data = (
+                            User.objects
+                            .filter(
+                                year_section_filters,
+                                account_type__ojt=True  # Only OJT students, not alumni
+                            )
+                            .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
+                            .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
+                    .select_related(*select_related_fields)
+                            .order_by('l_name', 'f_name')
+                        )
+                    except Exception as e:
+                        print(f"ERROR in ojt_by_year_view filter: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        ojt_data = User.objects.none()
+                else:
+                    # No imports for this year by this coordinator
+                    ojt_data = User.objects.none()
+                    print(f"DEBUG: Coordinator {coordinator_username} has no imports for year {year_int}")
 
         # Fallbacks to avoid empty UI and help coordinators verify recent imports
         # BUT: Only apply fallback for coordinator requests, NOT for admin requests
+        # AND: Only show users from coordinator's imports
         if not ojt_data.exists() and coordinator_username:
-            # 1) Prefer recently created/updated users (likely the ones just imported)
+            # 1) Prefer recently created/updated users from coordinator's imports
             try:
+                from django.db.models import Q
                 recent_since = timezone.now() - timedelta(days=1)
-                recent_users = (
-                    User.objects
-                    .filter(updated_at__gte=recent_since)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('-updated_at', 'l_name', 'f_name')
-                )
+                
+                # Build filter for coordinator's year+section combinations
+                year_section_filters = Q()
+                for (y, s) in coordinator_year_sections:
+                    if s:
+                        year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s)
+                    else:
+                        year_section_filters |= Q(academic_info__year_graduated=y)
+                
+                if year_section_filters:
+                    recent_users = (
+                        User.objects
+                        .filter(
+                            year_section_filters,
+                            updated_at__gte=recent_since,
+                            account_type__ojt=True
+                        )
+                        .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
+                        .exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator user
+                        .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
+                    .select_related(*select_related_fields)
+                        .order_by('-updated_at', 'l_name', 'f_name')
+                    )
+                else:
+                    recent_users = User.objects.none()
             except Exception:
                 recent_users = User.objects.none()
 
             if recent_users.exists():
                 ojt_data = recent_users
-            else:
-                # 2) As a last resort, show all OJT-type users (but exclude coordinators)
-                ojt_data = (
-                    User.objects
-                    .filter(account_type__ojt=True)
-                    .exclude(acc_username='1334335')  # Exclude Carlo Mendoza (4-B)
-                    .exclude(acc_username='coordinator')  # Exclude coordinator user
-                    .exclude(f_name='Coordinator')  # Exclude any user with name "Coordinator"
-                    .select_related('profile', 'academic_info', 'ojt_info', 'ojt_company_profile', 'employment', 'initial_password')
-                    .order_by('l_name', 'f_name')
-                )
+            # Don't show all OJT users as fallback - respect coordinator isolation
 
         ojt_list = []
         for ojt in ojt_data:
@@ -3198,7 +3457,12 @@ def ojt_by_year_view(request):
             academic_info = getattr(ojt, 'academic_info', None) if hasattr(ojt, 'academic_info') else None
             employment = getattr(ojt, 'employment', None) if hasattr(ojt, 'employment') else None
             ojt_info = getattr(ojt, 'ojt_info', None) if hasattr(ojt, 'ojt_info') else None
-            ojt_company_profile = getattr(ojt, 'ojt_company_profile', None) if hasattr(ojt, 'ojt_company_profile') else None
+            ojt_company_profile = None
+            if ojt_company_profile_exists:
+                try:
+                    ojt_company_profile = ojt.ojt_company_profile
+                except (AttributeError, OJTCompanyProfile.DoesNotExist):
+                    ojt_company_profile = None
             account_type = getattr(ojt, 'account_type', None) if hasattr(ojt, 'account_type') else None
             initial_password = getattr(ojt, 'initial_password', None) if hasattr(ojt, 'initial_password') else None
             
@@ -3217,14 +3481,14 @@ def ojt_by_year_view(request):
                 'civil_status': getattr(profile, 'civil_status', None) if profile else None,
                 'social_media': getattr(profile, 'social_media', None) if profile else None,
                 'course': getattr(academic_info, 'program', None) if academic_info else None,
-                # Use OJT Company Profile for OJT students, not EmploymentHistory
+                # Use OJT Company Profile for OJT students (not EmploymentHistory)
                 'company': getattr(ojt_company_profile, 'company_name', None) if ojt_company_profile else None,
                 'company_address': getattr(ojt_company_profile, 'company_address', None) if ojt_company_profile else None,
                 'company_email': getattr(ojt_company_profile, 'company_email', None) if ojt_company_profile else None,
                 'company_contact': getattr(ojt_company_profile, 'company_contact', None) if ojt_company_profile else None,
                 'contact_person': getattr(ojt_company_profile, 'contact_person', None) if ojt_company_profile else None,
                 'position': getattr(ojt_company_profile, 'position', None) if ojt_company_profile else None,
-                'ojt_start_date': getattr(ojt_company_profile, 'start_date', None) if ojt_company_profile else None,
+                'ojt_start_date': getattr(ojt_company_profile, 'start_date', None) if ojt_company_profile else (getattr(ojt_info, 'ojt_start_date', None) if ojt_info else None),
                 'ojt_end_date': getattr(ojt_info, 'ojt_end_date', None) if ojt_info else None,
                 'ojt_status': getattr(ojt_info, 'ojtstatus', None) or 'Pending' if ojt_info else 'Pending',
                 'is_sent_to_admin': is_sent_to_admin_val,
@@ -3234,11 +3498,15 @@ def ojt_by_year_view(request):
             }
             
             print(f"🔍 DEBUG: Adding user data with company details:")
-            print(f"   company_address: {user_data['company_address']}")
-            print(f"   company_email: {user_data['company_email']}")
-            print(f"   company_contact: {user_data['company_contact']}")
-            print(f"   contact_person: {user_data['contact_person']}")
-            print(f"   position: {user_data['position']}")
+            print(f"   OJTCompanyProfile exists: {ojt_company_profile is not None}")
+            print(f"   Employment exists: {employment is not None}")
+            if employment:
+                print(f"   Employment company_name_current: {getattr(employment, 'company_name_current', None)}")
+            print(f"   Final company_address: {user_data['company_address']}")
+            print(f"   Final company_email: {user_data['company_email']}")
+            print(f"   Final company_contact: {user_data['company_contact']}")
+            print(f"   Final contact_person: {user_data['contact_person']}")
+            print(f"   Final position: {user_data['position']}")
             
             ojt_list.append(user_data)
 
@@ -3305,18 +3573,29 @@ def ojt_company_statistics_view(request):
         
         from apps.shared.models import OJTCompanyProfile
         from django.db.models import Count
+        from django.db.utils import ProgrammingError
         
         # Base query - get all OJT company profiles
-        company_profiles = OJTCompanyProfile.objects.all()
+        try:
+            company_profiles = OJTCompanyProfile.objects.all()
+        except ProgrammingError:
+            # Table doesn't exist yet, return empty result
+            return JsonResponse({
+                'success': True,
+                'companies': [],
+                'total_companies': 0,
+                'total_students': 0
+            })
         
         # Filter by coordinator if provided
+        # Include records where coordinator matches OR where coordinator is None/empty (for backward compatibility)
+        # For None/empty records, check if the user was imported by this coordinator via OJTImport
         if coordinator_username:
-            # Get OJT users managed by this coordinator
-            # First get all imports by this coordinator to find which years/sections they manage
             from apps.shared.models import OJTImport
-            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+            from django.db.models import Q
             
-            # Get unique year+section combinations
+            # Get year/section combinations for this coordinator
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
             year_sections = set()
             for imp in coordinator_imports:
                 year = getattr(imp, 'batch_year', None)
@@ -3324,24 +3603,30 @@ def ojt_company_statistics_view(request):
                 if year:
                     year_sections.add((year, section))
             
-            # Filter users by these year+section combinations
-            from django.db.models import Q
-            year_section_filters = Q()
-            for year, section in year_sections:
-                if section:
-                    year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
-                else:
-                    year_section_filters |= Q(user__academic_info__year_graduated=year)
+            # Build filter: coordinator matches OR (coordinator is None/empty AND user was imported by this coordinator)
+            coordinator_filter = Q(coordinator=coordinator_username)
             
-            if year_section_filters:
-                company_profiles = company_profiles.filter(year_section_filters)
+            # For backward compatibility: include records with None/empty coordinator if user was imported by this coordinator
+            if year_sections:
+                year_section_filters = Q()
+                for year, section in year_sections:
+                    if section:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                    else:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year)
+                
+                if year_section_filters:
+                    # Include records where coordinator is None/empty AND user matches coordinator's year/section
+                    coordinator_filter |= (Q(coordinator__isnull=True) | Q(coordinator='')) & year_section_filters
+            
+            company_profiles = company_profiles.filter(coordinator_filter)
         
         # Group by company name and count
         company_stats = (
             company_profiles
             .exclude(company_name__isnull=True)
             .exclude(company_name='')
-            .exclude(user__acc_username='coordinator')  # Exclude coordinator users
+            .exclude(user__acc_username=settings.DEFAULT_COORDINATOR_USERNAME)  # Exclude coordinator users
             .values('company_name')
             .annotate(student_count=Count('id'))
             .order_by('-student_count', 'company_name')
@@ -3383,25 +3668,43 @@ def ojt_students_by_company_view(request):
         if not company_name:
             return JsonResponse({'success': False, 'message': 'Company name is required'}, status=400)
         
-        from apps.shared.models import EmploymentHistory
+        from apps.shared.models import OJTCompanyProfile
+        from django.db.utils import ProgrammingError
         
         print(f"🔍 Looking for company: '{company_name}'")
         print(f"🔍 Coordinator: '{coordinator_username}'")
         
-        # Get all employment records for this company (without filtering by active status)
-        all_employment_records = EmploymentHistory.objects.filter(
-            company_name_current__iexact=company_name
-        ).select_related('user', 'user__ojt_info', 'user__academic_info', 'user__account_type')
+        # Get all OJT company profiles for this company (without filtering by active status)
+        try:
+            all_company_profiles = OJTCompanyProfile.objects.filter(
+                company_name__iexact=company_name
+            ).select_related('user', 'user__ojt_info', 'user__academic_info', 'user__account_type')
+        except ProgrammingError:
+            # Table doesn't exist yet, return empty result
+            return JsonResponse({
+                'success': True,
+                'students': [],
+                'company_profile': {
+                    'company_name': company_name,
+                    'company_address': '',
+                    'company_email': '',
+                    'company_contact': '',
+                    'contact_person': '',
+                    'position': ''
+                }
+            })
         
-        print(f"📊 Found {all_employment_records.count()} total EmploymentHistory records for company '{company_name}'")
+        print(f"📊 Found {all_company_profiles.count()} total OJTCompanyProfile records for company '{company_name}'")
         
-        # Filter by coordinator if provided (only for active students list)
-        employment_records = all_employment_records
+        # Filter by coordinator if provided
+        # Include records where coordinator matches OR where coordinator is None/empty (for backward compatibility)
+        company_profiles = all_company_profiles
         if coordinator_username:
             from apps.shared.models import OJTImport
-            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+            from django.db.models import Q
             
-            # Get unique year+section combinations
+            # Get year/section combinations for this coordinator
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
             year_sections = set()
             for imp in coordinator_imports:
                 year = getattr(imp, 'batch_year', None)
@@ -3409,23 +3712,29 @@ def ojt_students_by_company_view(request):
                 if year:
                     year_sections.add((year, section))
             
-            # Filter by coordinator's year+section combinations
-            from django.db.models import Q
-            year_section_filters = Q()
-            for (year, section) in year_sections:
-                if section:
-                    year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
-                else:
-                    year_section_filters |= Q(user__academic_info__year_graduated=year)
+            # Build filter: coordinator matches OR (coordinator is None/empty AND user was imported by this coordinator)
+            coordinator_filter = Q(coordinator=coordinator_username)
             
-            if year_section_filters:
-                employment_records = employment_records.filter(year_section_filters)
-                print(f"📊 After coordinator filter: {employment_records.count()} records")
+            # For backward compatibility: include records with None/empty coordinator if user was imported by this coordinator
+            if year_sections:
+                year_section_filters = Q()
+                for year, section in year_sections:
+                    if section:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                    else:
+                        year_section_filters |= Q(user__academic_info__year_graduated=year)
+                
+                if year_section_filters:
+                    # Include records where coordinator is None/empty AND user matches coordinator's year/section
+                    coordinator_filter |= (Q(coordinator__isnull=True) | Q(coordinator='')) & year_section_filters
+            
+            company_profiles = company_profiles.filter(coordinator_filter)
+            print(f"📊 After coordinator filter: {company_profiles.count()} records")
         
         # Build student list (only active OJT students)
         students = []
-        for emp in employment_records:
-            user = emp.user
+        for profile in company_profiles:
+            user = profile.user
             ojt_info = getattr(user, 'ojt_info', None)
             
             # Only include active OJT students (not alumni)
@@ -3434,12 +3743,12 @@ def ojt_students_by_company_view(request):
                     'ctu_id': user.acc_username,
                     'first_name': user.f_name or '',
                     'last_name': user.l_name or '',
-                    'company': emp.company_name_current or '',
-                    'company_address': emp.company_address or '',
-                    'company_email': emp.company_email or '',
-                    'company_contact': emp.company_contact or '',
-                    'contact_person': emp.contact_person or '',
-                    'position': emp.position or '',
+                    'company': profile.company_name or '',
+                    'company_address': profile.company_address or '',
+                    'company_email': profile.company_email or '',
+                    'company_contact': profile.company_contact or '',
+                    'contact_person': profile.contact_person or '',
+                    'position': profile.position or '',
                     'status': ojt_info.ojtstatus if ojt_info else 'Not Started'
                 })
                 print(f"✅ Added student: {user.acc_username} with company data")
@@ -3472,11 +3781,13 @@ def ojt_students_by_company_view(request):
             ).select_related('user', 'user__academic_info')
             
             # Filter by coordinator if provided
+            # Include records where coordinator matches OR where coordinator is None/empty (for backward compatibility)
             if coordinator_username:
                 from apps.shared.models import OJTImport
-                coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
+                from django.db.models import Q
                 
-                # Get unique year+section combinations
+                # Get year/section combinations for this coordinator
+                coordinator_imports = OJTImport.objects.filter(coordinator=coordinator_username)
                 year_sections = set()
                 for imp in coordinator_imports:
                     year = getattr(imp, 'batch_year', None)
@@ -3484,16 +3795,23 @@ def ojt_students_by_company_view(request):
                     if year:
                         year_sections.add((year, section))
                 
-                # Filter by coordinator's year+section combinations
-                year_section_filters = Q()
-                for year, section in year_sections:
-                    if section:
-                        year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
-                    else:
-                        year_section_filters |= Q(user__academic_info__year_graduated=year)
+                # Build filter: coordinator matches OR (coordinator is None/empty AND user was imported by this coordinator)
+                coordinator_filter = Q(coordinator=coordinator_username)
                 
-                if year_section_filters:
-                    company_profiles = company_profiles.filter(year_section_filters)
+                # For backward compatibility: include records with None/empty coordinator if user was imported by this coordinator
+                if year_sections:
+                    year_section_filters = Q()
+                    for year, section in year_sections:
+                        if section:
+                            year_section_filters |= Q(user__academic_info__year_graduated=year, user__academic_info__section=section)
+                        else:
+                            year_section_filters |= Q(user__academic_info__year_graduated=year)
+                    
+                    if year_section_filters:
+                        # Include records where coordinator is None/empty AND user matches coordinator's year/section
+                        coordinator_filter |= (Q(coordinator__isnull=True) | Q(coordinator='')) & year_section_filters
+                
+                company_profiles = company_profiles.filter(coordinator_filter)
             
             # Get the first company profile with the most complete information
             for profile in company_profiles:
@@ -3508,40 +3826,40 @@ def ojt_students_by_company_view(request):
                     }
                     break
         
-        # If still no profile, try EmploymentHistory (even for inactive students)
+        # If still no profile, try all OJTCompanyProfile records (even for inactive students)
         if not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact') and not company_profile.get('contact_person')):
-            print(f"🔍 No profile from active students, searching ALL EmploymentHistory records...")
+            print(f"🔍 No profile from active students, searching ALL OJTCompanyProfile records...")
             
-            # Use the all_employment_records we already fetched (includes inactive users)
-            print(f"📊 Checking {all_employment_records.count()} EmploymentHistory records...")
+            # Use the all_company_profiles we already fetched (includes inactive users)
+            print(f"📊 Checking {all_company_profiles.count()} OJTCompanyProfile records...")
             
             # Try to find one with company details
-            for idx, emp_record in enumerate(all_employment_records):
-                print(f"   Record {idx+1}: user={emp_record.user.acc_username}, address={bool(emp_record.company_address)}, email={bool(emp_record.company_email)}, contact={bool(emp_record.company_contact)}, person={bool(emp_record.contact_person)}")
-                if emp_record.company_address or emp_record.company_email or emp_record.company_contact or emp_record.contact_person:
+            for idx, profile_record in enumerate(all_company_profiles):
+                print(f"   Record {idx+1}: user={profile_record.user.acc_username}, address={bool(profile_record.company_address)}, email={bool(profile_record.company_email)}, contact={bool(profile_record.company_contact)}, person={bool(profile_record.contact_person)}")
+                if profile_record.company_address or profile_record.company_email or profile_record.company_contact or profile_record.contact_person:
                     company_profile = {
-                        'company_name': emp_record.company_name_current or company_name,
-                        'company_address': emp_record.company_address or '',
-                        'company_email': emp_record.company_email or '',
-                        'company_contact': emp_record.company_contact or '',
-                        'contact_person': emp_record.contact_person or '',
-                        'position': emp_record.position or ''
+                        'company_name': profile_record.company_name or company_name,
+                        'company_address': profile_record.company_address or '',
+                        'company_email': profile_record.company_email or '',
+                        'company_contact': profile_record.company_contact or '',
+                        'contact_person': profile_record.contact_person or '',
+                        'position': profile_record.position or ''
                     }
-                    print(f"✅ Found company profile from EmploymentHistory record {idx+1}: {company_profile}")
+                    print(f"✅ Found company profile from OJTCompanyProfile record {idx+1}: {company_profile}")
                     break
             
             # If still nothing, just get the first one (even if empty)
-            if (not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact'))) and all_employment_records.exists():
-                first_emp = all_employment_records.first()
+            if (not company_profile or (not company_profile.get('company_address') and not company_profile.get('company_email') and not company_profile.get('company_contact'))) and all_company_profiles.exists():
+                first_profile = all_company_profiles.first()
                 company_profile = {
-                    'company_name': first_emp.company_name_current or company_name,
-                    'company_address': first_emp.company_address or '',
-                    'company_email': first_emp.company_email or '',
-                    'company_contact': first_emp.company_contact or '',
-                    'contact_person': first_emp.contact_person or '',
-                    'position': first_emp.position or ''
+                    'company_name': first_profile.company_name or company_name,
+                    'company_address': first_profile.company_address or '',
+                    'company_email': first_profile.company_email or '',
+                    'company_contact': first_profile.company_contact or '',
+                    'contact_person': first_profile.contact_person or '',
+                    'position': first_profile.position or ''
                 }
-                print(f"⚠️ Using first EmploymentHistory record (may be empty): {company_profile}")
+                print(f"⚠️ Using first OJTCompanyProfile record (may be empty): {company_profile}")
         
         # If still no profile, create empty structure
         if not company_profile:
@@ -3755,8 +4073,6 @@ def ojt_clear_all_view(request):
         print(f"❌ Error clearing OJT data: {str(e)}")
         print(traceback.format_exc())
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 # Coordinator requests: send completed list to admin (no-op storage, returns counts)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -4575,133 +4891,13 @@ def alumni_employment_view(request, user_id):
                     'has_employment_data': bool(ojt_company_profile and ojt_company_profile.company_name and ojt_company_profile.company_name.strip() != '')
                 })
             
-            # For Alumni accounts, check TrackerData
+            # For Alumni accounts, temporarily return coming soon placeholder
             if is_alumni:
-                # Check if user has TrackerData
-                has_tracker_data = False
-                tracker = None
-                try:
-                    tracker = TrackerData.objects.get(user=user)
-                    has_tracker_data = bool(tracker.q_company_name or tracker.q_current_position or tracker.q_employment_status)
-                except TrackerData.DoesNotExist:
-                    has_tracker_data = False
-                    tracker = None
-                
-                if employment:
-                    response_data = {
-                        # Basic employment info - correctly mapped to model fields
-                        'organization_name': employment.company_name_current or '',
-                        'date_hired': employment.date_started.strftime('%Y-%m-%d') if employment.date_started else '',
-                        'position': employment.position_current or '',
-                        'employment_status': employment.employment_duration_current or '',
-                        'company_address': employment.company_address or '',
-                        'sector': employment.sector_current or '',
-                        
-                        # Additional employment details
-                        'employment_duration_current': employment.employment_duration_current or '',
-                        'salary_current': employment.salary_current or '',
-                        'scope_current': employment.scope_current or '',
-                        'company_email': employment.company_email or '',
-                        'company_contact': employment.company_contact or '',
-                        'contact_person': employment.contact_person or '',
-                        'position_alt': employment.position or '',
-                        
-                        # Job alignment info
-                        'job_alignment_status': employment.job_alignment_status or '',
-                        'job_alignment_category': employment.job_alignment_category or '',
-                        'job_alignment_title': employment.job_alignment_title or '',
-                        'job_alignment_suggested_program': employment.job_alignment_suggested_program or '',
-                        'job_alignment_original_program': employment.job_alignment_original_program or '',
-                        
-                        # Status flags
-                        'self_employed': employment.self_employed,
-                        'high_position': employment.high_position,
-                        'absorbed': employment.absorbed,
-                        
-                        # Awards and recognition
-                        'awards_recognition_current': employment.awards_recognition_current or '',
-                        'supporting_document_current': employment.supporting_document_current or '',
-                        'supporting_document_awards_recognition': employment.supporting_document_awards_recognition or '',
-                        
-                        # Unemployment
-                        'unemployment_reason': employment.unemployment_reason or '',
-                        
-                        # Timestamps
-                        'created_at': employment.created_at.strftime('%Y-%m-%d %H:%M:%S') if employment.created_at else '',
-                        'updated_at': employment.updated_at.strftime('%Y-%m-%d %H:%M:%S') if employment.updated_at else '',
-                        
-                        # Part III: Employment Status fields
-                        # Use TrackerData fields if available (they have the actual dropdown values), otherwise fall back to EmploymentHistory
-                        'employment_type': tracker.q_employment_type if tracker else '',  # Will be set from self_employed or tracker if needed
-                        'current_employment_status': tracker.q_employment_permanent if tracker and tracker.q_employment_permanent else (employment.employment_duration_current or ''),
-                        'current_company_name': employment.company_name_current or (tracker.q_company_name if tracker else ''),
-                        'current_position': employment.position_current or (tracker.q_current_position if tracker else ''),
-                        'current_sector': tracker.q_sector_current if tracker and tracker.q_sector_current else (employment.sector_current or ''),
-                        'current_scope': tracker.q_scope_current if tracker and tracker.q_scope_current else (employment.scope_current or ''),
-                        'employment_duration': tracker.q_employment_duration if tracker and tracker.q_employment_duration else (employment.employment_duration_current or ''),
-                        'salary_range': tracker.q_salary_range if tracker and tracker.q_salary_range else (employment.salary_current or ''),
-                        'received_awards': tracker.q_awards_received if tracker and tracker.q_awards_received else (employment.awards_recognition_current or ''),
-                        'awards_supporting_doc': employment.supporting_document_awards_recognition or '',
-                        'employment_supporting_doc': employment.supporting_document_current or '',
-                        'employment_sector': employment.sector_current or '',
-                        
-                        # Part IV: Further Study fields (from AcademicInfo)
-                        'study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
-                        'post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
-                        'institution_name': academic_info.q_institution_name or '' if academic_info else '',
-                        'units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
-                        # Also include with q_ prefix for compatibility
-                        'q_study_start_date': academic_info.q_study_start_date.strftime('%Y-%m-%d') if academic_info and academic_info.q_study_start_date else '',
-                        'q_post_graduate_degree': academic_info.q_post_graduate_degree or '' if academic_info else '',
-                        'q_institution_name': academic_info.q_institution_name or '' if academic_info else '',
-                        'q_units_obtained': academic_info.q_units_obtained or '' if academic_info else '',
-                        # Account type and tracker data status
-                        'account_type': 'alumni',
-                        'has_tracker_data': has_tracker_data
-                    }
-                    
-                    # Set employment_type based on tracker data first, then self_employed flag
-                    if tracker and tracker.q_employment_type:
-                        response_data['employment_type'] = tracker.q_employment_type
-                    elif employment.self_employed:
-                        response_data['employment_type'] = 'Self-employed'
-                    else:
-                        response_data['employment_type'] = 'Employed by a company/organization'
-                    
-                    return JsonResponse(response_data)
-                else:
-                    # No employment but might have tracker data
-                    return JsonResponse({
-                        'account_type': 'alumni',
-                        'has_tracker_data': has_tracker_data,
-                    'organization_name': '',
-                    'date_hired': '',
-                    'position': '',
-                    'employment_status': '',
-                    'company_address': '',
-                    'sector': '',
-                    'employment_duration_current': '',
-                    'salary_current': '',
-                    'scope_current': '',
-                    'company_email': '',
-                    'company_contact': '',
-                    'contact_person': '',
-                    'position_alt': '',
-                    'job_alignment_status': '',
-                    'job_alignment_category': '',
-                    'job_alignment_title': '',
-                    'job_alignment_suggested_program': '',
-                    'job_alignment_original_program': '',
-                    'self_employed': False,
-                    'high_position': False,
-                    'absorbed': False,
-                    'awards_recognition_current': '',
-                    'supporting_document_current': '',
-                    'supporting_document_awards_recognition': '',
-                    'unemployment_reason': '',
-                    'created_at': '',
-                    'updated_at': ''
-                    })
+                return JsonResponse({
+                    'account_type': 'alumni',
+                    'message': 'Coming soon',
+                    'has_tracker_data': False
+                })
             else:
                 # OJT without employment - return empty EmploymentHistory fields only
                 return JsonResponse({
@@ -4728,22 +4924,38 @@ def alumni_employment_view(request, user_id):
         elif request.method == 'PUT':
             data = json.loads(request.body)
             
-            # For OJT accounts, only update EmploymentHistory fields (no Part III/IV)
+            # For OJT accounts, update OJTCompanyProfile (not EmploymentHistory)
             if is_ojt:
-                employment, created = EmploymentHistory.objects.get_or_create(user=user)
+                # Get or create OJTCompanyProfile
+                ojt_company_profile, created = OJTCompanyProfile.objects.get_or_create(user=user)
                 
-                # Update only EmploymentHistory fields (no Part III/IV mapping)
+                # Update OJTCompanyProfile fields
                 if 'organization_name' in data:
-                    employment.company_name_current = data.get('organization_name', '')
+                    ojt_company_profile.company_name = data.get('organization_name', '').strip().upper() if data.get('organization_name') else None
                 if 'date_hired' in data:
-                    date_started = None
+                    start_date = None
                     if data.get('date_hired'):
                         try:
                             from datetime import datetime
-                            date_started = datetime.strptime(data['date_hired'], '%Y-%m-%d').date()
+                            start_date = datetime.strptime(data['date_hired'], '%Y-%m-%d').date()
                         except (ValueError, TypeError):
-                            date_started = None
-                    employment.date_started = date_started
+                            start_date = None
+                    ojt_company_profile.start_date = start_date
+                if 'position_alt' in data:
+                    ojt_company_profile.position = data.get('position_alt', '').strip().upper() if data.get('position_alt') else None
+                if 'company_address' in data:
+                    ojt_company_profile.company_address = data.get('company_address', '').strip() if data.get('company_address') else None
+                if 'company_email' in data:
+                    ojt_company_profile.company_email = data.get('company_email', '').strip() if data.get('company_email') else None
+                if 'company_contact' in data:
+                    ojt_company_profile.company_contact = data.get('company_contact', '').strip() if data.get('company_contact') else None
+                if 'contact_person' in data:
+                    ojt_company_profile.contact_person = data.get('contact_person', '').strip() if data.get('contact_person') else None
+                
+                ojt_company_profile.save()
+                
+                # Also update EmploymentHistory for fields that don't exist in OJTCompanyProfile (for backward compatibility)
+                employment, _ = EmploymentHistory.objects.get_or_create(user=user)
                 if 'position' in data:
                     employment.position_current = data.get('position', '')
                 if 'sector' in data:
@@ -4754,19 +4966,17 @@ def alumni_employment_view(request, user_id):
                     employment.employment_duration_current = data.get('employment_duration_current', '')
                 if 'salary_current' in data:
                     employment.salary_current = data.get('salary_current', '')
-                if 'company_address' in data:
-                    employment.company_address = data.get('company_address', '')
-                if 'company_email' in data:
-                    employment.company_email = data.get('company_email', '')
-                if 'company_contact' in data:
-                    employment.company_contact = data.get('company_contact', '')
-                if 'contact_person' in data:
-                    employment.contact_person = data.get('contact_person', '')
-                if 'position_alt' in data:
-                    employment.position = data.get('position_alt', '')
                 if 'awards_recognition_current' in data:
                     employment.awards_recognition_current = data.get('awards_recognition_current', '')
-                
+                if 'date_hired' in data:
+                    date_started = None
+                    if data.get('date_hired'):
+                        try:
+                            from datetime import datetime
+                            date_started = datetime.strptime(data['date_hired'], '%Y-%m-%d').date()
+                        except (ValueError, TypeError):
+                            date_started = None
+                    employment.date_started = date_started
                 employment.save()
                 
                 return JsonResponse({
@@ -5372,8 +5582,6 @@ def repost_detail_view(request, repost_id):
         'original': original_data
     }
     return JsonResponse(data)
-
-
 @api_view(["POST", "DELETE"]) 
 @permission_classes([IsAuthenticated])
 def repost_like_view(request, repost_id):
@@ -5405,6 +5613,9 @@ def repost_like_view(request, repost_id):
             print(f"🔍 DEBUG: Like created={created}, like_id={like.like_id if like else None}")
             
             if created:
+                # Award engagement points for liking
+                award_engagement_points(user, 'like')
+                
                 # Create notification for repost owner (only if the liker is not the repost owner)
                 if user.user_id != repost.user.user_id:
                     # Determine repost type
@@ -5458,6 +5669,8 @@ def repost_like_view(request, repost_id):
         try:
             like = Like.objects.get(user=user, repost=repost)
             like.delete()
+            # Deduct engagement points for unliking
+            deduct_engagement_points(user, 'like')
             return JsonResponse({'success': True, 'message': 'Repost unliked'})
         except Like.DoesNotExist:
             return JsonResponse({'success': False, 'message': 'Repost not liked'})
@@ -5615,6 +5828,8 @@ def repost_comment_edit_view(request, repost_id, comment_id):
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
     else:
+        # Deduct engagement points for deleting comment
+        deduct_engagement_points(comment.user, 'comment')
         comment.delete()
         return JsonResponse({'success': True})
 
@@ -5664,6 +5879,8 @@ def post_like_view(request, post_id):
             try:
                 like = Like.objects.get(user=user, post=post)
                 like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(user, 'like')
                 return JsonResponse({'success': True, 'message': 'Post unliked'})
             except Like.DoesNotExist:
                 return JsonResponse({'success': False, 'message': 'Post not liked'})
@@ -5698,12 +5915,21 @@ def post_edit_view(request, post_id):
 
         elif request.method == "DELETE":
             try:
+                # Check if post has images before deletion to determine point type
+                has_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id).exists()
+                
                 # Delete related images using ContentImage
                 content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
                 for img in content_images:
                     if getattr(img, 'image', None):
                         img.image.delete(save=False)
                 content_images.delete()
+
+                # Deduct engagement points before deleting the post
+                if has_images:
+                    deduct_engagement_points(user, 'post_with_photo')
+                else:
+                    deduct_engagement_points(user, 'post')
 
                 # Finally delete the post itself
                 post.delete()
@@ -5749,6 +5975,8 @@ def comment_edit_view(request, post_id, comment_id):
             else:
                 return JsonResponse({'error': 'No content provided'}, status=400)
         elif request.method == "DELETE":
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
     except Post.DoesNotExist:
@@ -6012,6 +6240,10 @@ def reply_edit_view(request, comment_id, reply_id):
             })
             
         elif request.method == "DELETE":
+            # Get the reply user before deletion
+            reply_user = reply.user
+            # Deduct engagement points for deleting reply
+            deduct_engagement_points(reply_user, 'reply')
             reply.delete()
             return JsonResponse({
                 'success': True,
@@ -6035,28 +6267,63 @@ def recent_searches_view(request):
         user = request.user
         
         if request.method == "GET":
-            # Mobile-optimized: Fixed limit of 10 for better performance
-            recent_searches = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')[:10]
+            # Support optional ?limit= query param (default to 10, max 50 for safety)
+            try:
+                limit_param = request.GET.get('limit')
+                limit = int(limit_param) if limit_param is not None else 10
+            except (TypeError, ValueError):
+                limit = 10
+            if limit <= 0:
+                limit = 10
+            limit = min(limit, 50)
+
+            recent_query = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')
+            if limit:
+                recent_query = recent_query[:limit]
             
             searches_data = []
-            for search in recent_searches:
+            flat_recent = []
+            for search in recent_query:
                 searched_user = search.searched_user
-                searches_data.append({
+                user_payload = {
+                    'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                    'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                    'm_name': getattr(searched_user, 'm_name', ''),
+                    'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user),
+                }
+                entry = {
                     'id': search.id,
-                    'searched_user': {
-                        'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
-                        'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
-                        'm_name': getattr(searched_user, 'm_name', ''),
-                        'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
-                        'profile_pic': build_profile_pic_url(searched_user),
-                    },
+                    'searched_user': user_payload,
                     'created_at': search.created_at.isoformat()
+                }
+                searches_data.append(entry)
+                flat_recent.append({
+                    'id': search.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': entry['created_at'],
                 })
             
             logger.info("recent_searches_view GET returning %s rows", len(searches_data))
+            legacy_payload = [
+                {
+                    'id': entry['id'],
+                    'user_id': entry['user_id'],
+                    'f_name': entry['f_name'],
+                    'l_name': entry['l_name'],
+                    'profile_pic': entry['profile_pic'],
+                    'created_at': entry['created_at']
+                }
+                for entry in flat_recent
+            ]
+
             return JsonResponse({
                 'success': True,
                 'recent_searches': searches_data,
+                'recent': legacy_payload,  # Backwards compatibility for mobile clients
                 'count': len(searches_data)
             })
             
@@ -6131,7 +6398,6 @@ def recent_search_delete_view(request, search_id):
         return JsonResponse({'error': 'Recent search not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def post_delete_view(request, post_id):
@@ -6144,6 +6410,13 @@ def post_delete_view(request, post_id):
             return JsonResponse({'error': 'Unauthorized'}, status=403)
 
         try:
+            # Check if post has images before deletion to determine point type
+            has_images = False
+            try:
+                has_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id).exists()
+            except Exception as e:
+                logger.warning(f"Could not check ContentImage for post deletion points: {e}")
+            
             # Best-effort cleanup of associated uploaded files before deletion
             if getattr(post, 'post_image', None):
                 try:
@@ -6160,6 +6433,19 @@ def post_delete_view(request, post_id):
                     except Exception:
                         pass
                 images_rel.all().delete()
+
+            # Delete related images using ContentImage
+            content_images = ContentImage.objects.filter(content_type='post', content_id=post.post_id)
+            for img in content_images:
+                if getattr(img, 'image', None):
+                    img.image.delete(save=False)
+            content_images.delete()
+
+            # Deduct engagement points before deleting the post
+            if has_images:
+                deduct_engagement_points(user, 'post_with_photo')
+            else:
+                deduct_engagement_points(user, 'post')
 
             # Finally delete the post itself
             post.delete()
@@ -6204,11 +6490,6 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
-        # Check if user already reposted this post
-        existing_repost = Repost.objects.filter(user=user, post=post).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
-
         # Create repost with optional caption
         payload = {}
         try:
@@ -6232,7 +6513,12 @@ def post_repost_view(request, post_id):
                 user=post.user,
                 notif_type='repost',
                 subject='Post Reposted',
-                notifi_content=f"{user.full_name} reposted your post<!--POST_ID:{post.post_id}--><!--ACTOR_ID:{user.user_id}-->",
+                notifi_content=(
+                    f"{user.full_name} reposted your post"
+                    f"<!--REPOST_ID:{repost.repost_id}-->"
+                    f"<!--POST_ID:{post.post_id}-->"
+                    f"<!--ACTOR_ID:{user.user_id}-->"
+                ),
                 notif_date=timezone.now()
             )
             
@@ -6282,6 +6568,8 @@ def repost_delete_view(request, repost_id):
         elif request.method == 'DELETE':
             # Delete repost
             print(f"🗑️ DEBUG: User {request.user.user_id} deleting repost {repost_id}")
+            # Deduct engagement points for deleting repost (share)
+            deduct_engagement_points(request.user, 'share')
             repost.delete()
             return JsonResponse({'success': True, 'message': 'Repost deleted successfully'})
             
@@ -6883,6 +7171,10 @@ def forum_like_view(request, forum_id):
                     'donation_request': None
                 }
             )
+            if created:
+                # Award engagement points for liking
+                award_engagement_points(request.user, 'like')
+                
             if created and request.user.user_id != forum.user.user_id:
                 notification = Notification.objects.create(
                     user=forum.user,
@@ -6903,6 +7195,8 @@ def forum_like_view(request, forum_id):
             try:
                 like = Like.objects.get(forum=forum, user=request.user)
                 like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(request.user, 'like')
             except Like.DoesNotExist:
                 pass
             return JsonResponse({'success': True})
@@ -7013,6 +7307,8 @@ def forum_comment_edit_view(request, forum_id, comment_id):
             return JsonResponse({'success': True})
         else:
             # Both comment owner and post owner can delete
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
             comment.delete()
             return JsonResponse({'success': True})
     except Comment.DoesNotExist:
@@ -7037,11 +7333,6 @@ def forum_repost_view(request, forum_id):
         # Only allow access if same batch
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
-        
-        # Check if user already reposted this forum post
-        existing_repost = Repost.objects.filter(forum=forum, user=request.user).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
         
         # Create repost with optional caption
         payload = {}
@@ -7089,6 +7380,8 @@ def forum_repost_delete_view(request, repost_id):
         r = Repost.objects.get(repost_id=repost_id)
         if r.user.user_id != request.user.user_id:
             return JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Deduct engagement points for deleting repost (share)
+        deduct_engagement_points(request.user, 'share')
         r.delete()
         return JsonResponse({'success': True})
     except Repost.DoesNotExist:
@@ -7176,10 +7469,40 @@ def follow_user_view(request, user_id):
                         logger.error(f"Error broadcasting follow notification: {e}")
                 except Exception as e:
                     logger.error(f"Error creating follow notification: {e}")
-                return JsonResponse({
+                
+                milestone_payload = {}
+                try:
+                    user_points, _ = UserPoints.objects.get_or_create(user=current_user)
+                    follow_count = Follow.objects.filter(follower=current_user).count()
+                    user_points.set_follow_count(follow_count)
+                    awarded_milestones = evaluate_and_award_milestones(user_points)
+                    if awarded_milestones:
+                        from apps.messaging.notification_broadcaster import broadcast_points_update
+                        user_points.refresh_from_db()
+                        higher_points_count = UserPoints.objects.filter(
+                            Q(user__account_type__user=True) | Q(user__account_type__ojt=True),
+                            total_points__gt=user_points.total_points
+                        ).count()
+                        rank = higher_points_count + 1
+                        broadcast_points_update(current_user.user_id, {
+                            'user_id': current_user.user_id,
+                            'total_points': user_points.total_points,
+                            'rank': rank,
+                            'points_breakdown': user_points.get_breakdown()
+                        })
+                        milestone_payload = {
+                            'milestones_unlocked': awarded_milestones,
+                            'total_points': user_points.total_points
+                        }
+                except Exception as milestone_error:
+                    logger.error(f"Error processing follow milestones for user {current_user.user_id}: {milestone_error}")
+                
+                response_data = {
                     'success': True,
                     'message': f'Successfully followed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
-                })
+                }
+                response_data.update(milestone_payload)
+                return JsonResponse(response_data)
             else:
                 return JsonResponse({
                     'success': False,
@@ -7193,6 +7516,12 @@ def follow_user_view(request, user_id):
                     following=user_to_follow
                 )
                 follow_obj.delete()
+                try:
+                    user_points, _ = UserPoints.objects.get_or_create(user=current_user)
+                    follow_count = Follow.objects.filter(follower=current_user).count()
+                    user_points.set_follow_count(follow_count)
+                except Exception as milestone_error:
+                    logger.error(f"Error updating follow count after unfollow for user {current_user.user_id}: {milestone_error}")
                 return JsonResponse({
                     'success': True,
                     'message': f'Successfully unfollowed {user_to_follow.f_name} {user_to_follow.m_name or ""} {user_to_follow.l_name}'.strip()
@@ -7385,7 +7714,6 @@ def online_users_view(request):
         
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, JSONParser])
@@ -7612,6 +7940,9 @@ def posts_view(request):
                 # Get reposts count
                 reposts_count = Repost.objects.filter(post=post).count()
 
+                # Check if current user liked this post
+                is_liked = Like.objects.filter(post=post, user=user).exists()
+
                 # Get likes data
                 likes = Like.objects.filter(post=post).select_related('user')
                 likes_data = []
@@ -7687,6 +8018,7 @@ def posts_view(request):
                     'likes_count': likes_count,
                     'comments_count': comments_count,
                     'reposts_count': reposts_count,
+                    'is_liked': is_liked,
                     'likes': likes_data,
                     'comments': comments_data,
                     'user': {
@@ -7709,6 +8041,10 @@ def posts_view(request):
                         # Get repost likes count and data
                         repost_likes = Like.objects.filter(repost=repost).select_related('user')
                         repost_likes_count = repost_likes.count()
+                        
+                        # Check if current user liked this repost
+                        repost_is_liked = Like.objects.filter(repost=repost, user=user).exists()
+                        
                         repost_likes_data = []
                         for like in repost_likes:
                             repost_likes_data.append({
@@ -7751,6 +8087,7 @@ def posts_view(request):
                             'repost_caption': repost.caption,
                             'likes_count': repost_likes_count,
                             'comments_count': repost_comments_count,
+                            'is_liked': repost_is_liked,
                             'likes': repost_likes_data,
                             'comments': repost_comments_data,
                             'user': {
@@ -8125,7 +8462,6 @@ def userprofile_email_view(request, user_id):
             'success': False,
             'error': str(e)
         }, status=400)
-
 @api_view(["POST"])
 def forgot_password_view(request):
     """
@@ -8226,662 +8562,6 @@ def forgot_password_view(request):
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
-# Donation API Views
-@api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-@parser_classes([JSONParser, MultiPartParser])
-def donation_requests_view(request):
-    """Handle donation request listing and creation"""
-    if request.method == 'GET':
-        try:
-            # Get all donation requests with user info
-            donations = DonationRequest.objects.select_related('user').all()
-            logger.info(f"Found {donations.count()} donation requests in database")
-            
-            donation_data = []
-            for donation in donations:
-                # Get likes and comments for this donation
-                likes = Like.objects.filter(donation_request=donation)
-                comments = Comment.objects.filter(donation_request=donation).select_related('user')
-                # Get reposts for this donation
-                reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
-                
-                donation_info = {
-                    'donation_id': donation.donation_id,
-                    'user': {
-                        'user_id': donation.user.user_id,
-                        'f_name': donation.user.f_name,
-                        'm_name': donation.user.m_name,
-                        'l_name': donation.user.l_name,
-                        'profile_pic': build_profile_pic_url(donation.user),
-                        'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                        'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                        'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
-                    },
-                    'description': donation.description,
-                    'status': donation.status,
-                    'created_at': donation.created_at.isoformat(),
-                    'updated_at': donation.updated_at.isoformat(),
-                    'images': get_content_images_safe(donation.donation_id, 'donation'),
-                    'likes_count': likes.count(),
-                    'comments_count': comments.count(),
-                    'reposts_count': reposts.count(),
-                    'likes': [
-                        {
-                            'like_id': like.like_id,
-                            'user': {
-                                'user_id': like.user.user_id,
-                                'f_name': like.user.f_name,
-                                'm_name': like.user.m_name,
-                                'l_name': like.user.l_name,
-                                'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
-                            }
-                        } for like in likes
-                    ],
-                    'comments': [
-                        {
-                            'comment_id': comment.comment_id,
-                            'comment_content': comment.comment_content,
-                            'date_created': comment.date_created.isoformat(),
-                            'user': {
-                                'user_id': comment.user.user_id,
-                                'f_name': comment.user.f_name,
-                                'm_name': comment.user.m_name,
-                                'l_name': comment.user.l_name,
-                                'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                            }
-                        } for comment in comments
-                    ],
-                    'reposts': [
-                        {
-                            'repost_id': repost.repost_id,
-                            'repost_date': repost.repost_date.isoformat(),
-                            'repost_caption': repost.caption,
-                            'user': {
-                                'user_id': repost.user.user_id,
-                                'f_name': repost.user.f_name,
-                                'm_name': repost.user.m_name,
-                                'l_name': repost.user.l_name,
-                                'profile_pic': repost.user.profile.profile_pic.url if hasattr(repost.user, 'profile') and repost.user.profile.profile_pic else None,
-                            },
-                            'likes_count': Like.objects.filter(repost=repost).count(),
-                            'comments_count': Comment.objects.filter(repost=repost).count(),
-                            'likes': [
-                                {
-                                    'like_id': like.like_id,
-                                    'user_id': like.user.user_id,
-                                    'user': {
-                                        'user_id': like.user.user_id,
-                                        'f_name': like.user.f_name,
-                                        'm_name': like.user.m_name,
-                                        'l_name': like.user.l_name,
-                                        'profile_pic': build_profile_pic_url(like.user),
-                                    }
-                                } for like in Like.objects.filter(repost=repost).select_related('user')
-                            ],
-                            'comments': [
-                                {
-                                    'comment_id': comment.comment_id,
-                                    'comment_content': comment.comment_content,
-                                    'date_created': comment.date_created.isoformat(),
-                                    'replies_count': Reply.objects.filter(comment=comment).count(),
-                                    'user': {
-                                        'user_id': comment.user.user_id,
-                                        'f_name': comment.user.f_name,
-                                        'm_name': comment.user.m_name,
-                                        'l_name': comment.user.l_name,
-                                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                                    }
-                                } for comment in Comment.objects.filter(repost=repost).select_related('user')
-                            ],
-                            'original_post': {
-                                'donation_id': donation.donation_id,
-                                'post_content': donation.description,
-                                'post_images': get_content_images_safe(donation.donation_id, 'donation'),
-                                'status': donation.status,
-                                'created_at': donation.created_at.isoformat(),
-                                'user': {
-                                    'user_id': donation.user.user_id,
-                                    'f_name': donation.user.f_name,
-                                    'm_name': donation.user.m_name,
-                                    'l_name': donation.user.l_name,
-                                    'profile_pic': build_profile_pic_url(donation.user),
-                                }
-                            }
-                        } for repost in reposts
-                    ]
-                }
-                donation_data.append(donation_info)
-            
-            response_data = {
-                'success': True,
-                'donations': donation_data
-            }
-            
-            logger.info(f"Returning {len(donation_data)} donations to frontend")
-            return JsonResponse(response_data)
-            
-        except Exception as e:
-            logger.error(f"Error fetching donation requests: {e}")
-            return JsonResponse({'success': False, 'message': 'Failed to fetch donation requests'}, status=500)
-    
-    elif request.method == 'POST':
-        try:
-            data = request.data
-            description = data.get('description')
-            images = data.get('images', [])
-            
-            logger.info(f"Creating donation request for user {request.user.user_id}: {description[:50]}...")
-            
-            if not description or not description.strip():
-                logger.warning("Donation request failed: Description is required")
-                return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
-            
-            # Create donation request
-            donation = DonationRequest.objects.create(
-                user=request.user,
-                description=description.strip()
-            )
-            
-            # Notify OJT and alumni users if post author is admin or PESO
-            notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
-            
-            # Handle image uploads if any
-            # Handle FormData file uploads (mobile app)
-            if request.FILES:
-                logger.info(f'Received {len(request.FILES)} files via FormData for donation')
-                
-                # Get all image files and sort them by key to ensure consistent ordering
-                image_files = []
-                for key, file in request.FILES.items():
-                    if key.startswith('images') and file:
-                        image_files.append((key, file))
-                
-                # Sort by key to ensure consistent ordering
-                image_files.sort(key=lambda x: x[0])
-                
-                for order_index, (key, file) in enumerate(image_files):
-                    try:
-                        # Create ContentImage instance for donation
-                        donation_image = ContentImage.objects.create(
-                            content_type='donation',
-                            content_id=donation.donation_id,
-                            order=order_index
-                        )
-                        donation_image.image.save(file.name, file, save=True)
-                        logger.info(f'Saved FormData donation image {order_index}: {donation_image.image.url}')
-                    except Exception as e:
-                        logger.error(f'Error saving FormData donation image {order_index}: {e}')
-                        continue
-            # Handle base64 images (backward compatibility)
-            elif images:
-                for index, image_data in enumerate(images):
-                    if image_data and image_data.startswith('data:image'):
-                        # Handle base64 image data
-                        try:
-                            format, imgstr = image_data.split(';base64,')
-                            ext = format.split('/')[-1]
-                            imgdata = base64.b64decode(imgstr)
-                            
-                            # Create a unique filename
-                            filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
-                            
-                            # Save the image
-                            donation_image = ContentImage.objects.create(
-                                content_type='donation',
-                                content_id=donation.donation_id,
-                                order=index
-                            )
-                            donation_image.image.save(filename, ContentFile(imgdata), save=True)
-                            
-                        except Exception as e:
-                            logger.error(f"Error saving donation image {index}: {e}")
-                            # Continue with other images even if one fails
-                            continue
-            
-            # Return the created donation with full details
-            likes = Like.objects.filter(donation_request=donation)
-            comments = Comment.objects.filter(donation_request=donation).select_related('user')
-            reposts = Repost.objects.filter(donation_request=donation)
-            
-            donation_info = {
-                'donation_id': donation.donation_id,
-                'user': {
-                    'user_id': donation.user.user_id,
-                    'f_name': donation.user.f_name,
-                    'm_name': donation.user.m_name,
-                    'l_name': donation.user.l_name,
-                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
-                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
-                },
-                'description': donation.description,
-                'status': donation.status,
-                'created_at': donation.created_at.isoformat(),
-                'updated_at': donation.updated_at.isoformat(),
-                                'images': get_content_images_safe(donation.donation_id, 'donation'),
-                'likes_count': likes.count(),
-                'comments_count': comments.count(),
-                'reposts_count': reposts.count(),
-                'likes': [],
-                'comments': [],
-                'reposts': []
-            }
-            
-            response_data = {
-                'success': True,
-                'message': 'Donation request created successfully',
-                'donation': donation_info
-            }
-            
-            logger.info(f"Successfully created donation request {donation.donation_id} for user {request.user.user_id}")
-            return JsonResponse(response_data)
-            
-        except Exception as e:
-            logger.error(f"Error creating donation request: {e}")
-            return JsonResponse({'success': False, 'message': 'Failed to create donation request'}, status=500)
-
-
-@api_view(['POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_like_view(request, donation_id):
-    """Handle donation like/unlike"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        if request.method == 'POST':
-            # Like the donation
-            like, created = Like.objects.get_or_create(
-                donation_request=donation,
-                user=request.user,
-                defaults={
-                    'post': None,
-                    'forum': None,
-                    'repost': None
-                }
-            )
-            
-            if created:
-                # Create notification for donation owner
-                if request.user.user_id != donation.user.user_id:
-                    notification = Notification.objects.create(
-                        user=donation.user,
-                        notif_type='like',
-                        subject='Donation Liked',
-                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}-->",
-                        notif_date=timezone.now()
-                    )
-                    # Broadcast donation like notification in real-time
-                    try:
-                        from apps.messaging.notification_broadcaster import broadcast_notification
-                        broadcast_notification(notification)
-                    except Exception as e:
-                        logger.error(f"Error broadcasting donation like notification: {e}")
-                return JsonResponse({'success': True, 'message': 'Donation liked'})
-            else:
-                return JsonResponse({'success': False, 'message': 'Already liked'})
-        
-        elif request.method == 'DELETE':
-            # Unlike the donation
-            try:
-                like = Like.objects.get(donation_request=donation, user=request.user)
-                like.delete()
-                return JsonResponse({'success': True, 'message': 'Donation unliked'})
-            except Like.DoesNotExist:
-                return JsonResponse({'success': False, 'message': 'Not liked'})
-                
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error handling donation like: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
-
-
-@api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_comments_view(request, donation_id):
-    """Handle donation comments"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        if request.method == 'GET':
-            # Get all comments for this donation
-            comments = Comment.objects.filter(donation_request=donation).select_related('user')
-            
-            comments_data = []
-            for comment in comments:
-                # Get reply count for this comment
-                reply_count = Reply.objects.filter(comment=comment).count()
-                comments_data.append({
-                    'comment_id': comment.comment_id,
-                    'comment_content': comment.comment_content,
-                    'date_created': comment.date_created.isoformat(),
-                    'replies_count': reply_count,
-                    'user': {
-                        'user_id': comment.user.user_id,
-                        'f_name': comment.user.f_name,
-                        'm_name': comment.user.m_name,
-                        'l_name': comment.user.l_name,
-                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                    }
-                })
-            
-            return JsonResponse({
-                'success': True,
-                'comments': comments_data
-            })
-        
-        elif request.method == 'POST':
-            # Create a new comment
-            data = request.data
-            comment_content = data.get('comment_content', '').strip()
-            
-            if not comment_content:
-                return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
-            
-            comment = Comment.objects.create(
-                donation_request=donation,
-                user=request.user,
-                comment_content=comment_content,
-                date_created=timezone.now()
-            )
-            
-            # Create mention notifications
-            create_mention_notifications(
-                comment_content,
-                request.user,
-                comment_id=comment.comment_id,
-                donation_id=donation.donation_id
-            )
-            
-            # Create notification for donation owner
-            if request.user.user_id != donation.user.user_id:
-                notification = Notification.objects.create(
-                    user=donation.user,
-                    notif_type='comment',
-                    subject='Donation Commented',
-                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
-                    notif_date=timezone.now()
-                )
-                # Broadcast donation comment notification in real-time
-                try:
-                    from apps.messaging.notification_broadcaster import broadcast_notification
-                    broadcast_notification(notification)
-                except Exception as e:
-                    logger.error(f"Error broadcasting donation comment notification: {e}")
-            
-            # Return the full comment data
-            comment_data = {
-                'comment_id': comment.comment_id,
-                'comment_content': comment.comment_content,
-                'date_created': comment.date_created.isoformat(),
-                'user': {
-                    'user_id': comment.user.user_id,
-                    'f_name': comment.user.f_name,
-                    'm_name': comment.user.m_name,
-                    'l_name': comment.user.l_name,
-                    'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
-                }
-            }
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Comment added successfully',
-                'comment': comment_data
-            })
-            
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error handling donation comments: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
-
-
-@api_view(['PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_comment_edit_view(request, donation_id, comment_id):
-    """Handle donation comment edit/delete"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
-        
-        # Allow comment owner OR donation owner to delete/edit comment
-        comment_owner = comment.user.user_id == request.user.user_id
-        donation_owner = donation.user.user_id == request.user.user_id
-        
-        if not (comment_owner or donation_owner):
-            return JsonResponse({'error': 'Unauthorized'}, status=403)
-            
-        if request.method == 'PUT':
-            # Only comment owner can edit
-            if not comment_owner:
-                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
-            data = request.data
-            content = data.get('comment_content')
-            if content is None:
-                return JsonResponse({'error': 'No content provided'}, status=400)
-            comment.comment_content = content
-            comment.save()
-            return JsonResponse({'success': True})
-        else:
-            # Both comment owner and donation owner can delete
-            comment.delete()
-            return JsonResponse({'success': True})
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'error': 'Donation request not found'}, status=404)
-    except Comment.DoesNotExist:
-        return JsonResponse({'error': 'Comment not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error handling donation comment edit/delete: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle comment operation'}, status=500)
-
-
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_repost_view(request, donation_id):
-    """Handle donation reposting"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        # Check if user already reposted this donation
-        existing_repost = Repost.objects.filter(donation_request=donation, user=request.user).first()
-        if existing_repost:
-            return JsonResponse({'error': 'You have already reposted this'}, status=400)
-        
-        # Get caption from request data
-        caption = request.data.get('caption', '')
-        if caption:
-            caption = caption.strip() or None
-        
-        # Create a repost of the donation
-        repost = Repost.objects.create(
-            donation_request=donation,
-            user=request.user,
-            caption=caption,
-            repost_date=timezone.now()
-        )
-        
-        # Award engagement points (+5 for share/repost)
-        award_engagement_points(request.user, 'share')
-        
-        # Create notification for donation owner (only if the reposter is not the donation owner)
-        if request.user.user_id != donation.user.user_id:
-            notification = Notification.objects.create(
-                user=donation.user,
-                notif_type='repost',
-                subject='Donation Reposted',
-                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
-                notif_date=timezone.now()
-            )
-            # Broadcast donation repost notification in real-time
-            try:
-                from apps.messaging.notification_broadcaster import broadcast_notification
-                broadcast_notification(notification)
-            except Exception as e:
-                logger.error(f"Error broadcasting donation repost notification: {e}")
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'Donation reposted successfully',
-            'repost_id': repost.repost_id
-        })
-        
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error reposting donation: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
-
-@api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def donation_detail_edit_view(request, donation_id):
-    """Handle donation detail view, edit, and delete"""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        
-        if request.method == 'GET':
-            # Get likes, comments, and reposts for this donation
-            likes = Like.objects.filter(donation_request=donation).select_related('user')
-            comments = Comment.objects.filter(donation_request=donation).select_related('user').order_by('-date_created')
-            reposts = Repost.objects.filter(donation_request=donation).select_related('user')
-            is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
-            
-            # Return donation details with full interaction data
-            donation_info = {
-                'donation_id': donation.donation_id,
-                'post_id': donation.donation_id,  # Add for compatibility with frontend
-                'user': {
-                    'user_id': donation.user.user_id,
-                    'f_name': donation.user.f_name or '',
-                    'm_name': donation.user.m_name or '',
-                    'l_name': donation.user.l_name or '',
-                    'profile_pic': build_profile_pic_url(donation.user),
-                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
-                    'name': f"{donation.user.f_name or ''} {donation.user.m_name or ''} {donation.user.l_name or ''}".strip()
-                },
-                'description': donation.description,
-                'status': donation.status,
-                'created_at': donation.created_at.isoformat(),
-                'updated_at': donation.updated_at.isoformat(),
-                                'images': get_content_images_safe(donation.donation_id, 'donation'),
-                'likes_count': likes.count(),
-                'comments_count': comments.count(),
-                'reposts_count': reposts.count(),
-                'liked_by_user': is_liked,
-                'likes': [{
-                    'user_id': l.user.user_id,
-                    'f_name': l.user.f_name,
-                    'l_name': l.user.l_name,
-                    'profile_pic': build_profile_pic_url(l.user),
-                    'initials': None if build_profile_pic_url(l.user) else (
-                        ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
-                        if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
-                    ),
-                } for l in likes],
-                'comments': [{
-                    'comment_id': c.comment_id,
-                    'comment_content': c.comment_content,
-                    'date_created': c.date_created.isoformat() if c.date_created else None,
-                    'user': {
-                        'user_id': c.user.user_id,
-                        'f_name': c.user.f_name,
-                        'l_name': c.user.l_name,
-                        'profile_pic': build_profile_pic_url(c.user),
-                    }
-                } for c in comments],
-                'reposts': [{
-                    'repost_id': r.repost_id,
-                    'repost_date': r.repost_date.isoformat() if r.repost_date else None,
-                    'repost_caption': r.caption,
-                    'likes_count': Like.objects.filter(repost=r).count(),
-                    'comments_count': Comment.objects.filter(repost=r).count(),
-                    'likes': [{
-                        'user_id': l.user.user_id,
-                        'f_name': l.user.f_name,
-                        'm_name': l.user.m_name,
-                        'l_name': l.user.l_name,
-                        'profile_pic': build_profile_pic_url(l.user),
-                        'initials': None if build_profile_pic_url(l.user) else (
-                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
-                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
-                        ),
-                    } for l in Like.objects.filter(repost=r).select_related('user')],
-                    'comments': [{
-                        'comment_id': c.comment_id,
-                        'comment_content': c.comment_content,
-                        'date_created': c.date_created.isoformat() if c.date_created else None,
-                        'user': {
-                            'user_id': c.user.user_id,
-                            'f_name': c.user.f_name,
-                            'm_name': c.user.m_name,
-                            'l_name': c.user.l_name,
-                            'profile_pic': build_profile_pic_url(c.user),
-                        }
-                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
-                    'user': {
-                        'user_id': r.user.user_id,
-                        'f_name': r.user.f_name,
-                        'l_name': r.user.l_name,
-                        'profile_pic': build_profile_pic_url(r.user),
-                    },
-                    'original_donation': {
-                        'donation_id': donation.donation_id,
-                        'description': donation.description,
-                        'created_at': donation.created_at.isoformat(),
-                        'user': {
-                            'user_id': donation.user.user_id,
-                            'f_name': donation.user.f_name,
-                            'l_name': donation.user.l_name,
-                            'profile_pic': build_profile_pic_url(donation.user),
-                        }
-                    }
-                } for r in reposts]
-            }
-            
-            return JsonResponse(donation_info)
-            
-        elif request.method == 'PUT':
-            # Update donation
-            data = request.data
-            
-            if 'description' in data:
-                donation.description = data['description']
-            
-            if 'status' in data:
-                donation.status = data['status']
-            
-            donation.updated_at = timezone.now()
-            donation.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Donation updated successfully',
-                'donation_id': donation.donation_id
-            })
-            
-        elif request.method == 'DELETE':
-            # Delete donation
-            donation.delete()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Donation deleted successfully'
-            })
-            
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as e:
-        logger.error(f"Error in donation detail/edit/delete: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
-
 @api_view(['GET', 'POST', 'DELETE'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -8892,25 +8572,58 @@ def recent_searches_view(request):
     DELETE: clear all
     """
     try:
-        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
-        if request.method == 'GET':
-            limit = int(request.GET.get('limit', '10'))
-            qs = (RecentSearch.objects
-                  .filter(owner=request.user)
-                  .select_related('searched_user')
-                  .order_by('-created_at')[:max(1, min(limit, 50))])
-            logger.info("recent_searches_view GET returning %s rows", qs.count())
-            results = []
+        from apps.messaging.notification_broadcaster import broadcast_recent_search_update
+
+        def serialize_recent_searches(owner, limit_value=10):
+            try:
+                limit_value = int(limit_value)
+            except (TypeError, ValueError):
+                limit_value = 10
+            limit_value = max(1, min(limit_value, 50))
+
+            qs = (
+                RecentSearch.objects
+                .filter(owner=owner)
+                .select_related('searched_user')
+                .order_by('-created_at')[:limit_value]
+            )
+
+            detailed_results = []
+            legacy_results = []
             for rs in qs:
-                u = rs.searched_user
-                results.append({
-                    'user_id': getattr(u, 'id', getattr(u, 'user_id', None)),
-                    'f_name': getattr(u, 'f_name', '') or getattr(u, 'first_name', ''),
-                    'l_name': getattr(u, 'l_name', '') or getattr(u, 'last_name', ''),
-                    'profile_pic': getattr(u, 'profile_pic', None),
+                searched_user = rs.searched_user
+                user_payload = {
+                    'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                    'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                    'm_name': getattr(searched_user, 'm_name', ''),
+                    'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user),
+                }
+                detailed_results.append({
+                    'id': rs.id,
+                    'searched_user': user_payload,
                     'created_at': rs.created_at.isoformat(),
                 })
-            return JsonResponse({ 'recent': results })
+                legacy_results.append({
+                    'id': rs.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': rs.created_at.isoformat(),
+                })
+            return detailed_results, legacy_results
+
+        logger.info("recent_searches_view %s by user=%s", request.method, getattr(getattr(request, 'user', None), 'user_id', None) or getattr(getattr(request, 'user', None), 'id', None))
+        if request.method == 'GET':
+            detailed_results, legacy_results = serialize_recent_searches(request.user, request.GET.get('limit', '10'))
+            logger.info("recent_searches_view GET returning %s rows", len(detailed_results))
+            return JsonResponse({
+                'success': True,
+                'recent_searches': detailed_results,
+                'recent': legacy_results,
+                'count': len(detailed_results),
+            })
 
         if request.method == 'POST':
             try:
@@ -8940,10 +8653,24 @@ def recent_searches_view(request):
                 logger.info("recent_searches_view DB: name=%s host=%s port=%s owner_recent_count=%s", db_name, db_host, db_port, owner_count)
             except Exception as diag_e:
                 logger.warning("recent_searches_view diagnostics failed: %s", diag_e)
+
+            detailed_results, legacy_results = serialize_recent_searches(request.user)
+            broadcast_recent_search_update(
+                getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None),
+                detailed_results,
+                legacy_results
+            )
+
             return JsonResponse({ 'success': True })
 
         if request.method == 'DELETE':
             RecentSearch.objects.filter(owner=request.user).delete()
+            detailed_results, legacy_results = serialize_recent_searches(request.user)
+            broadcast_recent_search_update(
+                getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None),
+                detailed_results,
+                legacy_results
+            )
             return JsonResponse({ 'success': True })
 
         return JsonResponse({ 'success': False, 'message': 'Method not allowed' }, status=405)
@@ -9019,29 +8746,56 @@ def set_send_date_view(request):
         
         # Update all OJT students' end dates to match the send date
         # This ensures consistent end dates across the batch
+        # IMPORTANT: Only update students imported by this coordinator
         try:
-            from apps.shared.models import User, OJTInfo, AcademicInfo
+            from apps.shared.models import User, OJTInfo, AcademicInfo, OJTImport
+            from django.db.models import Q
             
-            # Find all OJT students in this batch year
+            # Get year+section combinations imported by this coordinator
+            coordinator_imports = OJTImport.objects.filter(coordinator=coordinator)
+            coordinator_year_sections = set()
+            for imp in coordinator_imports:
+                y = getattr(imp, 'batch_year', None)
+                s = getattr(imp, 'section', None) or ''
+                if y == batch_year:  # Only for this batch year
+                    coordinator_year_sections.add((y, s))
+            
+            # Build filter for coordinator's year+section combinations
+            year_section_filters = Q()
+            has_filters = False
+            for (y, s) in coordinator_year_sections:
+                if y == batch_year:
+                    has_filters = True
+                    if s:
+                        year_section_filters |= Q(academic_info__year_graduated=y, academic_info__section=s)
+                    else:
+                        year_section_filters |= Q(academic_info__year_graduated=y)
+            
             updated_count = 0
-            students = User.objects.filter(
-                account_type__ojt=True,
-                academic_info__year_graduated=batch_year
-            ).select_related('ojt_info', 'academic_info')
-            
-            print(f"🔍 Found {students.count()} OJT students in batch {batch_year}")
-            
-            for student in students:
-                if hasattr(student, 'ojt_info') and student.ojt_info:
-                    # Update the end date to match the scheduled send date
-                    student.ojt_info.ojt_end_date = send_date_obj
-                    student.ojt_info.save()
-                    updated_count += 1
-                    print(f"  ✓ Updated end date for {student.full_name or student.acc_username} to {send_date_obj}")
+            if has_filters and year_section_filters:
+                # Only update students from this coordinator's imports
+                students = User.objects.filter(
+                    year_section_filters,
+                    account_type__ojt=True
+                ).select_related('ojt_info', 'academic_info')
+                
+                print(f"🔍 Found {students.count()} OJT students in batch {batch_year} imported by {coordinator}")
+                
+                for student in students:
+                    if hasattr(student, 'ojt_info') and student.ojt_info:
+                        # Update the end date to match the scheduled send date
+                        student.ojt_info.ojt_end_date = send_date_obj
+                        student.ojt_info.save()
+                        updated_count += 1
+                        print(f"  ✓ Updated end date for {student.full_name or student.acc_username} to {send_date_obj}")
+            else:
+                print(f"⚠️ No students found for coordinator {coordinator} in batch {batch_year}")
             
             print(f"✅ Updated {updated_count} students' end dates to {send_date_obj}")
         except Exception as update_error:
             print(f"⚠️ Warning: Could not update student end dates: {update_error}")
+            import traceback
+            traceback.print_exc()
             # Don't fail the whole operation if this fails
         
         print(f"✅ Successfully set send date for batch {batch_year}: {send_date_obj}")
@@ -9077,7 +8831,7 @@ def check_all_sent_status_view(request):
         base_query = User.objects.filter(
             account_type__ojt=True,
             ojt_info__ojtstatus='Completed'
-        ).exclude(acc_username='coordinator')
+        ).exclude(acc_username=settings.DEFAULT_COORDINATOR_USERNAME)
         
         # Filter by batch year if provided
         if batch_year and batch_year != 'ALL':
@@ -9262,36 +9016,7 @@ def engagement_leaderboard_view(request):
                 'year_graduated': academic_info.year_graduated if academic_info else None,
                 'program': academic_info.program if academic_info else None,
                 'total_points': user_points.total_points,
-                'points_breakdown': {
-                    'likes': {
-                        'points': user_points.points_from_likes,
-                        'count': user_points.like_count
-                    },
-                    'comments': {
-                        'points': user_points.points_from_comments,
-                        'count': user_points.comment_count
-                    },
-                    'shares': {
-                        'points': user_points.points_from_shares,
-                        'count': user_points.share_count
-                    },
-                    'replies': {
-                        'points': user_points.points_from_replies,
-                        'count': user_points.reply_count
-                    },
-                    'posts': {
-                        'points': getattr(user_points, 'points_from_posts', 0),
-                        'count': getattr(user_points, 'post_count', 0)
-                    },
-                    'posts_with_photos': {
-                        'points': user_points.points_from_posts_with_photos,
-                        'count': user_points.post_with_photo_count
-                    },
-                    'tracker_form': {
-                        'points': user_points.points_from_tracker_form,
-                        'count': user_points.tracker_form_count
-                    }
-                },
+                'points_breakdown': user_points.get_breakdown(),
                 'last_updated': user_points.updated_at.isoformat()
             })
         
@@ -9310,6 +9035,192 @@ def engagement_leaderboard_view(request):
         return JsonResponse({
             'success': False,
             'message': f'Error fetching leaderboard: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def engagement_tasks_view(request):
+    """
+    Return milestone task progress for the authenticated user.
+    """
+    try:
+        user = request.user
+        user_points, _ = UserPoints.objects.get_or_create(user=user)
+
+        # Ensure follow count stays in sync (in case of legacy data changes).
+        try:
+            actual_follow_count = Follow.objects.filter(follower=user).count()
+            user_points.set_follow_count(actual_follow_count)
+        except Exception:
+            # Ignore errors here to avoid blocking the response.
+            pass
+
+        task_status = get_milestone_status(user_points)
+
+        return JsonResponse({
+            'success': True,
+            'tasks': task_status,
+            'total_points': user_points.total_points,
+            'points_breakdown': user_points.get_breakdown(),
+        })
+    except Exception as e:
+        logger.error(f"engagement_tasks_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error fetching engagement tasks: {str(e)}'
+        }, status=500)
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def points_tasks_view(request):
+    """
+    Return available points tasks (Verify Email, Complete Preferences, etc.) for the authenticated user.
+    """
+    try:
+        from apps.shared.models import PointsTask, UserTaskCompletion, UserProfile, EngagementPointsSettings
+        user = request.user
+        
+        # Check if milestone tasks are enabled
+        settings = EngagementPointsSettings.get_settings()
+        milestone_tasks_enabled = getattr(settings, 'milestone_tasks_enabled', True)
+        
+        # Get all active points tasks
+        tasks = PointsTask.objects.filter(is_active=True).order_by('order', 'task_id')
+        
+        # Filter out milestone tasks if the feature is disabled
+        if not milestone_tasks_enabled:
+            tasks = tasks.exclude(task_type__startswith='milestone_')
+        
+        # Get user's completed tasks
+        completed_task_types = set(
+            UserTaskCompletion.objects.filter(user=user)
+            .values_list('task__task_type', flat=True)
+        )
+        
+        # Get user profile to check preferences completion
+        try:
+            profile = user.profile
+            preferences_completed = getattr(profile, 'preferences_completed', False)
+        except:
+            preferences_completed = False
+        
+        # Check if email is verified
+        email_verified = user.is_active and hasattr(user, 'email') and user.email
+        
+        # Get user points to check milestone progress
+        try:
+            user_points, _ = UserPoints.objects.get_or_create(user=user)
+        except:
+            user_points = None
+        
+        from apps.shared.milestones import ENGAGEMENT_MILESTONES
+
+        milestone_specs = {spec.task_type: spec for spec in ENGAGEMENT_MILESTONES}
+
+        if user_points:
+            try:
+                actual_follow_count = Follow.objects.filter(follower=user).count()
+                user_points.set_follow_count(actual_follow_count)
+            except Exception:
+                pass
+
+        def _metric_value(metric: str) -> int:
+            if user_points:
+                value = getattr(user_points, metric, 0) or 0
+                if metric == 'follow_count' and value == 0:
+                    return Follow.objects.filter(follower=user).count()
+                return value
+            if metric == 'post_count':
+                return Post.objects.filter(user=user).count()
+            if metric == 'share_count':
+                return Repost.objects.filter(user=user).count()
+            if metric == 'like_count':
+                return Like.objects.filter(user=user).count()
+            if metric == 'comment_count':
+                return Comment.objects.filter(user=user).count()
+            if metric == 'reply_count':
+                return Reply.objects.filter(user=user).count()
+            if metric == 'post_with_photo_count':
+                post_ids = Post.objects.filter(user=user).values_list('post_id', flat=True)
+                return ContentImage.objects.filter(
+                    content_type='post',
+                    content_id__in=post_ids
+                ).values('content_id').distinct().count()
+            if metric == 'follow_count':
+                return Follow.objects.filter(follower=user).count()
+            return 0
+
+        tasks_data = []
+        for task in tasks:
+            is_completed = False
+            current_progress = 0
+            required_progress = 0
+            
+            # Check completion status based on task type
+            if task.task_type == 'verify_email':
+                is_completed = email_verified or (task.task_type in completed_task_types)
+            elif task.task_type == 'complete_preferences':
+                is_completed = preferences_completed or (task.task_type in completed_task_types)
+            elif task.task_type in milestone_specs:
+                spec = milestone_specs[task.task_type]
+                required_progress = task.required_count if task.required_count else spec.threshold
+                current_progress = _metric_value(spec.metric)
+                is_completed = (current_progress >= required_progress) or (task.task_type in completed_task_types)
+            elif task.task_type == 'post_with_image':
+                # Check if user has posted with an image
+                if user_points:
+                    current_progress = user_points.post_with_photo_count or 0
+                    required_progress = 1
+                    is_completed = (current_progress >= 1) or (task.task_type in completed_task_types)
+                else:
+                    post_with_image_count = ContentImage.objects.filter(
+                        content_type='post',
+                        content_id__in=Post.objects.filter(user=user).values_list('post_id', flat=True)
+                    ).count()
+                    current_progress = 1 if post_with_image_count > 0 else 0
+                    required_progress = 1
+                    is_completed = (post_with_image_count > 0) or (task.task_type in completed_task_types)
+            else:
+                is_completed = task.task_type in completed_task_types
+            
+            # Format points display
+            points_display = f"{task.points} Points"
+            if task.max_points and task.max_points > task.points:
+                points_display = f"up to {task.max_points} points"
+            
+            tasks_data.append({
+                'task_id': task.task_id,
+                'task_type': task.task_type,
+                'title': task.title,
+                'description': task.description,
+                'points': task.points,
+                'max_points': task.max_points,
+                'points_display': points_display,
+                'icon_name': task.icon_name,
+                'required_count': task.required_count,
+                'is_completed': is_completed,
+                'order': task.order,
+                'progress': {
+                    'current': current_progress,
+                    'required': required_progress
+                } if required_progress > 0 else None,
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'tasks': tasks_data,
+        })
+    except Exception as e:
+        logger.error(f"points_tasks_view error: {e}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'message': f'Error fetching points tasks: {str(e)}'
         }, status=500)
 
 
@@ -9341,7 +9252,8 @@ def engagement_points_settings_view(request):
                     'reply_points': settings.reply_points,
                     'post_points': settings.post_points,
                     'post_with_photo_points': settings.post_with_photo_points,
-                    'tracker_form_points': settings.tracker_form_points
+                    'tracker_form_enabled': settings.tracker_form_enabled,
+                    'tracker_form_points': settings.tracker_form_points,
                 }
             })
         
@@ -9379,6 +9291,25 @@ def engagement_points_settings_view(request):
             if 'post_with_photo' in data:
                 settings.post_with_photo_points = int(data['post_with_photo'])
             
+            if 'tracker_form_enabled' in data:
+                tracker_form_enabled_value = bool(data['tracker_form_enabled'])
+                # Only allow enabling if tracker form is accepting responses
+                if tracker_form_enabled_value:
+                    from apps.shared.models import TrackerForm
+                    try:
+                        tracker_form = TrackerForm.objects.get(pk=1)
+                        if not tracker_form.accepting_responses:
+                            return JsonResponse({
+                                'success': False,
+                                'message': 'Cannot enable tracker form rewards. The tracker form must be accepting responses first. Please enable "Accepting Responses" in the Tracker Settings.'
+                            }, status=400)
+                    except TrackerForm.DoesNotExist:
+                        return JsonResponse({
+                            'success': False,
+                            'message': 'Cannot enable tracker form rewards. Tracker form does not exist. Please create a tracker form first.'
+                        }, status=400)
+                settings.tracker_form_enabled = tracker_form_enabled_value
+            
             if 'tracker_form' in data:
                 settings.tracker_form_points = int(data['tracker_form'])
             
@@ -9395,6 +9326,7 @@ def engagement_points_settings_view(request):
                     'reply': settings.reply_points,
                     'post': settings.post_points,
                     'post_with_photo': settings.post_with_photo_points,
+                    'tracker_form_enabled': settings.tracker_form_enabled,
                     'tracker_form': settings.tracker_form_points
                 }
             })
@@ -9410,597 +9342,125 @@ def engagement_points_settings_view(request):
             'success': False,
             'message': f'Error: {str(e)}'
         }, status=500)
-
-
-# ============================
-# Reward Inventory API Endpoints
-# ============================
-
 @api_view(['GET', 'POST'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
-def inventory_items_view(request):
+def milestone_tasks_points_view(request):
     """
-    GET: List all inventory items (users can view available items, admin can see all)
-    POST: Create a new inventory item (admin only)
+    GET: Get all milestone tasks with their points (admin only).
+    POST: Update milestone task points (admin only).
     """
     try:
-        user = request.user
-        is_admin = hasattr(user, 'account_type') and user.account_type.admin
+        from apps.shared.models import PointsTask
+        from apps.shared.points_milestones import ensure_milestone_tasks
         
+        # Check if user is admin
+        user = request.user
+        if not (hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Ensure milestone tasks exist
+        ensure_milestone_tasks()
+        
+        # Handle GET request - return all milestone tasks
         if request.method == 'GET':
-            # Fetch all inventory items
-            items = RewardInventoryItem.objects.all().order_by('-created_at')
+            from apps.shared.models import EngagementPointsSettings
+            settings = EngagementPointsSettings.get_settings()
             
-            items_data = []
-            for item in items:
-                # Users can only see items with quantity > 0
-                if not is_admin and item.quantity <= 0:
-                    continue
-                    
-                items_data.append({
-                    'id': item.item_id,
-                    'name': item.name,
-                    'type': item.type,
-                    'quantity': item.quantity,
-                    'value': item.value,
-                    'created_at': item.created_at.isoformat(),
-                    'updated_at': item.updated_at.isoformat()
+            # Get all milestone tasks (those starting with 'milestone_')
+            tasks = PointsTask.objects.filter(task_type__startswith='milestone_').order_by('order', 'task_id')
+            
+            tasks_data = []
+            for task in tasks:
+                tasks_data.append({
+                    'task_id': task.task_id,
+                    'task_type': task.task_type,
+                    'title': task.title,
+                    'description': task.description,
+                    'points': task.points,
+                    'max_points': task.max_points,
+                    'icon_name': task.icon_name,
+                    'is_active': task.is_active,
+                    'order': task.order,
+                    'required_count': task.required_count,
                 })
             
             return JsonResponse({
                 'success': True,
-                'items': items_data,
-                'count': len(items_data)
+                'tasks': tasks_data,
+                'milestone_tasks_enabled': getattr(settings, 'milestone_tasks_enabled', True)
             })
         
-        # POST method requires admin access
-        if not is_admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
+        # Handle POST request - update milestone task points
         elif request.method == 'POST':
-            # Create new inventory item
-            data = json.loads(request.body)
+            from apps.shared.models import EngagementPointsSettings
+            settings = EngagementPointsSettings.get_settings()
             
-            name = data.get('name', '').strip()
-            item_type = data.get('type', '').strip()
-            quantity = data.get('quantity', 0)
-            value = data.get('value', '').strip()
+            data = request.data
             
-            # Validation
-            if not name:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Item name is required'
-                }, status=400)
+            # Update milestone tasks enabled/disabled setting
+            if 'milestone_tasks_enabled' in data:
+                settings.milestone_tasks_enabled = bool(data['milestone_tasks_enabled'])
+                settings.save()
             
-            if not item_type:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Item type is required'
-                }, status=400)
-            
-            if not isinstance(quantity, int) or quantity < 1:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Quantity must be at least 1'
-                }, status=400)
-            
-            if not value or value == '0':
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Value is required and cannot be 0'
-                }, status=400)
-            
-            # Create item
-            new_item = RewardInventoryItem.objects.create(
-                name=name,
-                type=item_type,
-                quantity=quantity,
-                value=value
-            )
-            
-            logger.info(f"Admin {user.full_name} created inventory item: {name}")
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Item added successfully',
-                'item': {
-                    'id': new_item.item_id,
-                    'name': new_item.name,
-                    'type': new_item.type,
-                    'quantity': new_item.quantity,
-                    'value': new_item.value,
-                    'created_at': new_item.created_at.isoformat(),
-                    'updated_at': new_item.updated_at.isoformat()
-                }
-            }, status=201)
-    
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data'
-        }, status=400)
-    except Exception as e:
-        logger.error(f"inventory_items_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
-
-
-@api_view(['PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def inventory_item_detail_view(request, item_id):
-    """
-    PUT: Update an inventory item
-    DELETE: Delete an inventory item
-    (admin only)
-    """
-    try:
-        # Check if user is admin
-        user = request.user
-        if not hasattr(user, 'account_type') or not user.account_type.admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
-        # Get item
-        try:
-            item = RewardInventoryItem.objects.get(item_id=item_id)
-        except RewardInventoryItem.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'Item not found'
-            }, status=404)
-        
-        if request.method == 'PUT':
-            # Update item
-            data = json.loads(request.body)
-            
-            name = data.get('name', '').strip()
-            item_type = data.get('type', '').strip()
-            quantity = data.get('quantity', 0)
-            value = data.get('value', '').strip()
-            
-            # Validation
-            if not name:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Item name is required'
-                }, status=400)
-            
-            if not item_type:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Item type is required'
-                }, status=400)
-            
-            if not isinstance(quantity, int) or quantity < 1:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Quantity must be at least 1'
-                }, status=400)
-            
-            if not value or value == '0':
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Value is required and cannot be 0'
-                }, status=400)
-            
-            # Update fields
-            item.name = name
-            item.type = item_type
-            item.quantity = quantity
-            item.value = value
-            item.save()
-            
-            logger.info(f"Admin {user.full_name} updated inventory item: {name}")
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Item updated successfully',
-                'item': {
-                    'id': item.item_id,
-                    'name': item.name,
-                    'type': item.type,
-                    'quantity': item.quantity,
-                    'value': item.value,
-                    'created_at': item.created_at.isoformat(),
-                    'updated_at': item.updated_at.isoformat()
-                }
-            })
-        
-        elif request.method == 'DELETE':
-            # Delete item
-            item_name = item.name
-            item.delete()
-            
-            logger.info(f"Admin {user.full_name} deleted inventory item: {item_name}")
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Item deleted successfully'
-            })
-    
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data'
-        }, status=400)
-    except Exception as e:
-        logger.error(f"inventory_item_detail_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
-
-
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def give_reward_view(request):
-    """
-    Give a reward to a user (admin only)
-    Creates a notification for the recipient
-    """
-    try:
-        # Check if user is admin
-        admin_user = request.user
-        if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
-        data = json.loads(request.body)
-        user_id = data.get('user_id')
-        reward_id = data.get('reward_id')
-        is_tracker_reward = data.get('is_tracker_reward', False)  # Optional parameter
-        
-        if not user_id or not reward_id:
-            return JsonResponse({
-                'success': False,
-                'message': 'User ID and Reward ID are required'
-            }, status=400)
-        
-        # Get recipient user
-        try:
-            recipient = User.objects.get(user_id=user_id)
-        except User.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'User not found'
-            }, status=404)
-        
-        # Get reward item
-        try:
-            reward_item = RewardInventoryItem.objects.get(item_id=reward_id)
-        except RewardInventoryItem.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward item not found'
-            }, status=404)
-        
-        # Check if item has stock
-        if reward_item.quantity <= 0:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward item is out of stock'
-            }, status=400)
-        
-        # Extract point value from reward item (e.g., "10 pts" -> 10)
-        import re
-        points_match = re.search(r'(\d+)', reward_item.value)
-        required_points = int(points_match.group(1)) if points_match else 0
-        
-        # Get or create user points
-        user_points, created = UserPoints.objects.get_or_create(user=recipient)
-        
-        # For tracker rewards, skip point deduction (admin reward, not point redemption)
-        if not is_tracker_reward:
-            # Check if user has enough points (only for regular rewards)
-            if user_points.total_points < required_points:
-                return JsonResponse({
-                    'success': False,
-                    'message': f'User does not have enough points. Required: {required_points}, Available: {user_points.total_points}'
-                }, status=400)
-            
-            # Deduct points from user (only for regular rewards)
-            user_points.total_points -= required_points
-            user_points.save()
-        
-        # Decrease quantity
-        reward_item.quantity -= 1
-        reward_item.save()
-        
-        # Save to reward history
-        RewardHistory.objects.create(
-            user=recipient,
-            reward_name=reward_item.name,
-            reward_type=reward_item.type,
-            reward_value=reward_item.value,
-            points_deducted=0 if is_tracker_reward else required_points,  # No points deducted for tracker rewards
-            given_by=admin_user
-        )
-        
-        # Create notification for the user
-        if is_tracker_reward:
-            # Custom notification message for tracker form rewards (no points deducted)
-            notification_content = f'🎉 You are lucky! As a token of appreciation for cooperating and answering the tracker form, you have been chosen to receive a reward. Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}). No points were deducted - this is a special reward from the admin. Thank you for your participation!'
-            notification_subject = '🎁 Token of Appreciation - Tracker Form Response!'
-        else:
-            # Standard notification message for regular rewards (points deducted)
-            notification_content = f'Congratulations! You have been awarded "{reward_item.name}" ({reward_item.value}) for your engagement in the alumni network. {required_points} points have been deducted from your account. Keep up the great work!'
-            notification_subject = '🎁 You received a reward!'
-        
-        notification = Notification.objects.create(
-            user=recipient,
-            notif_type='Reward',
-            subject=notification_subject,
-            notifi_content=notification_content,
-            notif_date=timezone.now(),
-            is_read=False
-        )
-        
-        # Broadcast notification in real-time
-        try:
-            from apps.messaging.notification_broadcaster import broadcast_notification
-            broadcast_notification(notification)
-        except Exception as e:
-            logger.error(f"Error broadcasting reward notification: {e}")
-        
-        if is_tracker_reward:
-            logger.info(f"Admin {admin_user.full_name} gave tracker reward '{reward_item.name}' to {recipient.full_name} (no points deducted)")
-        else:
-            logger.info(f"Admin {admin_user.full_name} gave reward '{reward_item.name}' to {recipient.full_name}, {required_points} points deducted")
-        
-        return JsonResponse({
-            'success': True,
-            'message': f'Reward "{reward_item.name}" successfully given to {recipient.full_name}',
-            'notification_created': True,
-            'points_deducted': 0 if is_tracker_reward else required_points,
-            'user_remaining_points': user_points.total_points
-        })
-    
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data'
-        }, status=400)
-    except Exception as e:
-        logger.error(f"give_reward_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
-
-
-@api_view(['GET'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def reward_history_view(request):
-    """
-    GET: List all reward history (admin only)
-    Returns list of rewards given to users with user details
-    """
-    try:
-        # Check if user is admin
-        user = request.user
-        if not hasattr(user, 'account_type') or not user.account_type.admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
-        # Get limit parameter (default to 50)
-        limit = int(request.GET.get('limit', 50))
-        
-        # Get filter parameter for tracker rewards (points_deducted = 0)
-        tracker_only = request.GET.get('tracker_only', 'false').lower() == 'true'
-        
-        # Fetch reward history
-        if tracker_only:
-            # Filter for tracker rewards: points_deducted = 0 AND given_by is an admin
-            # Tracker rewards are rewards given by admin for answering tracker form (no points deducted)
-            history = RewardHistory.objects.select_related('user', 'given_by').filter(
-                points_deducted=0,
-                given_by__isnull=False
-            ).order_by('-given_at')[:limit]
-        else:
-            history = RewardHistory.objects.select_related('user', 'given_by').all().order_by('-given_at')[:limit]
-        
-        history_data = []
-        for entry in history:
-            try:
-                # Get user profile pic
-                profile_pic = None
-                try:
-                    user_profile = UserProfile.objects.filter(user=entry.user).first()
-                    if user_profile and user_profile.profile_pic:
-                        profile_pic = user_profile.profile_pic.url if user_profile.profile_pic else None
-                except Exception as e:
-                    logger.warning(f"Error getting profile pic for user {entry.user.user_id}: {e}")
+            # Update individual tasks if provided
+            if 'tasks' in data and isinstance(data['tasks'], list):
+                updated_tasks = []
+                for task_data in data['tasks']:
+                    if 'task_id' not in task_data or 'points' not in task_data:
+                        continue
+                    
+                    try:
+                        task = PointsTask.objects.get(task_id=task_data['task_id'])
+                        task.points = int(task_data['points'])
+                        
+                        if 'is_active' in task_data:
+                            task.is_active = bool(task_data['is_active'])
+                        
+                        if 'required_count' in task_data:
+                            required_value = int(task_data['required_count'])
+                            if required_value < 0:
+                                raise ValueError('required_count must be non-negative')
+                            task.required_count = required_value
+                        
+                        task.save()
+                        
+                        updated_tasks.append({
+                            'task_id': task.task_id,
+                            'task_type': task.task_type,
+                            'title': task.title,
+                            'points': task.points,
+                            'required_count': task.required_count,
+                        })
+                    except PointsTask.DoesNotExist:
+                        continue
+                    except ValueError:
+                        continue
                 
-                # Get user academic info
-                program = None
-                year_graduated = None
-                try:
-                    academic_info = AcademicInfo.objects.filter(user=entry.user).first()
-                    if academic_info:
-                        program = academic_info.program
-                        year_graduated = academic_info.year_graduated
-                except Exception as e:
-                    logger.warning(f"Error getting academic info for user {entry.user.user_id}: {e}")
-                
-                history_data.append({
-                    'id': entry.history_id,
-                    'user_id': entry.user.user_id,
-                    'user_name': entry.user.full_name,
-                    'profile_pic': profile_pic,
-                    'program': program,
-                    'year_graduated': year_graduated,
-                    'reward_name': entry.reward_name,
-                    'reward_type': entry.reward_type,
-                    'reward_value': entry.reward_value,
-                    'points_deducted': entry.points_deducted,
-                    'given_by': entry.given_by.full_name if entry.given_by else 'System',
-                    'given_at': entry.given_at.isoformat()
+                return JsonResponse({
+                    'success': True,
+                    'message': f'Updated milestone tasks settings and {len(updated_tasks)} task(s)',
+                    'updated_tasks': updated_tasks,
+                    'milestone_tasks_enabled': settings.milestone_tasks_enabled
                 })
-            except Exception as e:
-                logger.error(f"Error processing reward history entry {entry.history_id}: {e}")
-                continue
+            else:
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Updated milestone tasks settings',
+                    'milestone_tasks_enabled': settings.milestone_tasks_enabled
+                })
         
-        return JsonResponse({
-            'success': True,
-            'history': history_data,
-            'count': len(history_data)
-        })
-    
     except Exception as e:
+        logger.error(f"milestone_tasks_points_view error: {e}")
         import traceback
-        logger.error(f"reward_history_view error: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        traceback.print_exc()
         return JsonResponse({
             'success': False,
             'message': f'Error: {str(e)}'
         }, status=500)
-
-
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def request_reward_view(request):
-    """
-    User requests a reward (self-service redemption)
-    Creates a pending request WITHOUT deducting points or inventory
-    Points and inventory will be deducted when user actually claims after admin approval
-    """
-    try:
-        user = request.user
-        data = json.loads(request.body)
-        reward_id = data.get('reward_id')
-        
-        if not reward_id:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward ID is required'
-            }, status=400)
-        
-        # Get reward item
-        try:
-            reward_item = RewardInventoryItem.objects.get(item_id=reward_id)
-        except RewardInventoryItem.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward item not found'
-            }, status=404)
-        
-        # Check if item has stock
-        if reward_item.quantity <= 0:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward item is out of stock'
-            }, status=400)
-        
-        # Extract point value from reward item (e.g., "10 pts" -> 10)
-        import re
-        points_match = re.search(r'(\d+)', reward_item.value)
-        required_points = int(points_match.group(1)) if points_match else 0
-        
-        # Get user points
-        user_points, created = UserPoints.objects.get_or_create(user=user)
-        
-        # Check if user has enough points (but don't deduct yet)
-        if user_points.total_points < required_points:
-            return JsonResponse({
-                'success': False,
-                'message': f'Insufficient points. Required: {required_points}, Available: {user_points.total_points}'
-            }, status=400)
-        
-        # Check if user has already requested a reward this month (limit: 1 per month)
-        now = timezone.now()
-        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
-        # Count reward requests in current month (any status)
-        monthly_requests = RewardRequest.objects.filter(
-            user=user,
-            requested_at__gte=start_of_month
-        ).count()
-        
-        if monthly_requests >= 1:
-            return JsonResponse({
-                'success': False,
-                'message': 'You can only request 1 reward per month. Please wait until next month to request another reward.'
-            }, status=400)
-        
-        # Create pending reward request (NO points or inventory deduction yet)
-        reward_request = RewardRequest.objects.create(
-            user=user,
-            reward_item=reward_item,
-            status='pending',
-            points_cost=required_points
-        )
-        
-        # Determine message based on reward type
-        is_voucher = reward_item.type.lower() in ['voucher', 'gift card', 'giftcard', 'coupon']
-        is_merchandise = reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
-        
-        confirmation_message = ""
-        if is_voucher:
-            confirmation_message = "Please expect a reply from us regarding your reward request."
-        elif is_merchandise:
-            confirmation_message = "Please note that this reward must be claimed in person at the CTU office."
-        else:
-            confirmation_message = "Your reward request has been submitted and is pending approval."
-        
-        # Create notification for admin
-        try:
-            admin_users = User.objects.filter(account_type__admin=True)
-            for admin in admin_users:
-                notification = Notification.objects.create(
-                    user=admin,
-                    notif_type='Reward Request',
-                    subject=f'🎁 New Reward Request',
-                    notifi_content=f'{user.full_name} has requested to claim "{reward_item.name}" ({reward_item.value}). Points required: {required_points}. Please review and approve.',
-                    notif_date=timezone.now(),
-                    is_read=False
-                )
-                # Broadcast notification in real-time
-                try:
-                    from apps.messaging.notification_broadcaster import broadcast_notification
-                    broadcast_notification(notification)
-                except Exception as e:
-                    logger.error(f"Error broadcasting reward request notification: {e}")
-        except Exception as e:
-            logger.error(f"Error creating admin notifications: {e}")
-        
-        return JsonResponse({
-            'success': True,
-            'message': confirmation_message,
-            'request_id': reward_request.request_id,
-            'points_required': required_points,
-            'remaining_points': user_points.total_points
-        })
-    
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data'
-        }, status=400)
-    except Exception as e:
-        logger.error(f"request_reward_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
-
-
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -10121,6 +9581,555 @@ def reward_requests_list_view(request):
         }, status=500)
 
 
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def inventory_items_view(request):
+    """
+    GET: List reward inventory items.
+    POST: Create a new inventory item (admin only).
+    """
+    try:
+        user = request.user
+        is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+
+        if request.method == 'GET':
+            items = RewardInventoryItem.objects.all().order_by('-updated_at')
+            items_data = []
+            for item in items:
+                items_data.append({
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat() if item.created_at else None,
+                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+                })
+
+            return JsonResponse({
+                'success': True,
+                'items': items_data,
+                'count': len(items_data),
+            })
+
+        # POST - create new item
+        if not is_admin:
+            return JsonResponse(
+                {'success': False, 'message': 'Admin access required'},
+                status=403
+            )
+
+        data = json.loads(request.body or '{}')
+        name = (data.get('name') or '').strip()
+        item_type = (data.get('type') or '').strip()
+        quantity = data.get('quantity')
+        value = (data.get('value') or '').strip()
+
+        if not name or not item_type or value == '':
+            return JsonResponse(
+                {'success': False, 'message': 'Name, type, and value are required'},
+                status=400
+            )
+
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return JsonResponse(
+                {'success': False, 'message': 'Quantity must be an integer'},
+                status=400
+            )
+
+        if quantity < 0:
+            return JsonResponse(
+                {'success': False, 'message': 'Quantity cannot be negative'},
+                status=400
+            )
+
+        item = RewardInventoryItem.objects.create(
+            name=name,
+            type=item_type,
+            quantity=quantity,
+            value=value,
+        )
+
+        logger.info(f"Inventory item created by {user.full_name}: {item}")
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Inventory item created successfully',
+            'item': {
+                'id': item.item_id,
+                'name': item.name,
+                'type': item.type,
+                'quantity': item.quantity,
+                'value': item.value,
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+            }
+        }, status=201)
+
+    except Exception as e:
+        logger.error(f"inventory_items_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def inventory_item_detail_view(request, item_id):
+    """
+    GET: Retrieve a single inventory item.
+    PUT: Update an inventory item (admin only).
+    DELETE: Delete an inventory item (admin only).
+    """
+    try:
+        user = request.user
+        is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+
+        try:
+            item = RewardInventoryItem.objects.get(item_id=item_id)
+        except RewardInventoryItem.DoesNotExist:
+            return JsonResponse(
+                {'success': False, 'message': 'Inventory item not found'},
+                status=404
+            )
+
+        if request.method == 'GET':
+            return JsonResponse({
+                'success': True,
+                'item': {
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat() if item.created_at else None,
+                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+                }
+            })
+
+        if not is_admin:
+            return JsonResponse(
+                {'success': False, 'message': 'Admin access required'},
+                status=403
+            )
+
+        if request.method == 'DELETE':
+            logger.info(f"Inventory item deleted by {user.full_name}: {item}")
+            item.delete()
+            return JsonResponse({
+                'success': True,
+                'message': 'Inventory item deleted successfully'
+            })
+
+        # PUT - update item
+        data = json.loads(request.body or '{}')
+        updated_fields = []
+        save_fields = set()
+
+        if 'name' in data and data['name'] is not None:
+            item.name = str(data['name']).strip()
+            updated_fields.append('name')
+            save_fields.add('name')
+
+        if 'type' in data and data['type'] is not None:
+            item.type = str(data['type']).strip()
+            updated_fields.append('type')
+            save_fields.add('type')
+
+        if 'value' in data and data['value'] is not None:
+            item.value = str(data['value']).strip()
+            updated_fields.append('value')
+            save_fields.add('value')
+
+        if 'quantity' in data and data['quantity'] is not None:
+            try:
+                quantity = int(data['quantity'])
+            except (TypeError, ValueError):
+                return JsonResponse(
+                    {'success': False, 'message': 'Quantity must be an integer'},
+                    status=400
+                )
+            if quantity < 0:
+                return JsonResponse(
+                    {'success': False, 'message': 'Quantity cannot be negative'},
+                    status=400
+                )
+            item.quantity = quantity
+            updated_fields.append('quantity')
+            save_fields.add('quantity')
+
+        if not updated_fields:
+            return JsonResponse(
+                {'success': False, 'message': 'No valid fields provided for update'},
+                status=400
+            )
+
+        save_fields.add('updated_at')
+        item.save(update_fields=list(save_fields))
+        logger.info(f"Inventory item updated by {user.full_name}: {item} (fields: {updated_fields})")
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Inventory item updated successfully',
+            'item': {
+                'id': item.item_id,
+                'name': item.name,
+                'type': item.type,
+                'quantity': item.quantity,
+                'value': item.value,
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"inventory_item_detail_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def reward_history_view(request):
+    """
+    GET: Return reward history entries.
+    Admins see all; regular users see their own.
+    Supports optional ?limit= and ?tracker_only=
+    """
+    try:
+        user = request.user
+        is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+
+        limit_param = request.GET.get('limit')
+        tracker_only = str(request.GET.get('tracker_only', 'false')).lower() in ('true', '1', 'yes')
+
+        history_qs = (
+            RewardHistory.objects
+            .select_related('user', 'user__academic_info', 'given_by')
+            .order_by('-given_at')
+        )
+
+        if not is_admin:
+            history_qs = history_qs.filter(user=user)
+
+        if tracker_only:
+            history_qs = history_qs.filter(reward_type__icontains='tracker')
+
+        if limit_param:
+            try:
+                limit_value = int(limit_param)
+                if limit_value > 0:
+                    history_qs = history_qs[:limit_value]
+            except ValueError:
+                pass
+
+        history_data = []
+        for entry in history_qs:
+            academic = getattr(entry.user, 'academic_info', None)
+            history_data.append({
+                'id': entry.history_id,
+                'user_id': entry.user.user_id,
+                'user_name': entry.user.full_name,
+                'profile_pic': build_profile_pic_url(entry.user),
+                'program': getattr(academic, 'program', None),
+                'year_graduated': getattr(academic, 'year_graduated', None),
+                'reward_name': entry.reward_name,
+                'reward_type': entry.reward_type,
+                'reward_value': entry.reward_value,
+                'points_deducted': entry.points_deducted,
+                'given_by': entry.given_by.full_name if entry.given_by else None,
+                'given_by_id': entry.given_by.user_id if entry.given_by else None,
+                'given_at': entry.given_at.isoformat(),
+            })
+
+        return JsonResponse({
+            'success': True,
+            'history': history_data,
+            'count': len(history_data)
+        })
+    except Exception as e:
+        logger.error(f"reward_history_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def give_reward_view(request):
+    """
+    POST: Admin grants a reward directly to a user.
+    Deducts inventory and (optionally) user points, records history, sends notification.
+    """
+    try:
+        admin_user = request.user
+        if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
+            return JsonResponse(
+                {'success': False, 'message': 'Admin access required'},
+                status=403
+            )
+
+        data = json.loads(request.body or '{}')
+        user_id = data.get('user_id')
+        reward_id = data.get('reward_id')
+        is_tracker_reward = bool(data.get('is_tracker_reward', False))
+
+        if not user_id or not reward_id:
+            return JsonResponse(
+                {'success': False, 'message': 'user_id and reward_id are required'},
+                status=400
+            )
+
+        try:
+            target_user = User.objects.select_related('account_type').get(user_id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse(
+                {'success': False, 'message': 'User not found'},
+                status=404
+            )
+
+        with transaction.atomic():
+            try:
+                reward_item = RewardInventoryItem.objects.select_for_update().get(item_id=reward_id)
+            except RewardInventoryItem.DoesNotExist:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward item not found'},
+                    status=404
+                )
+
+            if reward_item.quantity <= 0:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward item is out of stock'},
+                    status=400
+                )
+
+            points_cost = extract_points_from_value(reward_item.value)
+            user_points, _ = UserPoints.objects.select_for_update().get_or_create(user=target_user)
+
+            if not is_tracker_reward and points_cost > user_points.total_points:
+                return JsonResponse(
+                    {
+                        'success': False,
+                        'message': f'Insufficient points. Required: {points_cost}, Available: {user_points.total_points}'
+                    },
+                    status=400
+                )
+
+            # Update inventory
+            reward_item.quantity -= 1
+            if reward_item.quantity < 0:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward item is out of stock'},
+                    status=400
+                )
+            reward_item.save(update_fields=['quantity', 'updated_at'])
+
+            points_deducted = 0
+            if not is_tracker_reward and points_cost > 0:
+                user_points.total_points = max(0, user_points.total_points - points_cost)
+                user_points.save(update_fields=['total_points', 'updated_at'])
+                points_deducted = points_cost
+            else:
+                # Ensure updated_at still reflects activity
+                user_points.save(update_fields=['updated_at'])
+
+            history = RewardHistory.objects.create(
+                user=target_user,
+                reward_name=reward_item.name,
+                reward_type=reward_item.type,
+                reward_value=reward_item.value,
+                points_deducted=points_deducted,
+                given_by=admin_user
+            )
+
+        notification_message = f'You received "{reward_item.name}"!'
+        if points_deducted:
+            notification_message += f' {points_deducted} points have been deducted from your account.'
+        else:
+            notification_message += ' Enjoy your reward!'
+
+        notification = Notification.objects.create(
+            user=target_user,
+            notif_type='Reward',
+            subject='🎁 Reward Granted',
+            notifi_content=notification_message,
+            notif_date=timezone.now(),
+            is_read=False
+        )
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting reward notification: {e}")
+
+        return JsonResponse({
+            'success': True,
+            'message': f'Reward "{reward_item.name}" given successfully.',
+            'points_deducted': points_deducted,
+            'user_remaining_points': user_points.total_points,
+            'history_id': history.history_id,
+            'reward': {
+                'id': reward_item.item_id,
+                'name': reward_item.name,
+                'type': reward_item.type,
+                'value': reward_item.value,
+                'quantity_remaining': reward_item.quantity,
+            }
+        })
+    except Exception as e:
+        logger.error(f"give_reward_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def request_reward_view(request):
+    """
+    POST: User submits a reward request.
+    Validates points and monthly limits, creates request, notifies admins.
+    """
+    try:
+        user = request.user
+        data = json.loads(request.body or '{}')
+        reward_id = data.get('reward_id')
+
+        if not reward_id:
+            return JsonResponse(
+                {'success': False, 'message': 'reward_id is required'},
+                status=400
+            )
+
+        with transaction.atomic():
+            try:
+                reward_item = RewardInventoryItem.objects.select_for_update().get(item_id=reward_id)
+            except RewardInventoryItem.DoesNotExist:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward item not found'},
+                    status=404
+                )
+
+            if reward_item.quantity <= 0:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward item is out of stock'},
+                    status=400
+                )
+
+            points_cost = extract_points_from_value(reward_item.value)
+            user_points, _ = UserPoints.objects.select_for_update().get_or_create(user=user)
+
+            if user_points.total_points < points_cost:
+                return JsonResponse(
+                    {
+                        'success': False,
+                        'message': f'Insufficient points. Required: {points_cost}, Available: {user_points.total_points}'
+                    },
+                    status=400
+                )
+
+            # Enforce one request per month
+            now = timezone.now()
+            start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            monthly_requests = RewardRequest.objects.filter(
+                user=user,
+                requested_at__gte=start_of_month
+            ).exclude(status='rejected')
+
+            if monthly_requests.exists():
+                return JsonResponse(
+                    {'success': False, 'message': 'You have already submitted a reward request this month.'},
+                    status=400
+                )
+
+            # Prevent duplicate pending requests for same reward
+            if RewardRequest.objects.filter(user=user, reward_item=reward_item, status__in=['pending', 'approved', 'ready_for_pickup']).exists():
+                return JsonResponse(
+                    {'success': False, 'message': 'You already have an active request for this reward.'},
+                    status=400
+                )
+
+            reward_request = RewardRequest.objects.create(
+                user=user,
+                reward_item=reward_item,
+                status='pending',
+                points_cost=points_cost
+            )
+
+        notif_date = timezone.now()
+
+        # Notify admins about the new reward request
+        admin_users = User.objects.filter(account_type__admin=True).exclude(user_id=user.user_id)
+        admin_message = f'{user.full_name} requested "{reward_item.name}".'
+        for admin in admin_users:
+            notification = Notification.objects.create(
+                user=admin,
+                notif_type='Reward Request',
+                subject='New Reward Request',
+                notifi_content=admin_message,
+                notif_date=notif_date,
+                is_read=False
+            )
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting reward request notification to admin {admin.user_id}: {e}")
+
+        # Notify the user that their request was received
+        user_notification = Notification.objects.create(
+            user=user,
+            notif_type='Reward Request',
+            subject='Reward Request Submitted',
+            notifi_content=f'Your request for "{reward_item.name}" has been submitted. Please wait for administrator approval.',
+            notif_date=notif_date,
+            is_read=False
+        )
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(user_notification)
+        except Exception as e:
+            logger.error(f"Error broadcasting reward request confirmation: {e}")
+
+        response_request = {
+            'request_id': reward_request.request_id,
+            'reward_id': reward_item.item_id,
+            'reward_name': reward_item.name,
+            'reward_type': reward_item.type,
+            'reward_value': reward_item.value,
+            'status': reward_request.status,
+            'points_cost': reward_request.points_cost,
+            'requested_at': reward_request.requested_at.isoformat(),
+        }
+
+        return JsonResponse(
+            {
+                'success': True,
+                'message': 'Reward request submitted successfully.',
+                'request': response_request
+            },
+            status=201
+        )
+    except Exception as e:
+        logger.error(f"request_reward_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
 def get_business_days_after(start_date, days):
     """
     Calculate expiration date excluding weekends and holidays.
@@ -10227,7 +10236,7 @@ def approve_reward_request_view(request, request_id):
         # Handle voucher expiration (5 business days, excluding weekends and holidays)
         if is_voucher:
             approval_date = timezone.now()
-            reward_request.expires_at = get_business_days_after(approval_date, 5)
+            reward_request.expires_at = get_business_days_after(approval_date, 1)
             voucher_code = data.get('voucher_code')
             if voucher_code:
                 reward_request.voucher_code = voucher_code
@@ -10395,7 +10404,7 @@ def claim_reward_request_view(request, request_id):
         reward_request.save()
         
         # Create reward history entry (this is what appears in reward history)
-        # Use approved_by if available, otherwise use the admin who approved (or system)
+        # Use approved_by if available, otherwise use the admin who approved/released
         reward_history = RewardHistory.objects.create(
             user=reward_user,
             reward_name=reward_item.name,
