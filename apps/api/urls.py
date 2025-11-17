@@ -137,6 +137,8 @@ urlpatterns = [
     path('forum/<int:forum_id>/comments/', views.forum_comments_view, name='forum_comments'),
     path('forum/<int:forum_id>/comments/<int:comment_id>/', views.forum_comment_edit_view, name='forum_comment_edit'),
     path('forum/<int:forum_id>/repost/', views.forum_repost_view, name='forum_repost'),
+    # Used by Mobile: Donation repost endpoint
+    path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     # Removed duplicate route - reposts/<int:repost_id>/ is already defined above in line 110
     
     # User profile social media and email endpoints

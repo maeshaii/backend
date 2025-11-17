@@ -655,7 +655,13 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
             raise serializers.ValidationError('Password is required')
             
         try:
-            user = User.objects.get(acc_username=acc_username)
+            # Optimize query with select_related to avoid N+1 queries
+            user = User.objects.select_related(
+                'account_type', 
+                'profile', 
+                'academic_info',
+                'initial_password'
+            ).get(acc_username=acc_username)
         except User.DoesNotExist:
             raise serializers.ValidationError('Invalid credentials')
 
@@ -675,16 +681,20 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         profile = getattr(user, 'profile', None)
         
         # Get follower and following counts (optimized - only if needed)
+        # Skip for admins/coordinators to avoid unnecessary queries
         followers_count = 0
         following_count = 0
         try:
             # Only fetch counts if user is not admin (admins don't need social counts)
-            if not user.account_type.admin:
+            # Access account_type.admin safely - it's already loaded via select_related
+            if user.account_type and not user.account_type.admin:
                 from apps.shared.models import Follow
+                # Use select_related is not needed here as we're just counting
                 followers_count = Follow.objects.filter(following=user).count()
                 following_count = Follow.objects.filter(follower=user).count()
-        except Exception:
+        except Exception as e:
             # Fallback to 0 if there are database issues
+            logger.warning(f"Error fetching follow counts for user {user.user_id}: {e}")
             followers_count = 0
             following_count = 0
         
@@ -704,11 +714,11 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
                 'followers_count': followers_count,
                 'following_count': following_count,
                 'account_type': {
-                    'admin': user.account_type.admin,
-                    'peso': user.account_type.peso,
-                    'user': user.account_type.user,
-                    'coordinator': user.account_type.coordinator,
-                    'ojt': user.account_type.ojt,
+                    'admin': user.account_type.admin if user.account_type else False,
+                    'peso': user.account_type.peso if user.account_type else False,
+                    'user': user.account_type.user if user.account_type else False,
+                    'coordinator': user.account_type.coordinator if user.account_type else False,
+                    'ojt': user.account_type.ojt if user.account_type else False,
                 }
             },
             'must_change_password': must_change_password,
@@ -2539,6 +2549,32 @@ def import_ojt_view(request):
                             ojt_info.ojt_start_date = ojt_start_date
                         if 'ojt_end_date' in locals() and ojt_end_date:
                             ojt_info.ojt_end_date = ojt_end_date
+                        
+                        # Update basic OJT information fields
+                        ojt_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
+                        
+                        # Email is required - try to get from Excel, or fallback to UserProfile
+                        if not ojt_email:
+                            # Try to get email from UserProfile if not in Excel
+                            if profile and hasattr(profile, 'email') and profile.email:
+                                ojt_email = profile.email
+                                print(f"Row {index+2} - Email not in Excel, using email from UserProfile: {ojt_email}")
+                        
+                        # Email is required - validate it exists
+                        if not ojt_email:
+                            error_msg = f"Row {index + 2}: Email is required for OJT students"
+                            print(f"SKIPPING: {error_msg}")
+                            errors.append(error_msg)
+                            skipped_count += 1
+                            continue
+                        
+                        ojt_info.email = ojt_email
+                        # Also update UserProfile email if it's different
+                        if profile and (not profile.email or profile.email != ojt_email):
+                            profile.email = ojt_email
+                            profile.save()
+                            print(f"Row {index+2} - Updated UserProfile email to match OJTInfo: {ojt_email}")
+                        
                         ojt_info.save()
                         
                         # Update or create OJT Company Profile
@@ -2627,10 +2663,14 @@ def import_ojt_view(request):
                     except:
                         pass
                 
+                # Extract email for UserProfile
+                profile_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
+                
                 profile_kwargs = dict(
                     user=ojt_user,
                     age=None,
                     phone_num=phone_num,
+                    email=profile_email,  # Save email to UserProfile as well
                     address=str(row.get('Address', '')).strip() if pd.notna(row.get('Address')) else None,
                     civil_status=str(row.get('Civil_Status', '')).strip() if pd.notna(row.get('Civil_Status')) else None,
                     social_media=str(row.get('Social_Media', '')).strip() if pd.notna(row.get('Social_Media')) else None,
@@ -2666,11 +2706,23 @@ def import_ojt_view(request):
                     # STATUS is ONLY set if start_date exists, otherwise set to 'Not Started'
                     final_status = ojt_status if ('ojt_start_date' in locals() and ojt_start_date) else 'Not Started'
                     
+                    # Extract basic OJT information
+                    ojt_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
+                    
+                    # Email is required - validate it exists
+                    if not ojt_email:
+                        error_msg = f"Row {index + 2}: Email is required for OJT students"
+                        print(f"SKIPPING: {error_msg}")
+                        errors.append(error_msg)
+                        skipped_count += 1
+                        continue
+                    
                     OJTInfo.objects.create(
                         ojt_start_date=ojt_start_date if 'ojt_start_date' in locals() else None,
                         user=ojt_user,
                         ojt_end_date=ojt_end_date if 'ojt_end_date' in locals() else None,
                         ojtstatus=final_status,
+                        email=ojt_email,
                     )
                     if 'ojt_start_date' in locals() and ojt_start_date:
                         print(f"Row {index+2} - Created new user with status: '{final_status}' (start date exists)")
@@ -3131,6 +3183,7 @@ def ojt_by_year_view(request):
                 'age': getattr(profile, 'calculated_age', None) if profile else None,
                 'phone_number': getattr(profile, 'phone_num', None) if profile else None,
                 'address': getattr(profile, 'address', None) if profile else None,
+                'email': getattr(ojt_info, 'email', None) if ojt_info else None,  # Student email from OJTInfo
                 'civil_status': getattr(profile, 'civil_status', None) if profile else None,
                 'social_media': getattr(profile, 'social_media', None) if profile else None,
                 'course': getattr(academic_info, 'program', None) if academic_info else None,
@@ -5357,8 +5410,18 @@ def repost_like_view(request, repost_id):
             print(f"🔍 DEBUG: Like created={created}, like_id={like.like_id if like else None}")
             
             if created:
-                # Award engagement points for liking
-                award_engagement_points(user, 'like')
+                # Check if user is liking their own repost - don't count for milestones
+                # Note: We only check if they own the REPOST itself, not the original content
+                # If someone else reposted your content, liking their repost should count
+                is_own_repost = user.user_id == repost.user.user_id
+                is_self_like = is_own_repost
+                
+                # Award engagement points for liking - only if liking someone else's repost
+                # Milestone task requires liking posts from OTHER users
+                if not is_self_like:
+                    award_engagement_points(user, 'like')
+                else:
+                    logger.info(f"User {user.user_id} liked their own repost {repost_id} - points not awarded")
                 
                 # Create notification for repost owner (only if the liker is not the repost owner)
                 if user.user_id != repost.user.user_id:
@@ -5412,9 +5475,21 @@ def repost_like_view(request, repost_id):
         # Unlike the repost
         try:
             like = Like.objects.get(user=user, repost=repost)
+            
+            # Check if this was a self-like - only deduct points if it wasn't
+            # Note: We only check if they own the REPOST itself, not the original content
+            # If someone else reposted your content, liking their repost should count
+            is_own_repost = user.user_id == repost.user.user_id
+            is_self_like = is_own_repost
+            
             like.delete()
-            # Deduct engagement points for unliking
-            deduct_engagement_points(user, 'like')
+            
+            # Only deduct points if it wasn't a self-like (points shouldn't have been awarded for self-likes)
+            if not is_self_like:
+                deduct_engagement_points(user, 'like')
+            else:
+                logger.info(f"User {user.user_id} unliked their own repost {repost_id} or own content - points not deducted")
+            
             return JsonResponse({'success': True, 'message': 'Repost unliked'})
         except Like.DoesNotExist:
             return JsonResponse({'success': False, 'message': 'Repost not liked'})
@@ -5476,6 +5551,12 @@ def repost_comments_view(request, repost_id):
             if not content:
                 return JsonResponse({'error': 'content required'}, status=400)
             
+            # Check if user is commenting on their own repost - don't count for milestones
+            # Note: We only check if they own the REPOST itself, not the original content
+            # If someone else reposted your content, commenting on their repost should count
+            is_own_repost = request.user.user_id == repost.user.user_id
+            is_self_comment = is_own_repost
+            
             # Create comment
             comment = Comment.objects.create(
                 repost=repost,
@@ -5483,6 +5564,14 @@ def repost_comments_view(request, repost_id):
                 comment_content=content,
                 date_created=timezone.now()
             )
+            
+            # Award engagement points (+3 for comment) - only if commenting on someone else's repost/content
+            # Milestone task requires commenting on posts from OTHER users
+            if not is_self_comment:
+                award_engagement_points(request.user, 'comment')
+            else:
+                # Log that self-comment was attempted (for debugging)
+                logger.info(f"User {request.user.user_id} commented on their own repost {repost.repost_id} or own content - points not awarded")
             
             # Determine repost type and original content info
             if repost.donation_request:
@@ -5572,8 +5661,18 @@ def repost_comment_edit_view(request, repost_id, comment_id):
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
     else:
-        # Deduct engagement points for deleting comment
-        deduct_engagement_points(comment.user, 'comment')
+        # Check if this was a self-comment - only deduct points if it wasn't
+        # Note: We only check if they own the REPOST itself, not the original content
+        # If someone else reposted your content, commenting on their repost should count
+        is_own_repost = comment.user.user_id == repost.user.user_id
+        is_self_comment = is_own_repost
+        
+        # Only deduct points if it wasn't a self-comment (points weren't awarded for self-comments)
+        if not is_self_comment:
+            deduct_engagement_points(comment.user, 'comment')
+        else:
+            logger.info(f"User {comment.user.user_id} deleting self-comment {comment_id} on own repost/content - points not deducted")
+        
         comment.delete()
         return JsonResponse({'success': True})
 
@@ -5596,8 +5695,15 @@ def post_like_view(request, post_id):
                 }
             )
             if created:
-                # Award engagement points (+1 for like)
-                award_engagement_points(user, 'like')
+                # Check if user is liking their own post - don't count for milestones
+                is_own_post = user.user_id == post.user.user_id
+                
+                # Award engagement points (+1 for like) - only if liking someone else's post
+                # Milestone task requires liking posts from OTHER users
+                if not is_own_post:
+                    award_engagement_points(user, 'like')
+                else:
+                    logger.info(f"User {user.user_id} liked their own post {post_id} - points not awarded")
                 
                 # Create notification for post owner (only if the liker is not the post owner)
                 if user.user_id != post.user.user_id:
@@ -5622,9 +5728,19 @@ def post_like_view(request, post_id):
             # Unlike the post
             try:
                 like = Like.objects.get(user=user, post=post)
+                
+                # Check if this was a self-like - only deduct points if it wasn't
+                # (self-likes shouldn't have been awarded points, but check to be safe)
+                is_self_like = user.user_id == post.user.user_id
+                
                 like.delete()
-                # Deduct engagement points for unliking
-                deduct_engagement_points(user, 'like')
+                
+                # Only deduct points if it wasn't a self-like (points shouldn't have been awarded for self-likes)
+                if not is_self_like:
+                    deduct_engagement_points(user, 'like')
+                else:
+                    logger.info(f"User {user.user_id} unliked their own post {post_id} - points not deducted")
+                
                 return JsonResponse({'success': True, 'message': 'Post unliked'})
             except Like.DoesNotExist:
                 return JsonResponse({'success': False, 'message': 'Post not liked'})
@@ -5719,8 +5835,15 @@ def comment_edit_view(request, post_id, comment_id):
             else:
                 return JsonResponse({'error': 'No content provided'}, status=400)
         elif request.method == "DELETE":
-            # Deduct engagement points for deleting comment
-            deduct_engagement_points(comment.user, 'comment')
+            # Check if this was a self-comment - only deduct points if it wasn't
+            is_self_comment = comment.user.user_id == post.user.user_id
+            
+            # Only deduct points if it wasn't a self-comment (points weren't awarded for self-comments)
+            if not is_self_comment:
+                deduct_engagement_points(comment.user, 'comment')
+            else:
+                logger.info(f"User {comment.user.user_id} deleting self-comment {comment_id} on own post {post_id} - points not deducted")
+            
             comment.delete()
             return JsonResponse({'success': True, 'message': 'Comment deleted'})
     except Post.DoesNotExist:
@@ -5763,6 +5886,9 @@ def post_comments_view(request, post_id):
             data = json.loads(request.body)
             user = request.user
 
+            # Check if user is commenting on their own post - don't count for milestones
+            is_own_post = user.user_id == post.user.user_id
+
             # Create comment
             comment = Comment.objects.create(
                 user=user,
@@ -5771,8 +5897,13 @@ def post_comments_view(request, post_id):
                 date_created=timezone.now()
             )
             
-            # Award engagement points (+3 for comment)
-            award_engagement_points(user, 'comment')
+            # Award engagement points (+3 for comment) - only if commenting on someone else's post
+            # Milestone task requires commenting on posts from OTHER users
+            if not is_own_post:
+                award_engagement_points(user, 'comment')
+            else:
+                # Log that self-comment was attempted (for debugging)
+                logger.info(f"User {user.user_id} commented on their own post {post.post_id} - points not awarded")
 
             # Create mention notifications
             create_mention_notifications(
@@ -6258,6 +6389,10 @@ def post_repost_view(request, post_id):
         except Exception:
             payload = {}
         caption = (payload.get('caption') or '').strip() or None
+        
+        # Check if user is reposting their own post - don't count for milestones
+        is_own_post = user.user_id == post.user.user_id
+        
         repost = Repost.objects.create(
             user=user,
             post=post,
@@ -6265,17 +6400,13 @@ def post_repost_view(request, post_id):
             caption=caption,
         )
         
-        # Create mention notifications for users mentioned in the repost caption
-        if caption:
-            create_mention_notifications(
-                caption,
-                user,
-                post_id=post.post_id,
-                repost_id=repost.repost_id
-            )
-        
-        # Award engagement points (+5 for share/repost)
-        award_engagement_points(user, 'share')
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's post
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_post:
+            award_engagement_points(user, 'share')
+        else:
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {user.user_id} reposted their own post {post.post_id} - points not awarded")
 
         # Create notification for post owner (only if the reposter is not the post owner)
         if user.user_id != post.user.user_id:
@@ -6338,8 +6469,22 @@ def repost_delete_view(request, repost_id):
         elif request.method == 'DELETE':
             # Delete repost
             print(f"🗑️ DEBUG: User {request.user.user_id} deleting repost {repost_id}")
-            # Deduct engagement points for deleting repost (share)
-            deduct_engagement_points(request.user, 'share')
+            
+            # Check if this was a self-repost - only deduct points if it wasn't
+            is_self_repost = False
+            if repost.post:
+                is_self_repost = request.user.user_id == repost.post.user.user_id
+            elif repost.forum:
+                is_self_repost = request.user.user_id == repost.forum.user.user_id
+            elif repost.donation_request:
+                is_self_repost = request.user.user_id == repost.donation_request.user.user_id
+            
+            # Only deduct points if it wasn't a self-repost (points weren't awarded for self-reposts)
+            if not is_self_repost:
+                deduct_engagement_points(request.user, 'share')
+            else:
+                logger.info(f"User {request.user.user_id} deleting self-repost {repost_id} - points not deducted")
+            
             repost.delete()
             return JsonResponse({'success': True, 'message': 'Repost deleted successfully'})
             
@@ -6949,8 +7094,15 @@ def forum_like_view(request, forum_id):
                 }
             )
             if created:
-                # Award engagement points for liking
-                award_engagement_points(request.user, 'like')
+                # Check if user is liking their own forum post - don't count for milestones
+                is_own_forum = request.user.user_id == forum.user.user_id
+                
+                # Award engagement points for liking - only if liking someone else's forum post
+                # Milestone task requires liking posts from OTHER users
+                if not is_own_forum:
+                    award_engagement_points(request.user, 'like')
+                else:
+                    logger.info(f"User {request.user.user_id} liked their own forum post {forum_id} - points not awarded")
                 
             if created and request.user.user_id != forum.user.user_id:
                 notification = Notification.objects.create(
@@ -6971,9 +7123,17 @@ def forum_like_view(request, forum_id):
         else:
             try:
                 like = Like.objects.get(forum=forum, user=request.user)
+                
+                # Check if this was a self-like - only deduct points if it wasn't
+                is_self_like = request.user.user_id == forum.user.user_id
+                
                 like.delete()
-                # Deduct engagement points for unliking
-                deduct_engagement_points(request.user, 'like')
+                
+                # Only deduct points if it wasn't a self-like (points shouldn't have been awarded for self-likes)
+                if not is_self_like:
+                    deduct_engagement_points(request.user, 'like')
+                else:
+                    logger.info(f"User {request.user.user_id} unliked their own forum post {forum_id} - points not deducted")
             except Like.DoesNotExist:
                 pass
             return JsonResponse({'success': True})
@@ -7022,12 +7182,23 @@ def forum_comments_view(request, forum_id):
         else:
             payload = json.loads(request.body or "{}")
             content = payload.get('comment_content') or ''
+            # Check if user is commenting on their own forum post - don't count for milestones
+            is_own_forum = request.user.user_id == forum.user.user_id
+            
             comment = Comment.objects.create(
                 user=request.user,
                 forum=forum,
                 comment_content=content,
                 date_created=timezone.now()
             )
+            
+            # Award engagement points (+3 for comment) - only if commenting on someone else's forum post
+            # Milestone task requires commenting on posts from OTHER users
+            if not is_own_forum:
+                award_engagement_points(request.user, 'comment')
+            else:
+                # Log that self-comment was attempted (for debugging)
+                logger.info(f"User {request.user.user_id} commented on their own forum post {forum.forum_id} - points not awarded")
             
             # Create mention notifications
             create_mention_notifications(
@@ -7084,8 +7255,15 @@ def forum_comment_edit_view(request, forum_id, comment_id):
             return JsonResponse({'success': True})
         else:
             # Both comment owner and post owner can delete
-            # Deduct engagement points for deleting comment
-            deduct_engagement_points(comment.user, 'comment')
+            # Check if this was a self-comment - only deduct points if it wasn't
+            is_self_comment = comment.user.user_id == forum.user.user_id
+            
+            # Only deduct points if it wasn't a self-comment (points weren't awarded for self-comments)
+            if not is_self_comment:
+                deduct_engagement_points(comment.user, 'comment')
+            else:
+                logger.info(f"User {comment.user.user_id} deleting self-comment {comment_id} on own forum {forum_id} - points not deducted")
+            
             comment.delete()
             return JsonResponse({'success': True})
     except Comment.DoesNotExist:
@@ -7119,6 +7297,9 @@ def forum_repost_view(request, forum_id):
             payload = {}
         caption = (payload.get('caption') or '').strip() or None
         
+        # Check if user is reposting their own forum post - don't count for milestones
+        is_own_forum = request.user.user_id == forum.user.user_id
+        
         r = Repost.objects.create(
             forum=forum, 
             user=request.user, 
@@ -7126,17 +7307,13 @@ def forum_repost_view(request, forum_id):
             caption=caption
         )
         
-        # Create mention notifications for users mentioned in the repost caption
-        if caption:
-            create_mention_notifications(
-                caption,
-                request.user,
-                forum_id=forum.forum_id,
-                repost_id=r.repost_id
-            )
-        
-        # Award engagement points (+5 for share/repost)
-        award_engagement_points(request.user, 'share')
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's forum post
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_forum:
+            award_engagement_points(request.user, 'share')
+        else:
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {request.user.user_id} reposted their own forum post {forum.forum_id} - points not awarded")
         
         # Create notification for forum owner (only if the reposter is not the forum owner)
         if request.user.user_id != forum.user.user_id:
@@ -7159,6 +7336,68 @@ def forum_repost_view(request, forum_id):
         return JsonResponse({'error': 'Forum not found'}, status=404)
 
 
+@api_view(["POST"]) 
+@permission_classes([IsAuthenticated])
+def donation_repost_view(request, donation_id):
+    """Create a repost of a donation request"""
+    try:
+        donation = DonationRequest.objects.select_related('user').get(donation_id=donation_id)
+        
+        # Create repost with optional caption
+        payload = {}
+        try:
+            payload = json.loads(request.body or "{}")
+        except Exception:
+            payload = {}
+        caption = (payload.get('caption') or '').strip() or None
+        
+        # Check if user is reposting their own donation - don't count for milestones
+        is_own_donation = request.user.user_id == donation.user.user_id
+        
+        repost = Repost.objects.create(
+            donation_request=donation,
+            user=request.user,
+            repost_date=timezone.now(),
+            caption=caption
+        )
+        
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's donation
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_donation:
+            award_engagement_points(request.user, 'share')
+        else:
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {request.user.user_id} reposted their own donation {donation_id} - points not awarded")
+        
+        # Create notification for donation owner (only if the reposter is not the donation owner)
+        if request.user.user_id != donation.user.user_id:
+            donation_repost_notification = Notification.objects.create(
+                user=donation.user,
+                notif_type='repost',
+                subject='Donation Reposted',
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                notif_date=timezone.now()
+            )
+            
+            # Broadcast donation repost notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(donation_repost_notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting donation repost notification: {e}")
+        
+        return JsonResponse({
+            'success': True,
+            'repost_id': repost.repost_id,
+            'message': 'Donation reposted successfully'
+        })
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'error': 'Donation not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error reposting donation: {e}")
+        return JsonResponse({'error': str(e)}, status=500)
+
+
 @api_view(["DELETE"]) 
 @permission_classes([IsAuthenticated])
 def forum_repost_delete_view(request, repost_id):
@@ -7166,8 +7405,22 @@ def forum_repost_delete_view(request, repost_id):
         r = Repost.objects.get(repost_id=repost_id)
         if r.user.user_id != request.user.user_id:
             return JsonResponse({'error': 'Unauthorized'}, status=403)
-        # Deduct engagement points for deleting repost (share)
-        deduct_engagement_points(request.user, 'share')
+        
+        # Check if this was a self-repost - only deduct points if it wasn't
+        is_self_repost = False
+        if r.post:
+            is_self_repost = request.user.user_id == r.post.user.user_id
+        elif r.forum:
+            is_self_repost = request.user.user_id == r.forum.user.user_id
+        elif r.donation_request:
+            is_self_repost = request.user.user_id == r.donation_request.user.user_id
+        
+        # Only deduct points if it wasn't a self-repost (points weren't awarded for self-reposts)
+        if not is_self_repost:
+            deduct_engagement_points(request.user, 'share')
+        else:
+            logger.info(f"User {request.user.user_id} deleting self-repost {repost_id} - points not deducted")
+        
         r.delete()
         return JsonResponse({'success': True})
     except Repost.DoesNotExist:
@@ -9665,11 +9918,39 @@ def points_tasks_view(request):
             if task.max_points and task.max_points > task.points:
                 points_display = f"up to {task.max_points} points"
             
+            # Generate dynamic title and description for milestone tasks based on required_count
+            display_title = task.title
+            display_description = task.description
+            
+            if task.task_type in milestone_specs:
+                spec = milestone_specs[task.task_type]
+                required = task.required_count if task.required_count else spec.threshold
+                
+                # Generate dynamic title
+                import re
+                # First, replace patterns like "10 posts", "5 posts", "10 users", etc.
+                display_title = re.sub(r'\d+\s+(posts?|users?)', f'{required} \\1', task.title, flags=re.IGNORECASE)
+                # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+                if display_title == task.title:
+                    display_title = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required), task.title, flags=re.IGNORECASE)
+                # If still no replacement, replace the first number found
+                if display_title == task.title:
+                    display_title = re.sub(r'\b\d+\b', str(required), task.title, count=1)
+                
+                # Generate dynamic description
+                display_description = re.sub(r'\d+\s+(posts?|users?)', f'{required} \\1', task.description, flags=re.IGNORECASE)
+                # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+                if display_description == task.description:
+                    display_description = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required), task.description, flags=re.IGNORECASE)
+                # If still no replacement, replace the first number found
+                if display_description == task.description:
+                    display_description = re.sub(r'\b\d+\b', str(required), task.description, count=1)
+            
             tasks_data.append({
                 'task_id': task.task_id,
                 'task_type': task.task_type,
-                'title': task.title,
-                'description': task.description,
+                'title': display_title,
+                'description': display_description,
                 'points': task.points,
                 'max_points': task.max_points,
                 'points_display': points_display,
@@ -9841,18 +10122,51 @@ def milestone_tasks_points_view(request):
         # Handle GET request - return all milestone tasks
         if request.method == 'GET':
             from apps.shared.models import EngagementPointsSettings
+            from apps.shared.milestones import ENGAGEMENT_MILESTONES
+            import re
+            
             settings = EngagementPointsSettings.get_settings()
             
             # Get all milestone tasks (those starting with 'milestone_')
             tasks = PointsTask.objects.filter(task_type__startswith='milestone_').order_by('order', 'task_id')
             
+            # Create a map of task_type to spec for dynamic description generation
+            milestone_specs = {spec.task_type: spec for spec in ENGAGEMENT_MILESTONES}
+            
             tasks_data = []
             for task in tasks:
+                # Generate dynamic title and description based on required_count
+                display_title = task.title
+                display_description = task.description
+                
+                if task.task_type in milestone_specs:
+                    spec = milestone_specs[task.task_type]
+                    required = task.required_count if task.required_count else spec.threshold
+                    
+                    # Generate dynamic title
+                    # First, replace patterns like "10 posts", "5 posts", "10 users", etc.
+                    display_title = re.sub(r'\d+\s+(posts?|users?)', f'{required} \\1', task.title, flags=re.IGNORECASE)
+                    # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+                    if display_title == task.title:
+                        display_title = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required), task.title, flags=re.IGNORECASE)
+                    # If still no replacement, replace the first number found
+                    if display_title == task.title:
+                        display_title = re.sub(r'\b\d+\b', str(required), task.title, count=1)
+                    
+                    # Generate dynamic description
+                    display_description = re.sub(r'\d+\s+(posts?|users?)', f'{required} \\1', task.description, flags=re.IGNORECASE)
+                    # If no replacement happened, try replacing standalone numbers that appear before "posts" or "users"
+                    if display_description == task.description:
+                        display_description = re.sub(r'\b\d+\b(?=\s*(?:posts?|users?))', str(required), task.description, flags=re.IGNORECASE)
+                    # If still no replacement, replace the first number found
+                    if display_description == task.description:
+                        display_description = re.sub(r'\b\d+\b', str(required), task.description, count=1)
+                
                 tasks_data.append({
                     'task_id': task.task_id,
                     'task_type': task.task_type,
-                    'title': task.title,
-                    'description': task.description,
+                    'title': display_title,
+                    'description': display_description,
                     'points': task.points,
                     'max_points': task.max_points,
                     'icon_name': task.icon_name,

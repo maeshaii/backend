@@ -77,42 +77,93 @@ def tracker_responses_view(request):
             tracker_responses = tracker_responses.filter(user__academic_info__year_graduated=batch_year)
 
         def resolve_attr(obj, path):
-            current = obj
-            for part in path.split('.'):
-                current = getattr(current, part, None)
-                if current is None:
-                    return None
-            return current
+            """Safely resolve nested attribute paths, handling missing relationships."""
+            try:
+                current = obj
+                for part in path.split('.'):
+                    if current is None:
+                        return None
+                    try:
+                        current = getattr(current, part, None)
+                    except Exception:
+                        # Handle RelatedObjectDoesNotExist for OneToOne relationships
+                        return None
+                    if current is None:
+                        return None
+                return current
+            except Exception:
+                return None
 
         for resp in tracker_responses:
-            user = resp.user
-            merged_answers = resp.answers.copy() if resp.answers else {}
-            # Attach file uploads metadata
-            for file_upload in resp.files.all():
-                question_id_str = str(file_upload.question_id)
-                merged_answers[question_id_str] = {
-                    'type': 'file',
-                    'filename': file_upload.original_filename,
-                    'file_url': file_upload.file.url,
-                    'file_size': file_upload.file_size,
-                    'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S')
-                }
-            # Fill missing basic fields from related models
-            for label, path in basic_fields.items():
-                if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
-                    value = resolve_attr(user, path)
-                    if value is not None and value != '':
-                        merged_answers[label] = str(value)
-            responses.append({
-                'user_id': user.user_id,
-                'name': f'{user.f_name} {user.l_name}',
-                'answers': merged_answers,
-                'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
-            })
+            try:
+                user = resp.user
+                if not user:
+                    continue
+                
+                # Safely get answers, defaulting to empty dict
+                merged_answers = {}
+                if resp.answers:
+                    try:
+                        merged_answers = resp.answers.copy() if isinstance(resp.answers, dict) else {}
+                    except (AttributeError, TypeError):
+                        merged_answers = {}
+                
+                # Attach file uploads metadata
+                try:
+                    for file_upload in resp.files.all():
+                        try:
+                            question_id_str = str(file_upload.question_id)
+                            file_url = ''
+                            if file_upload.file:
+                                try:
+                                    file_url = file_upload.file.url
+                                except (ValueError, AttributeError):
+                                    file_url = ''
+                            
+                            merged_answers[question_id_str] = {
+                                'type': 'file',
+                                'filename': file_upload.original_filename or '',
+                                'file_url': file_url,
+                                'file_size': file_upload.file_size or 0,
+                                'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S') if file_upload.uploaded_at else ''
+                            }
+                        except Exception as e:
+                            logger.warning(f"Error processing file upload for response {resp.id}: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error accessing files for response {resp.id}: {e}")
+                
+                # Fill missing basic fields from related models
+                for label, path in basic_fields.items():
+                    try:
+                        if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
+                            value = resolve_attr(user, path)
+                            if value is not None and value != '':
+                                # Handle date/datetime objects
+                                if hasattr(value, 'isoformat'):
+                                    merged_answers[label] = value.isoformat()
+                                elif hasattr(value, 'strftime'):
+                                    merged_answers[label] = value.strftime('%Y-%m-%d')
+                                else:
+                                    merged_answers[label] = str(value)
+                    except Exception as e:
+                        logger.warning(f"Error resolving field {label} for user {user.user_id}: {e}")
+                        continue
+                
+                responses.append({
+                    'user_id': user.user_id,
+                    'name': f'{user.f_name or ""} {user.l_name or ""}'.strip(),
+                    'answers': merged_answers,
+                    'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
+                })
+            except Exception as e:
+                logger.warning(f"Error processing tracker response {resp.id}: {e}")
+                continue
+        
         return JsonResponse({'success': True, 'responses': responses})
     except Exception as e:
-        logger.error(f"Error in tracker_responses_view: {e}")
-        return JsonResponse({'success': False, 'message': 'Failed to load responses'}, status=500)
+        logger.error(f"Error in tracker_responses_view: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'message': f'Failed to load responses: {str(e)}'}, status=500)
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
@@ -123,7 +174,7 @@ def tracker_responses_by_user_view(request, user_id):
         from apps.shared.models import User
         user = User.objects.get(user_id=user_id)
         responses = []
-        for resp in TrackerResponse.objects.select_related('user').filter(user__user_id=user_id):
+        for resp in TrackerResponse.objects.select_related('user').defer('is_draft', 'last_saved_at').filter(user__user_id=user_id):
             responses.append({
                 'name': f'{resp.user.f_name} {resp.user.l_name}',
                 'answers': resp.answers,
