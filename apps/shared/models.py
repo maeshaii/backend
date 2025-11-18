@@ -226,6 +226,10 @@ class Conversation(models.Model):
     class Meta:
         ordering = ['-updated_at']
         db_table = 'shared_conversation'
+        indexes = [
+            models.Index(fields=['-updated_at'], name='conversation_updated_at_idx'),
+            models.Index(fields=['created_at'], name='conversation_created_at_idx'),
+        ]
         
     def get_other_participant(self, current_user):
         """Get the other participant in a 1-on-1 conversation"""
@@ -1722,28 +1726,29 @@ class TrackerResponse(models.Model):
         try:
             from django.core.cache import cache
             
-            # Clear all statistics-related cache keys
-            cache_patterns = [
-                'stats:*',  # All statistics cache
-                f'stats:user:{self.user.user_id}:*',  # User-specific stats
-                f'stats:program:{self.user.academic_info.program}:*',  # Program-specific stats
+            # Safely get user's program (might not exist yet)
+            user_program = None
+            try:
+                if hasattr(self.user, 'academic_info') and self.user.academic_info:
+                    user_program = self.user.academic_info.program
+            except Exception:
+                pass
+            
+            # Clear common cache keys
+            common_keys = [
+                'stats:ALL:ALL:ALL',
+                f'stats:ALL:ALL:QPRO',
+                f'stats:ALL:ALL:CHED',
+                f'stats:ALL:ALL:SUC',
+                f'stats:ALL:ALL:AACUP',
             ]
             
-            for pattern in cache_patterns:
-                # Note: Django's cache doesn't support wildcard deletion by default
-                # In production, consider using Redis with pattern-based deletion
-                # For now, we'll clear common cache keys
-                common_keys = [
-                    'stats:ALL:ALL:ALL',
-                    f'stats:ALL:{self.user.academic_info.program}:ALL',
-                    f'stats:ALL:ALL:QPRO',
-                    f'stats:ALL:ALL:CHED',
-                    f'stats:ALL:ALL:SUC',
-                    f'stats:ALL:ALL:AACUP',
-                ]
-                
-                for key in common_keys:
-                    cache.delete(key)
+            # Add program-specific keys if program is available
+            if user_program:
+                common_keys.append(f'stats:ALL:{user_program}:ALL')
+            
+            for key in common_keys:
+                cache.delete(key)
             
             # Log cache invalidation
             import logging
