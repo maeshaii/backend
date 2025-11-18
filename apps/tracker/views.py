@@ -565,6 +565,9 @@ def submit_tracker_response_view(request):
         else:
             tr.save()  # Triggers update_user_fields() for new submission
         
+        # Refresh user object from database after save (update_user_fields modifies it)
+        user.refresh_from_db()
+        
         # Handle file uploads
         uploaded_files = []
         for question_id, answer in answers.items():
@@ -575,13 +578,13 @@ def submit_tracker_response_view(request):
                 if is_multiple:
                     # Handle multiple files: file_{question_id}_0, file_{question_id}_1, etc.
                     file_count = answer.get('count', 0)
-                    logger.info(f"🔍 Processing multiple files for question {question_id}, expected count: {file_count}")
+                    logger.info(f"Processing multiple files for question {question_id}, expected count: {file_count}")
                     
                     for i in range(file_count):
                         file_key = f'file_{question_id}_{i}'
                         if file_key in request.FILES:
                             uploaded_file = request.FILES[file_key]
-                            logger.info(f"✅ Found file: {file_key} - {uploaded_file.name}")
+                            logger.info(f"Found file: {file_key} - {uploaded_file.name}")
                             
                             # Validate file size (10MB limit)
                             if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
@@ -602,9 +605,9 @@ def submit_tracker_response_view(request):
                                 file_size=uploaded_file.size
                             )
                             uploaded_files.append(file_upload)
-                            logger.info(f"✅ Saved award document {i + 1} for question {question_id}: {uploaded_file.name}")
+                            logger.info(f"Saved award document {i + 1} for question {question_id}: {uploaded_file.name}")
                         else:
-                            logger.warning(f"⚠️ Missing file: {file_key}")
+                            logger.warning(f"Missing file: {file_key}")
                 else:
                     # Handle single file upload: file_{question_id}
                     file_key = f'file_{question_id}'
@@ -643,25 +646,28 @@ def submit_tracker_response_view(request):
                 # Use the award_engagement_points function which handles settings
                 award_engagement_points(user, 'tracker_form')
             except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.error(f"Error awarding tracker points: {e}")
         
         # Create a thank you notification
-        thank_you_notification = Notification.objects.create(
-            user=user,
-            notif_type='CCICT',
-            subject='Thank You for Completing the Tracker Form',
-            notifi_content=f'Thank you {user.f_name} {user.l_name} for completing the alumni tracker form. Your response has been recorded successfully.',
-            notif_date=timezone.now()
-        )
-
-        # Broadcast thank you notification in real-time
         try:
-            from apps.messaging.notification_broadcaster import broadcast_notification
-            broadcast_notification(thank_you_notification)
+            user_name = f"{user.f_name or ''} {user.l_name or ''}".strip() or "User"
+            thank_you_notification = Notification.objects.create(
+                user=user,
+                notif_type='CCICT',
+                subject='Thank You for Completing the Tracker Form',
+                notifi_content=f'Thank you {user_name} for completing the alumni tracker form. Your response has been recorded successfully.',
+                notif_date=timezone.now()
+            )
+
+            # Broadcast thank you notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(thank_you_notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting thank you notification: {e}")
         except Exception as e:
-            logger.error(f"Error broadcasting thank you notification: {e}")
+            logger.error(f"Error creating thank you notification: {e}")
+            # Don't fail the whole submission if notification fails
 
         # Notify all admin users that a tracker response was submitted
         admin_notifications = []
@@ -669,20 +675,25 @@ def submit_tracker_response_view(request):
             from apps.shared.models import User as SharedUser, AccountType as SharedAccountType
             from apps.messaging.notification_broadcaster import broadcast_notification
             admin_accounts = SharedUser.objects.filter(account_type__admin=True)
+            user_name = f"{user.f_name or ''} {user.l_name or ''}".strip() or "A user"
+            
             for admin_user in admin_accounts:
-                admin_notification = Notification.objects.create(
-                    user=admin_user,
-                    notif_type='tracker_submission',
-                    subject='New Tracker Response Submitted',
-                    notifi_content=f'{user.f_name} {user.l_name} has submitted a tracker response.',
-                    notif_date=timezone.now()
-                )
-                admin_notifications.append(admin_notification)
-                # Broadcast admin notification in real-time
                 try:
-                    broadcast_notification(admin_notification)
+                    admin_notification = Notification.objects.create(
+                        user=admin_user,
+                        notif_type='tracker_submission',
+                        subject='New Tracker Response Submitted',
+                        notifi_content=f'{user_name} has submitted a tracker response.',
+                        notif_date=timezone.now()
+                    )
+                    admin_notifications.append(admin_notification)
+                    # Broadcast admin notification in real-time
+                    try:
+                        broadcast_notification(admin_notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting admin notification: {e}")
                 except Exception as e:
-                    logger.error(f"Error broadcasting admin notification: {e}")
+                    logger.error(f"Error creating admin notification for user {admin_user.user_id}: {e}")
         except Exception as e:
             logger.error(f"Error creating admin notifications: {e}")
         
@@ -692,12 +703,17 @@ def submit_tracker_response_view(request):
             'user_id': user.user_id,
             'files_uploaded': len(uploaded_files)
         })
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in tracker submission: {e}")
         return JsonResponse({'success': False, 'message': 'Invalid JSON in answers'}, status=400)
     except User.DoesNotExist:
+        logger.error(f"User not found in tracker submission: {user_id}")
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     except Exception as e:
-        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+        import traceback
+        logger.error(f"Unexpected error in tracker submission for user {user_id if 'user_id' in locals() else 'unknown'}: {e}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return JsonResponse({'success': False, 'message': f'Server error: {str(e)}'}, status=500)
 
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
