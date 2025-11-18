@@ -1409,6 +1409,7 @@ class OJTInfo(models.Model):
     ojt_end_date = models.DateField(null=True, blank=True)
     job_code = models.CharField(max_length=20, null=True, blank=True)
     ojtstatus = models.CharField(max_length=50, null=True, blank=True)
+    email = models.EmailField(help_text='Student email address for OJT purposes (required)')
     is_sent_to_admin = models.BooleanField(default=False)  # Track if sent to admin for approval
     sent_to_admin_date = models.DateTimeField(null=True, blank=True)  # When it was sent
     created_at = models.DateTimeField(auto_now_add=True)

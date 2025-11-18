@@ -33,6 +33,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework import serializers
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import secrets
 import string
 import base64
@@ -1970,6 +1971,105 @@ def import_ojt_view(request):
             }, status=400)
         print(f"✅ Smart import enabled: CTU_ID required, other fields auto-validated per row")
 
+        # ---- Detect import mode (First vs Second) and prevent mixing ----
+        def normalize_ctu_id_value(raw_value):
+            """Convert CTU_ID values like 123.0 or 1.23E+03 into clean strings."""
+            if raw_value is None:
+                return ''
+            raw_str = str(raw_value).strip()
+            if not raw_str or raw_str.lower() in ('nan', 'none'):
+                return ''
+
+            normalized = raw_str
+            # Handle scientific notation (e.g., 1.234E+05)
+            if 'e' in normalized.lower():
+                try:
+                    normalized = format(Decimal(normalized), 'f')
+                except InvalidOperation:
+                    pass
+
+            # Drop trailing .0 / .000 patterns
+            if '.' in normalized:
+                left, right = normalized.split('.', 1)
+                if right.strip('0') == '':
+                    normalized = left
+                else:
+                    normalized = f"{left}.{right.rstrip('0')}"
+                    if normalized.endswith('.'):
+                        normalized = normalized[:-1]
+
+            return normalized
+
+        ctu_id_series = df['CTU_ID'].dropna().apply(normalize_ctu_id_value)
+        ctu_id_series = ctu_id_series[ctu_id_series != '']
+
+        if ctu_id_series.empty:
+            return JsonResponse({
+                'success': False,
+                'message': 'The file must contain at least one CTU_ID value.'
+            }, status=400)
+
+        all_ctu_ids = set(ctu_id_series.tolist())
+        existing_ctu_ids = set(
+            User.objects.filter(acc_username__in=all_ctu_ids).values_list('acc_username', flat=True)
+        )
+        new_ctu_ids = all_ctu_ids - existing_ctu_ids
+
+        # (Cooldown logic moved below once we confirm the file is a second-import template.)
+
+        personal_columns = ['First_Name', 'Last_Name', 'Gender', 'Section']
+        has_personal_columns = all(col in df.columns for col in personal_columns)
+        has_personal_data = has_personal_columns and any(
+            df[col].notna().any() for col in personal_columns
+        )
+
+        company_columns = [
+            'Company', 'Company Name', 'Company_Name',
+            'Company_Address', 'Company Address',
+            'Company_Email', 'Company Email',
+            'Company_Contact', 'Company Contact',
+            'Contact_Person', 'Contact Person',
+            'Position', 'Status',
+            'Ojt_Start_Date', 'Ojt_End_Date',
+            'Start_Date', 'End_Date'
+        ]
+        company_columns_present = [col for col in company_columns if col in df.columns]
+        has_company_data = any(
+            df[col].notna().any() for col in company_columns_present
+        ) if company_columns_present else False
+
+        print(
+            f"📄 Import mode detection → new_ids: {len(new_ctu_ids)}, "
+            f"existing_ids: {len(existing_ctu_ids)}, "
+            f"has_personal_data: {has_personal_data}, has_company_data: {has_company_data}"
+        )
+
+        if new_ctu_ids and existing_ctu_ids:
+            return JsonResponse({
+                'success': False,
+                'message': (
+                    'Mixed template detected. Please separate NEW students (first import) '
+                    'and updates to existing students (second import) into different files.'
+                )
+            }, status=400)
+
+        if not existing_ctu_ids and has_company_data and not has_personal_data:
+            return JsonResponse({
+                'success': False,
+                'message': (
+                    'Second-import template detected, but none of the listed students exist yet. '
+                    'Please run the first import to create the students before importing updates.'
+                )
+            }, status=400)
+
+        is_second_template = bool(existing_ctu_ids) and not new_ctu_ids and has_company_data and not has_personal_data
+        import_mode = 'SECOND' if is_second_template else 'FIRST'
+        print(f"📄 Final import mode: {import_mode}")
+
+
+        # Reuse the cleaned CTU_IDs later for deactivation logic
+        new_import_ctu_ids = set(all_ctu_ids)
+
         # Create import record
         # Normalize batch_year to a single 4-digit year if possible
         try:
@@ -2014,12 +2114,7 @@ def import_ojt_view(request):
             ojt_account_type = None
         
         # ===== NEW BATCH IMPORT LOGIC =====
-        # Step 1: Get all CTU_IDs from the new import
-        new_import_ctu_ids = set()
-        for idx, row in df.iterrows():
-            ctu_id = str(row.get('CTU_ID', '')).strip()
-            if ctu_id:
-                new_import_ctu_ids.add(ctu_id)
+        # Step 1: Get all CTU_IDs from the new import (already computed above)
         print(f"📋 New import contains {len(new_import_ctu_ids)} unique CTU_IDs")
         
         # Step 2: Find all existing OJT students from old batches for this coordinator
@@ -2150,7 +2245,7 @@ def import_ojt_view(request):
             print(f"--- Processing Row {index+2} ---")
             try:
                 # --- Field Extraction and Cleaning ---
-                ctu_id = str(row.get('CTU_ID', '')).strip()
+                ctu_id = normalize_ctu_id_value(row.get('CTU_ID', ''))
                 
                 print(f"\n{'='*80}")
                 print(f"🔍 PROCESSING ROW {index+2} - CTU_ID: {ctu_id}")
@@ -2160,6 +2255,9 @@ def import_ojt_view(request):
                 middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
                 last_name = str(row.get('Last_Name', '')).strip()
                 gender_raw = str(row.get('Gender', '')).strip()
+
+                ojt_email_value = row.get('Email')
+                ojt_email = str(ojt_email_value).strip() if pd.notna(ojt_email_value) else None
                 
                 # DEBUG: Show all available columns and company data
                 print(f"📋 Available columns in this row: {list(row.keys())}")
@@ -2516,7 +2614,6 @@ def import_ojt_view(request):
                             # If this is SECOND import (has new company but didn't have one before)
                             # Set start date to TODAY automatically
                             if not has_existing_company:
-                                from django.utils import timezone
                                 ojt_start_date = timezone.now().date()
                                 print(f"Row {index+2} - SECOND IMPORT DETECTED! Auto-setting start_date to TODAY: {ojt_start_date}")
                                 
@@ -2550,25 +2647,18 @@ def import_ojt_view(request):
                         if 'ojt_end_date' in locals() and ojt_end_date:
                             ojt_info.ojt_end_date = ojt_end_date
                         
-                        # Update basic OJT information fields
-                        ojt_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
-                        
-                        # Email is required - try to get from Excel, or fallback to UserProfile
-                        if not ojt_email:
-                            # Try to get email from UserProfile if not in Excel
-                            if profile and hasattr(profile, 'email') and profile.email:
-                                ojt_email = profile.email
-                                print(f"Row {index+2} - Email not in Excel, using email from UserProfile: {ojt_email}")
-                        
-                        # Email is required - validate it exists
-                        if not ojt_email:
-                            error_msg = f"Row {index + 2}: Email is required for OJT students"
-                            print(f"SKIPPING: {error_msg}")
-                            errors.append(error_msg)
-                            skipped_count += 1
-                            continue
-                        
-                        ojt_info.email = ojt_email
+                        # Update basic OJT information fields (email optional on second import)
+                        fallback_email = ojt_email
+                        if not fallback_email and profile and getattr(profile, 'email', None):
+                            fallback_email = profile.email
+                            print(f"Row {index+2} - Email not in Excel, using UserProfile email: {fallback_email}")
+                        if not fallback_email and getattr(ojt_info, 'email', None):
+                            fallback_email = ojt_info.email
+                        if not fallback_email:
+                            fallback_email = f"{ctu_id}@placeholder.local"
+                            print(f"Row {index+2} - No email available; using placeholder {fallback_email}")
+
+                        ojt_info.email = fallback_email
                         # Also update UserProfile email if it's different
                         if profile and (not profile.email or profile.email != ojt_email):
                             profile.email = ojt_email
