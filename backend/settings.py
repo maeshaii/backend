@@ -13,12 +13,13 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+from datetime import timedelta  # For JWT token lifetime configuration
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env file
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -52,6 +53,7 @@ INSTALLED_APPS = [
     "apps.ojt_users",
     "apps.messaging",  # Add this new app
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",  # Token blacklist for enhanced security
     "corsheaders",
     "channels",  # Add this
 ]
@@ -301,29 +303,15 @@ DEFAULT_COORDINATOR_USERNAME = os.getenv('DEFAULT_COORDINATOR_USERNAME', 'ITCOOR
 DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHERENAYOU')
 
 # CACHING CONFIGURATION
-# Phase 2 optimization: Cache statistics for better performance
-# Uses local memory cache by default (switch to Redis for production/multiple servers)
+# Redis cache for production - supports multiple servers and WebSocket scaling
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-statistics-cache',
-        'OPTIONS': {
-            'MAX_ENTRIES': 1000,
-        }
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+        'KEY_PREFIX': 'capstone',
+        'TIMEOUT': 300,  # 5 minutes default
     }
 }
-# For production with Redis (uncomment and configure):
-# CACHES = {
-#     'default': {
-#         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-#         'LOCATION': 'redis://127.0.0.1:6379/1',
-#         'OPTIONS': {
-#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-#         },
-#         'KEY_PREFIX': 'alumni_stats',
-#         'TIMEOUT': 300,  # 5 minutes default
-#     }
-# }
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -340,8 +328,53 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
+    # User identification
     'USER_ID_FIELD': os.getenv('JWT_USER_ID_FIELD', 'user_id'),
     'USER_ID_CLAIM': os.getenv('JWT_USER_ID_CLAIM', 'user_id'),
+    
+    # Token Lifetime Configuration (Educational System Standard)
+    # Access Token: 1 hour - Balances security and user experience
+    # Refresh Token: 7 days - Weekly re-authentication for security
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    
+    # Security: Token Rotation & Blacklisting
+    # Rotate refresh tokens on each use to prevent token reuse attacks
+    'ROTATE_REFRESH_TOKENS': True,
+    # Blacklist old tokens after rotation for additional security
+    'BLACKLIST_AFTER_ROTATION': True,
+    # Don't update Django's last_login on token refresh (performance)
+    'UPDATE_LAST_LOGIN': False,
+    
+    # Algorithm & Signing
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
+    'AUDIENCE': None,
+    'ISSUER': None,
+    
+    # Authentication Header Configuration
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    
+    # Token Claims
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
+    
+    # JTI (JWT ID) Claim for token identification
+    'JTI_CLAIM': 'jti',
+    
+    # Sliding Token Configuration (optional - for "remember me" feature)
+    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
+    'SLIDING_TOKEN_LIFETIME': timedelta(hours=1),
+    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=7),
+    
+    # Token Validation
+    'TOKEN_OBTAIN_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenObtainPairSerializer',
+    'TOKEN_REFRESH_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenRefreshSerializer',
+    'TOKEN_VERIFY_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenVerifySerializer',
+    'TOKEN_BLACKLIST_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenBlacklistSerializer',
 }
 
 # Optional: Fernet key for encrypting initial/generated passwords for exports
@@ -362,17 +395,44 @@ if os.getenv('EMAIL_BACKEND'):
     EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
     EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 
+# SMS Configuration - Philippine SMS Services
+SMS_PROVIDER = os.getenv('SMS_PROVIDER', 'globe').lower()  # 'globe', 'semaphore', or 'twilio'
+SMS_ENABLED = os.getenv('SMS_ENABLED', 'false').lower() == 'true'
+
+# Globe Labs SMS configuration (Philippine - Globe Telecom)
+GLOBE_APP_ID = os.getenv('GLOBE_APP_ID')
+GLOBE_APP_SECRET = os.getenv('GLOBE_APP_SECRET')
+GLOBE_SHORT_CODE = os.getenv('GLOBE_SHORT_CODE')
+GLOBE_PASSPHRASE = os.getenv('GLOBE_PASSPHRASE', '')
+
+# Semaphore SMS configuration (for Philippine numbers)
+SEMAPHORE_API_KEY = os.getenv('SEMAPHORE_API_KEY')
+SEMAPHORE_SENDER_NAME = os.getenv('SEMAPHORE_SENDER_NAME', 'CTU')
+
+# Twilio SMS configuration (legacy - kept for future use)
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_FROM_NUMBER = os.getenv('TWILIO_FROM_NUMBER')
+TWILIO_SMS_ENABLED = os.getenv('TWILIO_SMS_ENABLED', '').lower() == 'true'
+
 # Security Settings for Production
 if not DEBUG:
+    # Production HTTPS/SSL settings
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_REDIRECT_EXEMPT = []
     SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'False').lower() == 'true'
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True  # Require HTTPS for session cookies
+    CSRF_COOKIE_SECURE = True     # Require HTTPS for CSRF cookies
     X_FRAME_OPTIONS = 'DENY'
+else:
+    # Development settings (HTTP-safe)
+    # Note: These warnings are expected in development without HTTPS
+    SESSION_COOKIE_SECURE = False  # Allow HTTP in development
+    CSRF_COOKIE_SECURE = False     # Allow HTTP in development
+    SECURE_SSL_REDIRECT = False    # Don't force HTTPS in development
 
 
 # Add these at the bottom of the file

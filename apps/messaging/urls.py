@@ -1,9 +1,16 @@
 from django.urls import path
-from . import views
+from . import views, health
 
 app_name = 'messaging'
 
 urlpatterns = [
+    # Health check endpoints (for load balancers and monitoring)
+    path('health/', health.health_check, name='health-check'),
+    path('health/detailed/', health.health_check_detailed, name='health-check-detailed'),
+    path('health/ready/', health.readiness_check, name='readiness-check'),
+    path('health/live/', health.liveness_check, name='liveness-check'),
+    path('metrics/', health.metrics_endpoint, name='metrics'),
+    
     # Conversation endpoints
     path('conversations/', views.ConversationListView.as_view(), name='conversation-list'),
     path('conversations/<int:conversation_id>/', views.conversation_detail, name='conversation-detail'),

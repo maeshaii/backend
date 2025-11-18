@@ -35,6 +35,20 @@ import mimetypes
 logger = logging.getLogger(__name__)
 
 
+def get_conversation_with_access_check(conversation_id, user):
+    """
+    Helper function to get conversation with prefetched participants and check user access.
+    Reduces N+1 queries and code duplication.
+    """
+    conversation = get_object_or_404(
+        Conversation.objects.prefetch_related('participants'),
+        conversation_id=conversation_id
+    )
+    if not conversation.participants.filter(user_id=user.user_id).exists():
+        return None, Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    return conversation, None
+
+
 def get_file_category(content_type):
     """Determine file category based on MIME type"""
     if content_type.startswith('image/'):
@@ -77,15 +91,18 @@ class ConversationListView(generics.ListCreateAPIView):
                 logger.debug(f"Retrieved {len(cached_conversations)} conversations from cache for user {user.user_id}")
             
             # Optimize queryset with select_related and prefetch_related
+            # FIX: Removed empty select_related() and optimized prefetch for participants with nested data
             queryset = Conversation.objects.filter(
                 participants=user
-            ).select_related().prefetch_related(
-                'participants',
+            ).prefetch_related(
+                'participants__profile',  # Prefetch participant profiles
+                'participants__academic_info',  # Prefetch academic info
                 'messages__sender',
                 'messages__attachments'
-            ).order_by('-updated_at')
+            ).distinct().order_by('-updated_at')
             
             # Cache the results for next time
+            # FIX: Use prefetched data instead of calling .all()
             conversations_data = []
             for conv in queryset:
                 conv_data = {
@@ -171,7 +188,11 @@ class MessageListView(generics.ListCreateAPIView):
         }) as tracker:
             tracker.mark_stage('start')
             
-            conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
+            # FIX: Prefetch participants to avoid N+1 queries
+            conversation = get_object_or_404(
+                Conversation.objects.prefetch_related('participants'),
+                conversation_id=conversation_id
+            )
             if not conversation.participants.filter(user_id=request.user.user_id).exists():
                 return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
             
@@ -183,6 +204,7 @@ class MessageListView(generics.ListCreateAPIView):
             tracker.mark_stage('validation')
             
             # Determine receiver for 1:1 conversations to satisfy legacy non-null column
+            # FIX: Use prefetched participants
             receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
             
             # Convert message request to regular conversation only if the non-initiator replies
@@ -367,9 +389,10 @@ class MessageListView(generics.ListCreateAPIView):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def mark_conversation_as_read(request, conversation_id):
-    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-    if not conversation.participants.filter(user_id=request.user.user_id).exists():
-        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    # FIX: Use helper function to reduce N+1 queries
+    conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
+    if error_response:
+        return error_response
     updated_count = Message.objects.filter(conversation=conversation, is_read=False).exclude(sender=request.user).update(is_read=True)
     return Response({'status': 'success', 'messages_marked_read': updated_count, 'timestamp': timezone.now().isoformat()})
 
@@ -401,9 +424,10 @@ def search_users(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def conversation_detail(request, conversation_id):
-    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-    if not conversation.participants.filter(user_id=request.user.user_id).exists():
-        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    # FIX: Use helper function to reduce N+1 queries
+    conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
+    if error_response:
+        return error_response
     serializer = ConversationSerializer(conversation, context={'request': request})
     return Response(serializer.data)
 
@@ -412,9 +436,10 @@ def conversation_detail(request, conversation_id):
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def update_message(request, conversation_id, message_id):
     """Update/edit a message"""
-    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-    if not conversation.participants.filter(user_id=request.user.user_id).exists():
-        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    # FIX: Use helper function to reduce N+1 queries
+    conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
+    if error_response:
+        return error_response
     message = get_object_or_404(Message, message_id=message_id, conversation=conversation)
     if message.sender.user_id != request.user.user_id:
         return Response({'error': 'You can only edit your own messages'}, status=status.HTTP_403_FORBIDDEN)
@@ -436,9 +461,10 @@ def update_message(request, conversation_id, message_id):
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def delete_message(request, conversation_id, message_id):
-    conversation = get_object_or_404(Conversation, conversation_id=conversation_id)
-    if not conversation.participants.filter(user_id=request.user.user_id).exists():
-        return Response({'error': 'Access denied'}, status=status.HTTP_403_FORBIDDEN)
+    # FIX: Use helper function to reduce N+1 queries
+    conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
+    if error_response:
+        return error_response
     message = get_object_or_404(Message, message_id=message_id, conversation=conversation)
     if message.sender.user_id != request.user.user_id:
         return Response({'error': 'You can only delete your own messages'}, status=status.HTTP_403_FORBIDDEN)
@@ -449,31 +475,36 @@ def delete_message(request, conversation_id, message_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsAlumniOrOJT])
 def messaging_stats(request):
-	user = request.user
-	
-	# Optimize database queries using aggregation and select_related
-	total_conversations = Conversation.objects.filter(participants=user).count()
-	total_messages_sent = Message.objects.filter(sender=user).count()
-	
-	# Use single query with aggregation instead of N+1 queries
-	total_unread = Message.objects.filter(
-		conversation__participants=user,
-		is_read=False
-	).exclude(sender=user).count()
-	
-	# Optimize recent conversations query with select_related
-	recent_conversations = Conversation.objects.filter(
-		participants=user
-	).select_related().prefetch_related('messages').order_by('-updated_at')[:5]
-	
-	recent_serializer = ConversationSerializer(recent_conversations, many=True, context={'request': request})
-	return Response({
-		'total_conversations': total_conversations,
-		'total_messages_sent': total_messages_sent,
-		'total_unread_messages': total_unread,
-		'recent_conversations': recent_serializer.data,
-		'timestamp': timezone.now().isoformat(),
-	})
+    user = request.user
+    
+    # Optimize database queries using aggregation and select_related
+    total_conversations = Conversation.objects.filter(participants=user).count()
+    total_messages_sent = Message.objects.filter(sender=user).count()
+    
+    # Use single query with aggregation instead of N+1 queries
+    total_unread = Message.objects.filter(
+        conversation__participants=user,
+        is_read=False
+    ).exclude(sender=user).count()
+    
+    # Optimize recent conversations query with select_related
+    # FIX: Removed empty select_related() and added proper prefetch
+    recent_conversations = Conversation.objects.filter(
+        participants=user
+    ).prefetch_related(
+        'participants__profile',
+        'participants__academic_info',
+        'messages__sender'
+    ).distinct().order_by('-updated_at')[:5]
+    
+    recent_serializer = ConversationSerializer(recent_conversations, many=True, context={'request': request})
+    return Response({
+        'total_conversations': total_conversations,
+        'total_messages_sent': total_messages_sent,
+        'total_unread_messages': total_unread,
+        'recent_conversations': recent_serializer.data,
+        'timestamp': timezone.now().isoformat(),
+    })
 
 
 class AttachmentUploadView(APIView):
@@ -490,10 +521,10 @@ class AttachmentUploadView(APIView):
         conversation_id = request.data.get('conversation_id')
         if conversation_id:
             try:
-                conversation = get_object_or_404(Conversation, conversation_id=int(conversation_id))
-                # Verify user has access to this conversation
-                if not conversation.participants.filter(user_id=request.user.user_id).exists():
-                    return Response({'error': 'Access denied to conversation'}, status=status.HTTP_403_FORBIDDEN)
+                # FIX: Use helper function to reduce N+1 queries
+                conversation, error_response = get_conversation_with_access_check(int(conversation_id), request.user)
+                if error_response:
+                    return error_response
             except (ValueError, TypeError):
                 return Response({'error': 'Invalid conversation_id'}, status=status.HTTP_400_BAD_REQUEST)
 

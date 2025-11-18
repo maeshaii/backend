@@ -10,6 +10,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 import json
 from apps.shared.models import QuestionCategory, TrackerResponse, Question, TrackerForm
+# Security: Role-based permissions
+from apps.api.permissions import IsAdmin
 
 logger = logging.getLogger(__name__)
 
@@ -95,71 +97,44 @@ def tracker_responses_view(request):
                 return None
 
         for resp in tracker_responses:
-            try:
-                user = resp.user
-                if not user:
-                    continue
-                
-                # Safely get answers, defaulting to empty dict
-                merged_answers = {}
-                if resp.answers:
-                    try:
-                        merged_answers = resp.answers.copy() if isinstance(resp.answers, dict) else {}
-                    except (AttributeError, TypeError):
-                        merged_answers = {}
-                
-                # Attach file uploads metadata
-                try:
-                    for file_upload in resp.files.all():
-                        try:
-                            question_id_str = str(file_upload.question_id)
-                            file_url = ''
-                            if file_upload.file:
-                                try:
-                                    file_url = file_upload.file.url
-                                except (ValueError, AttributeError):
-                                    file_url = ''
-                            
-                            merged_answers[question_id_str] = {
-                                'type': 'file',
-                                'filename': file_upload.original_filename or '',
-                                'file_url': file_url,
-                                'file_size': file_upload.file_size or 0,
-                                'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S') if file_upload.uploaded_at else ''
-                            }
-                        except Exception as e:
-                            logger.warning(f"Error processing file upload for response {resp.id}: {e}")
-                            continue
-                except Exception as e:
-                    logger.warning(f"Error accessing files for response {resp.id}: {e}")
-                
-                # Fill missing basic fields from related models
-                for label, path in basic_fields.items():
-                    try:
-                        if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
-                            value = resolve_attr(user, path)
-                            if value is not None and value != '':
-                                # Handle date/datetime objects
-                                if hasattr(value, 'isoformat'):
-                                    merged_answers[label] = value.isoformat()
-                                elif hasattr(value, 'strftime'):
-                                    merged_answers[label] = value.strftime('%Y-%m-%d')
-                                else:
-                                    merged_answers[label] = str(value)
-                    except Exception as e:
-                        logger.warning(f"Error resolving field {label} for user {user.user_id}: {e}")
-                        continue
-                
-                responses.append({
-                    'user_id': user.user_id,
-                    'name': f'{user.f_name or ""} {user.l_name or ""}'.strip(),
-                    'answers': merged_answers,
-                    'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
-                })
-            except Exception as e:
-                logger.warning(f"Error processing tracker response {resp.id}: {e}")
-                continue
-        
+            user = resp.user
+            merged_answers = resp.answers.copy() if resp.answers else {}
+            
+            # 🔧 FIX: First, clean up broken file references (where answer says "file" but no TrackerFileUpload exists)
+            actual_file_question_ids = set()
+            for file_upload in resp.files.all():
+                actual_file_question_ids.add(str(file_upload.question_id))
+            
+            # Remove file metadata from answers if no actual file exists
+            for question_id, answer in list(merged_answers.items()):
+                if isinstance(answer, dict) and answer.get('type') == 'file':
+                    if question_id not in actual_file_question_ids:
+                        # ⚠️ File metadata exists but no actual file uploaded (bug from before fix)
+                        logger.warning(f"🧹 Cleaning broken file reference for question {question_id} in response {resp.id}")
+                        merged_answers[question_id] = "No file uploaded"
+            
+            # Attach file uploads metadata
+            for file_upload in resp.files.all():
+                question_id_str = str(file_upload.question_id)
+                merged_answers[question_id_str] = {
+                    'type': 'file',
+                    'filename': file_upload.original_filename,
+                    'file_url': file_upload.file.url,
+                    'file_size': file_upload.file_size,
+                    'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S')
+                }
+            # Fill missing basic fields from related models
+            for label, path in basic_fields.items():
+                if label not in merged_answers or merged_answers[label] in [None, '', 'No answer']:
+                    value = resolve_attr(user, path)
+                    if value is not None and value != '':
+                        merged_answers[label] = str(value)
+            responses.append({
+                'user_id': user.user_id,
+                'name': f'{user.f_name} {user.l_name}',
+                'answers': merged_answers,
+                'submitted_at': resp.submitted_at.isoformat() if resp.submitted_at else None
+            })
         return JsonResponse({'success': True, 'responses': responses})
     except Exception as e:
         logger.error(f"Error in tracker_responses_view: {e}", exc_info=True)
@@ -168,9 +143,29 @@ def tracker_responses_view(request):
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def tracker_responses_by_user_view(request, user_id):
+    """
+    Get tracker responses for a specific user
+    
+    🔒 SECURITY: IDOR Protection - Users can only view their own responses (admins can view any)
+    """
     try:
         # Ensure user_id is an integer
         user_id = int(user_id)
+        
+        # 🔒 SECURITY: IDOR Protection - Verify user can access these responses
+        requesting_user_id = request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+        
+        if str(requesting_user_id) != str(user_id) and not is_admin:
+            logger.warning(
+                f"IDOR ATTACK PREVENTED: User {requesting_user_id} ({request.user.acc_username}) "
+                f"attempted to access tracker responses for user {user_id}"
+            )
+            return JsonResponse({
+                'success': False,
+                'message': 'Permission denied. You can only access your own tracker responses.'
+            }, status=403)
+        
         from apps.shared.models import User
         user = User.objects.get(user_id=user_id)
         responses = []
@@ -187,39 +182,64 @@ def tracker_responses_by_user_view(request, user_id):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 @api_view(["POST"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def add_category_view(request):
+    """
+    Add new tracker category - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Modifies tracker form structure
+    """
     data = json.loads(request.body)
     title = data.get('title')
     description = data.get('description', '')
     if not title:
         return JsonResponse({'success': False, 'message': 'Title is required'}, status=400)
     cat = QuestionCategory.objects.create(title=title, description=description)
+    logger.info(f"Admin {request.user.acc_username} created tracker category: {title}")
     return JsonResponse({'success': True, 'category': {'id': cat.id, 'title': cat.title, 'description': cat.description, 'questions': []}})
 
 @api_view(["DELETE"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def delete_category_view(request, category_id):
+    """
+    Delete tracker category - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Deletes tracker form categories
+    """
     try:
         cat = QuestionCategory.objects.get(id=category_id)
+        category_title = cat.title
         cat.delete()
+        logger.info(f"Admin {request.user.acc_username} deleted tracker category: {category_title}")
         return JsonResponse({'success': True})
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
 
 @api_view(["DELETE"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def delete_question_view(request, question_id):
+    """
+    Delete tracker question - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Deletes tracker questions
+    """
     try:
         q = Question.objects.get(id=question_id)
+        question_text = q.text
         q.delete()
+        logger.info(f"Admin {request.user.acc_username} deleted tracker question: {question_text}")
         return JsonResponse({'success': True})
     except Question.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Question not found'}, status=404)
 
 @api_view(["POST"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def add_question_view(request):
+    """
+    Add new tracker question - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Adds questions to tracker form
+    """
     data = json.loads(request.body)
     category_id = data.get('category_id')
     text = data.get('text')
@@ -239,8 +259,13 @@ def add_question_view(request):
     }})
 
 @api_view(["PUT"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def update_category_view(request, category_id):
+    """
+    Update tracker category - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Modifies tracker form categories
+    """
     data = json.loads(request.body)
     title = data.get('title')
     description = data.get('description', '')
@@ -250,13 +275,19 @@ def update_category_view(request, category_id):
             cat.title = title
         cat.description = description
         cat.save()
+        logger.info(f"Admin {request.user.acc_username} updated tracker category: {cat.title}")
         return JsonResponse({'success': True, 'category': {'id': cat.id, 'title': cat.title, 'description': cat.description}})
     except QuestionCategory.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Category not found'}, status=404)
 
 @api_view(["PUT"]) 
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only
 def update_question_view(request, question_id):
+    """
+    Update tracker question - Admin only
+    
+    ⚠️ SECURITY: Restricted to Admin - Modifies tracker questions
+    """
     data = json.loads(request.body)
     text = data.get('text')
     qtype = data.get('type')
@@ -339,7 +370,11 @@ def check_user_tracker_status_view(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def save_tracker_draft_view(request):
-    """Auto-save tracker responses as draft (doesn't trigger notifications or data processing)"""
+    """
+    Auto-save tracker responses as draft (doesn't trigger notifications or data processing)
+    
+    🔒 SECURITY: IDOR Protection - Users can only save their own drafts
+    """
     import json
     from django.utils import timezone
     from apps.shared.models import TrackerResponse, User
@@ -350,6 +385,20 @@ def save_tracker_draft_view(request):
         
         if not user_id:
             return JsonResponse({'success': False, 'message': 'Missing user_id'}, status=400)
+        
+        # 🔒 SECURITY: IDOR Protection - Verify user can save this draft
+        requesting_user_id = request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+        
+        if str(requesting_user_id) != str(user_id) and not is_admin:
+            logger.warning(
+                f"IDOR ATTACK PREVENTED: User {requesting_user_id} ({request.user.acc_username}) "
+                f"attempted to save tracker draft for user {user_id}"
+            )
+            return JsonResponse({
+                'success': False,
+                'message': 'Permission denied. You can only save your own drafts.'
+            }, status=403)
         
         # Empty answers are okay for drafts
         if answers_json is None:
@@ -411,13 +460,31 @@ def save_tracker_draft_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def load_tracker_draft_view(request):
-    """Load saved draft for a user"""
+    """
+    Load saved draft for a user
+    
+    🔒 SECURITY: IDOR Protection - Users can only load their own drafts
+    """
     from apps.shared.models import TrackerResponse, User
     
     try:
         user_id = request.GET.get('user_id')
         if not user_id:
             return JsonResponse({'success': False, 'message': 'Missing user_id'}, status=400)
+        
+        # 🔒 SECURITY: IDOR Protection - Verify user can load this draft
+        requesting_user_id = request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+        
+        if str(requesting_user_id) != str(user_id) and not is_admin:
+            logger.warning(
+                f"IDOR ATTACK PREVENTED: User {requesting_user_id} ({request.user.acc_username}) "
+                f"attempted to load tracker draft for user {user_id}"
+            )
+            return JsonResponse({
+                'success': False,
+                'message': 'Permission denied. You can only load your own drafts.'
+            }, status=403)
         
         user = User.objects.get(user_id=user_id)
         
@@ -502,30 +569,67 @@ def submit_tracker_response_view(request):
         uploaded_files = []
         for question_id, answer in answers.items():
             if isinstance(answer, dict) and answer.get('type') == 'file':
-                # This is a file upload answer
-                file_key = f'file_{question_id}'
-                if file_key in request.FILES:
-                    uploaded_file = request.FILES[file_key]
+                # Check if this is a multiple file upload (e.g., award supporting documents)
+                is_multiple = answer.get('multiple', False)
+                
+                if is_multiple:
+                    # Handle multiple files: file_{question_id}_0, file_{question_id}_1, etc.
+                    file_count = answer.get('count', 0)
+                    logger.info(f"🔍 Processing multiple files for question {question_id}, expected count: {file_count}")
                     
-                    # Validate file size (10MB limit)
-                    if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
-                        return JsonResponse({'success': False, 'message': f'File {uploaded_file.name} is too large. Maximum size is 10MB.'}, status=400)
-                    
-                    # Validate file type
-                    allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
-                    file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-                    if file_extension not in allowed_extensions:
-                        return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
-                    
-                    # Save the file
-                    file_upload = TrackerFileUpload.objects.create(
-                        response=tr,
-                        question_id=int(question_id),
-                        file=uploaded_file,
-                        original_filename=uploaded_file.name,
-                        file_size=uploaded_file.size
-                    )
-                    uploaded_files.append(file_upload)
+                    for i in range(file_count):
+                        file_key = f'file_{question_id}_{i}'
+                        if file_key in request.FILES:
+                            uploaded_file = request.FILES[file_key]
+                            logger.info(f"✅ Found file: {file_key} - {uploaded_file.name}")
+                            
+                            # Validate file size (10MB limit)
+                            if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
+                                return JsonResponse({'success': False, 'message': f'File {uploaded_file.name} is too large. Maximum size is 10MB.'}, status=400)
+                            
+                            # Validate file type
+                            allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
+                            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                            if file_extension not in allowed_extensions:
+                                return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
+                            
+                            # Save the file
+                            file_upload = TrackerFileUpload.objects.create(
+                                response=tr,
+                                question_id=int(question_id),
+                                file=uploaded_file,
+                                original_filename=uploaded_file.name,
+                                file_size=uploaded_file.size
+                            )
+                            uploaded_files.append(file_upload)
+                            logger.info(f"✅ Saved award document {i + 1} for question {question_id}: {uploaded_file.name}")
+                        else:
+                            logger.warning(f"⚠️ Missing file: {file_key}")
+                else:
+                    # Handle single file upload: file_{question_id}
+                    file_key = f'file_{question_id}'
+                    if file_key in request.FILES:
+                        uploaded_file = request.FILES[file_key]
+                        
+                        # Validate file size (10MB limit)
+                        if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
+                            return JsonResponse({'success': False, 'message': f'File {uploaded_file.name} is too large. Maximum size is 10MB.'}, status=400)
+                        
+                        # Validate file type
+                        allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
+                        file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                        if file_extension not in allowed_extensions:
+                            return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
+                        
+                        # Save the file
+                        file_upload = TrackerFileUpload.objects.create(
+                            response=tr,
+                            question_id=int(question_id),
+                            file=uploaded_file,
+                            original_filename=uploaded_file.name,
+                            file_size=uploaded_file.size
+                        )
+                        uploaded_files.append(file_upload)
         
         # Legacy direct writes to `User` have been removed.
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().
@@ -647,44 +751,49 @@ def get_active_tracker_form(request):
 @api_view(["GET"]) 
 @permission_classes([IsAuthenticated])
 def file_upload_stats_view(request):
-    """Get statistics about file uploads grouped by question type"""
+    """Get statistics about file uploads grouped by question type - shows ALL file questions"""
     try:
         from apps.shared.models import TrackerFileUpload, Question
         
-        # Get all file uploads with question information
+        # 🔧 FIX: Get ALL file upload questions (not just those with uploads)
+        file_questions = Question.objects.filter(type='file').all()
+        
+        # Initialize stats for ALL file questions
+        stats = {}
+        for question in file_questions:
+            stats[question.text] = {
+                'question_id': question.id,
+                'question_text': question.text,
+                'total_files': 0,
+                'total_size_mb': 0,
+                'users': set(),
+                'files': []
+            }
+        
+        # Get all file uploads
         file_uploads = TrackerFileUpload.objects.select_related('response__user').all()
         
-        # Group by question
-        stats = {}
+        # Add file upload data to stats
         for upload in file_uploads:
             question = Question.objects.filter(id=upload.question_id).first()
-            question_text = question.text if question else f"Question ID: {upload.question_id}"
-            
-            if question_text not in stats:
-                stats[question_text] = {
-                    'question_id': upload.question_id,
-                    'total_files': 0,
-                    'total_size_mb': 0,
-                    'users': set(),
-                    'files': []
-                }
-            
-            stats[question_text]['total_files'] += 1
-            stats[question_text]['total_size_mb'] += upload.file_size / 1024 / 1024
-            stats[question_text]['users'].add(upload.response.user.user_id)
-            stats[question_text]['files'].append({
-                'filename': upload.original_filename,
-                'user': f"{upload.response.user.f_name} {upload.response.user.l_name}",
-                'file_size_mb': round(upload.file_size / 1024 / 1024, 2),
-                'uploaded_at': upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S'),
-                'file_url': upload.file.url
-            })
+            if question and question.text in stats:
+                question_text = question.text
+                stats[question_text]['total_files'] += 1
+                stats[question_text]['total_size_mb'] += upload.file_size / 1024 / 1024
+                stats[question_text]['users'].add(upload.response.user.user_id)
+                stats[question_text]['files'].append({
+                    'filename': upload.original_filename,
+                    'user': f"{upload.response.user.f_name} {upload.response.user.l_name}",
+                    'file_size_mb': round(upload.file_size / 1024 / 1024, 2),
+                    'uploaded_at': upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    'file_url': upload.file.url
+                })
         
-        # Convert sets to counts and format the response
+        # Convert sets to counts and format the response (sorted by question_id)
         formatted_stats = []
-        for question_text, data in stats.items():
+        for question_text, data in sorted(stats.items(), key=lambda x: x[1]['question_id']):
             formatted_stats.append({
-                'question_text': question_text,
+                'question_text': data['question_text'],
                 'question_id': data['question_id'],
                 'total_files': data['total_files'],
                 'total_size_mb': round(data['total_size_mb'], 2),
