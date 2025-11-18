@@ -371,6 +371,176 @@ def get_content_images_safe(content_id, content_type):
         print(f"Warning: Could not load ContentImage for {content_type} {content_id}: {e}")
         return []
 
+
+def _serialize_basic_user(user, request=None):
+    """Return a standardized payload for user info used in donation responses."""
+    if not user:
+        return {}
+    academic = getattr(user, 'academic_info', None)
+    middle = user.m_name or ''
+    full_name = ' '.join(filter(None, [user.f_name, middle, user.l_name])).strip()
+    year_graduated = getattr(academic, 'year_graduated', None) if academic else None
+    return {
+        'user_id': getattr(user, 'user_id', getattr(user, 'id', None)),
+        'f_name': user.f_name,
+        'm_name': user.m_name,
+        'l_name': user.l_name,
+        'profile_pic': build_profile_pic_url(user, request),
+        'year_graduated': year_graduated,
+        'batch': year_graduated,
+        'name': full_name,
+    }
+
+
+def _build_user_initials(user):
+    """Best-effort initials for users without profile photos."""
+    try:
+        first = (user.f_name or '').strip()[:1].upper()
+        last = (user.l_name or '').strip()[:1].upper()
+        initials = (first + last).strip()
+        return initials or None
+    except Exception:
+        return None
+
+
+def _serialize_like_entry(like, request=None):
+    user_payload = _serialize_basic_user(like.user, request)
+    return {
+        'like_id': like.like_id,
+        'user': user_payload,
+        'profile_pic': user_payload.get('profile_pic'),
+        'initials': _build_user_initials(like.user) if not user_payload.get('profile_pic') else None,
+    }
+
+
+def _serialize_comment_entry(comment, request=None):
+    return {
+        'comment_id': comment.comment_id,
+        'comment_content': comment.comment_content,
+        'date_created': comment.date_created.isoformat() if comment.date_created else None,
+        'user': _serialize_basic_user(comment.user, request),
+    }
+
+
+def _serialize_repost_entry(repost, request=None):
+    likes_qs = Like.objects.filter(repost=repost).select_related('user__profile')
+    comments_qs = Comment.objects.filter(repost=repost).select_related('user__profile').order_by('-date_created')
+    return {
+        'repost_id': repost.repost_id,
+        'repost_date': repost.repost_date.isoformat() if repost.repost_date else None,
+        'repost_caption': repost.caption,
+        'type': 'donation' if repost.donation_request_id else None,
+        'user': _serialize_basic_user(repost.user, request),
+        'likes_count': likes_qs.count(),
+        'comments_count': comments_qs.count(),
+        'likes': [_serialize_like_entry(like, request) for like in likes_qs],
+        'comments': [_serialize_comment_entry(comment, request) for comment in comments_qs],
+        'original_post': {
+            'donation_id': repost.donation_request.donation_id if repost.donation_request else None,
+            'description': repost.donation_request.description if repost.donation_request else None,
+            'created_at': repost.donation_request.created_at.isoformat() if repost.donation_request and repost.donation_request.created_at else None,
+            'user': _serialize_basic_user(repost.donation_request.user, request) if repost.donation_request else None,
+        } if repost.donation_request else None,
+    }
+
+
+def serialize_donation_request(donation, current_user=None, request=None):
+    """Return a fully-populated donation payload consumed by the web dashboard/mobile."""
+    images = get_content_images_safe(donation.donation_id, 'donation')
+    likes_qs = Like.objects.filter(donation_request=donation).select_related('user__profile')
+    comments_qs = Comment.objects.filter(donation_request=donation).select_related('user__profile').order_by('-date_created')
+    reposts_qs = Repost.objects.filter(donation_request=donation).select_related('user__profile')
+
+    likes_data = []
+    is_liked = False
+    for like in likes_qs:
+        if current_user and like.user_id == current_user.user_id:
+            is_liked = True
+        likes_data.append(_serialize_like_entry(like, request))
+
+    comments_data = [_serialize_comment_entry(comment, request) for comment in comments_qs]
+
+    reposts_data = []
+    is_reposted = False
+    for repost in reposts_qs:
+        if current_user and repost.user_id == current_user.user_id:
+            is_reposted = True
+        reposts_data.append(_serialize_repost_entry(repost, request))
+
+    return {
+        'donation_id': donation.donation_id,
+        'post_id': donation.donation_id,  # for frontend components expecting post shape
+        'type': 'donation',
+        'description': donation.description,
+        'status': donation.status,
+        'created_at': donation.created_at.isoformat() if donation.created_at else None,
+        'updated_at': donation.updated_at.isoformat() if donation.updated_at else None,
+        'images': images,
+        'user': _serialize_basic_user(donation.user, request),
+        'likes_count': len(likes_data),
+        'comments_count': len(comments_data),
+        'reposts_count': len(reposts_data),
+        'likes': likes_data,
+        'comments': comments_data,
+        'reposts': reposts_data,
+        'is_liked': is_liked,
+        'is_reposted': is_reposted,
+    }
+
+
+def _handle_donation_images_upload(donation, request):
+    """
+    Persist donation images coming from either Multipart (mobile) or base64 (web) payloads.
+    Returns the number of images saved.
+    """
+    saved = 0
+    data = getattr(request, 'data', {}) or {}
+
+    try:
+        if request.FILES:
+            image_files = []
+            for key, file in request.FILES.items():
+                if key.startswith('images') and file:
+                    image_files.append((key, file))
+            image_files.sort(key=lambda x: x[0])
+
+            for order_index, (_, file) in enumerate(image_files):
+                content_image = ContentImage.objects.create(
+                    content_type='donation',
+                    content_id=donation.donation_id,
+                    order=order_index
+                )
+                content_image.image.save(file.name, file, save=True)
+                saved += 1
+
+        images_payload = data.get('images') or data.get('post_images')
+        if images_payload and not isinstance(images_payload, list):
+            images_payload = [images_payload]
+
+        if images_payload:
+            for index, image_data in enumerate(images_payload):
+                if isinstance(image_data, str) and image_data.startswith('data:image'):
+                    try:
+                        format_part, encoded = image_data.split(';base64,')
+                        ext = format_part.split('/')[-1]
+                        file_name = f"{uuid.uuid4()}.{ext}"
+                        img_bytes = base64.b64decode(encoded)
+                        content_image = ContentImage.objects.create(
+                            content_type='donation',
+                            content_id=donation.donation_id,
+                            order=index + saved
+                        )
+                        content_image.image.save(file_name, ContentFile(img_bytes), save=True)
+                        saved += 1
+                    except Exception as img_exc:
+                        logger.warning(f"Failed to save donation image index={index}: {img_exc}")
+                        continue
+    except Exception as exc:
+        logger.error(f"Donation image handling failed for donation_id={donation.donation_id}: {exc}")
+
+    return saved
+
+
 # --- Helpers for Posts ---
 
 @ensure_csrf_cookie
@@ -6841,6 +7011,311 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
     except Exception as e:
         print(f"Error creating notifications: {e}")
         return 0
+
+# ==========================
+# Donation API (shared_donationrequest)
+# ==========================
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, JSONParser])
+def donation_requests_view(request):
+    """List donation requests or create a new one."""
+    try:
+        if request.method == "GET":
+            donations = (DonationRequest.objects
+                         .select_related('user', 'user__profile', 'user__academic_info')
+                         .order_by('-created_at'))
+            data = [serialize_donation_request(donation, request.user, request) for donation in donations]
+            return JsonResponse({'success': True, 'donations': data})
+
+        description = (request.data.get('description') or '').strip()
+        if not description:
+            return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
+
+        donation = DonationRequest.objects.create(
+            user=request.user,
+            description=description
+        )
+
+        images_saved = _handle_donation_images_upload(donation, request)
+        has_images = images_saved > 0 or ContentImage.objects.filter(
+            content_type='donation',
+            content_id=donation.donation_id
+        ).exists()
+
+        if has_images:
+            award_engagement_points(request.user, 'post_with_photo')
+        else:
+            award_engagement_points(request.user, 'post')
+
+        notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
+
+        payload = serialize_donation_request(donation, request.user, request)
+        return JsonResponse({
+            'success': True,
+            'message': 'Donation request created successfully',
+            'donation': payload
+        }, status=201)
+    except Exception as exc:
+        logger.error(f"donation_requests_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to process donation request'}, status=500)
+
+
+@api_view(["POST", "DELETE"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_like_view(request, donation_id):
+    """Like or unlike a donation request."""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        if request.method == "POST":
+            like, created = Like.objects.get_or_create(
+                donation_request=donation,
+                user=request.user,
+                defaults={'post': None, 'forum': None, 'repost': None}
+            )
+            if created:
+                award_engagement_points(request.user, 'like')
+                if donation.user_id != request.user.user_id:
+                    notif = Notification.objects.create(
+                        user=donation.user,
+                        notif_type='like',
+                        subject='Donation Request Liked',
+                        notifi_content=(
+                            f"{request.user.full_name} liked your donation request"
+                            f"<!--DONATION_ID:{donation.donation_id}-->"
+                            f"<!--ACTOR_ID:{request.user.user_id}-->"
+                        ),
+                        notif_date=timezone.now()
+                    )
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notif)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting donation like notification: {e}")
+                return JsonResponse({'success': True, 'message': 'Donation liked'})
+            return JsonResponse({'success': False, 'message': 'Already liked'})
+
+        try:
+            like = Like.objects.get(donation_request=donation, user=request.user)
+            like.delete()
+            deduct_engagement_points(request.user, 'like')
+            return JsonResponse({'success': True, 'message': 'Donation unliked'})
+        except Like.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'Donation not liked'})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as exc:
+        logger.error(f"donation_like_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comments_view(request, donation_id):
+    """Fetch or create comments for a donation request."""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        if request.method == "GET":
+            comments = (Comment.objects
+                        .filter(donation_request=donation)
+                        .select_related('user__profile')
+                        .order_by('-date_created'))
+            results = []
+            for comment in comments:
+                comment_payload = _serialize_comment_entry(comment, request)
+                comment_payload['replies_count'] = Reply.objects.filter(comment=comment).count()
+                results.append(comment_payload)
+            return JsonResponse({'success': True, 'comments': results})
+
+        comment_content = (request.data.get('comment_content') or '').strip()
+        if not comment_content:
+            return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
+
+        comment = Comment.objects.create(
+            donation_request=donation,
+            user=request.user,
+            comment_content=comment_content,
+            date_created=timezone.now()
+        )
+        award_engagement_points(request.user, 'comment')
+
+        create_mention_notifications(
+            comment_content,
+            request.user,
+            donation_id=donation.donation_id,
+            comment_id=comment.comment_id
+        )
+
+        if donation.user_id != request.user.user_id:
+            notif = Notification.objects.create(
+                user=donation.user,
+                notif_type='comment',
+                subject='Donation Request Commented',
+                notifi_content=(
+                    f"{request.user.full_name} commented on your donation request"
+                    f"<!--DONATION_ID:{donation.donation_id}-->"
+                    f"<!--COMMENT_ID:{comment.comment_id}-->"
+                    f"<!--ACTOR_ID:{request.user.user_id}-->"
+                ),
+                notif_date=timezone.now()
+            )
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notif)
+            except Exception as e:
+                logger.error(f"Error broadcasting donation comment notification: {e}")
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Comment added successfully',
+            'comment': _serialize_comment_entry(comment, request)
+        })
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as exc:
+        logger.error(f"donation_comments_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comment'}, status=500)
+
+
+@api_view(["PUT", "DELETE"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comment_edit_view(request, donation_id, comment_id):
+    """Edit or delete a donation comment."""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
+        is_owner = comment.user_id == request.user.user_id
+        is_donation_owner = donation.user_id == request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+
+        if not (is_owner or is_donation_owner or is_admin):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+
+        if request.method == "PUT":
+            if not is_owner:
+                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
+            content = (request.data.get('comment_content') or '').strip()
+            if not content:
+                return JsonResponse({'error': 'No content provided'}, status=400)
+            comment.comment_content = content
+            comment.save(update_fields=['comment_content'])
+            return JsonResponse({'success': True})
+
+        deduct_engagement_points(comment.user, 'comment')
+        comment.delete()
+        return JsonResponse({'success': True})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'error': 'Donation request not found'}, status=404)
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as exc:
+        logger.error(f"donation_comment_edit_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to modify comment'}, status=500)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_repost_view(request, donation_id):
+    """Create a repost referencing a donation request."""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        caption = (request.data.get('caption') or '').strip() or None
+        repost = Repost.objects.create(
+            donation_request=donation,
+            user=request.user,
+            caption=caption,
+            repost_date=timezone.now()
+        )
+        award_engagement_points(request.user, 'share')
+
+        if donation.user_id != request.user.user_id:
+            notif = Notification.objects.create(
+                user=donation.user,
+                notif_type='repost',
+                subject='Donation Request Reposted',
+                notifi_content=(
+                    f"{request.user.full_name} reposted your donation request"
+                    f"<!--DONATION_ID:{donation.donation_id}-->"
+                    f"<!--REPOST_ID:{repost.repost_id}-->"
+                    f"<!--ACTOR_ID:{request.user.user_id}-->"
+                ),
+                notif_date=timezone.now()
+            )
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notif)
+            except Exception as e:
+                logger.error(f"Error broadcasting donation repost notification: {e}")
+
+        return JsonResponse({'success': True, 'message': 'Donation reposted successfully', 'repost_id': repost.repost_id})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as exc:
+        logger.error(f"donation_repost_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, JSONParser])
+def donation_detail_edit_view(request, donation_id):
+    """Retrieve, update, or delete a donation request."""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        is_owner = donation.user_id == request.user.user_id
+        is_admin = getattr(request.user.account_type, 'admin', False)
+        is_peso = getattr(request.user.account_type, 'peso', False)
+
+        if request.method == "GET":
+            return JsonResponse(serialize_donation_request(donation, request.user, request))
+
+        if not (is_owner or is_admin or is_peso):
+            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
+
+        if request.method == "PUT":
+            description = request.data.get('description')
+            status_value = request.data.get('status')
+            fields = []
+            if description is not None:
+                donation.description = description
+                fields.append('description')
+            if status_value is not None:
+                donation.status = status_value
+                fields.append('status')
+            if fields:
+                donation.updated_at = timezone.now()
+                fields.append('updated_at')
+                donation.save(update_fields=fields)
+            _handle_donation_images_upload(donation, request)
+            return JsonResponse({'success': True, 'message': 'Donation updated successfully'})
+
+        has_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).exists()
+        images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
+        for img in images:
+            if getattr(img, 'image', None):
+                img.image.delete(save=False)
+        images.delete()
+
+        if has_images:
+            deduct_engagement_points(donation.user, 'post_with_photo')
+        else:
+            deduct_engagement_points(donation.user, 'post')
+
+        donation.delete()
+        return JsonResponse({'success': True, 'message': 'Donation deleted successfully'})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as exc:
+        logger.error(f"donation_detail_edit_view error: {exc}")
+        return JsonResponse({'success': False, 'message': 'Failed to process donation request'}, status=500)
+
 # ==========================
 # Forum API (shared_forum links to shared_post)
 # ==========================
@@ -8665,6 +9140,13 @@ def forgot_password_view(request):
                 'message': 'If an account with that email exists, a password reset link has been sent.'
             })
 
+        if not _table_exists('password_reset_tokens'):
+            logger.error("Password reset token table missing. Run shared migration 0128 or re-apply migrations.")
+            return JsonResponse({
+                'success': False,
+                'message': 'Password reset is temporarily unavailable. Please contact the administrator.'
+            }, status=503)
+
         # 🔒 SECURITY: Invalidate any existing active tokens for this user
         from apps.shared.models import PasswordResetToken
         PasswordResetToken.objects.filter(
@@ -8815,6 +9297,13 @@ def reset_password_view(request):
         response["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
         return response
+
+    if not _table_exists('password_reset_tokens'):
+        logger.error("Password reset token table missing. Run shared migration 0128 or re-apply migrations.")
+        return JsonResponse({
+            'success': False,
+            'message': 'Password reset is temporarily unavailable. Please contact the administrator.'
+        }, status=503)
 
     from apps.shared.models import PasswordResetToken
 
