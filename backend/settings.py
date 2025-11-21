@@ -315,7 +315,7 @@ CACHES = {
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'apps.api.authentication.CustomJWTAuthentication',  # Use custom JWT auth for user_id
     ),
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
@@ -332,17 +332,17 @@ SIMPLE_JWT = {
     'USER_ID_FIELD': os.getenv('JWT_USER_ID_FIELD', 'user_id'),
     'USER_ID_CLAIM': os.getenv('JWT_USER_ID_CLAIM', 'user_id'),
     
-    # Token Lifetime Configuration (Educational System Standard)
-    # Access Token: 1 hour - Balances security and user experience
-    # Refresh Token: 7 days - Weekly re-authentication for security
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    # Token Lifetime Configuration
+    # FIXED: Longer access token lifetime to reduce refresh frequency
+    # This prevents race conditions from multiple concurrent refresh attempts
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),  # 8 hours - reduced refresh frequency
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),  # 7 days - weekly re-authentication
     
-    # Security: Token Rotation & Blacklisting
-    # Rotate refresh tokens on each use to prevent token reuse attacks
-    'ROTATE_REFRESH_TOKENS': True,
-    # Blacklist old tokens after rotation for additional security
-    'BLACKLIST_AFTER_ROTATION': True,
+    # Security: Token Rotation (WITHOUT aggressive blacklisting)
+    # FIXED: Disabled blacklisting to prevent race conditions in SPAs
+    # SPAs make concurrent requests that can trigger multiple refresh attempts
+    'ROTATE_REFRESH_TOKENS': False,  # ✅ FIXED: Disabled rotation to prevent race conditions
+    'BLACKLIST_AFTER_ROTATION': False,  # ✅ FIXED: Disabled blacklisting
     # Don't update Django's last_login on token refresh (performance)
     'UPDATE_LAST_LOGIN': False,
     
@@ -382,6 +382,12 @@ SIMPLE_JWT = {
 INITIAL_PASSWORD_FERNET_KEY = os.getenv('INITIAL_PASSWORD_FERNET_KEY')
 
 AUTH_USER_MODEL = 'shared.User'
+
+# Authentication Backends - REQUIRED for custom User model with JWT
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',  # Default Django authentication
+]
+
 DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv('DATA_UPLOAD_MAX_NUMBER_FIELDS', '10000'))
 DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
 FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))

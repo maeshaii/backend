@@ -27,6 +27,6 @@ class SharedConfig(AppConfig):
             # Store the scheduler to prevent garbage collection
             SharedConfig.scheduler = start_scheduler()
             self._scheduler_started = True
-            logger.info("✅ Scheduler initialized successfully in ready()")
+            logger.info("Scheduler initialized successfully in ready()")
         except Exception as e:
             logger.error(f"❌ Failed to start scheduler: {e}", exc_info=True)

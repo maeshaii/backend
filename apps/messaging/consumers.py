@@ -80,12 +80,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
 		
 		# Accept the connection
 		await self.accept()
+		logger.info("WebSocket connection accepted - User: %s", getattr(self.user, 'user_id', None))
 		
 		# Join conversation room
+		group_name = f"chat_{self.conversation_id}"
 		await self.channel_layer.group_add(
-			f"chat_{self.conversation_id}",
+			group_name,
 			self.channel_name
 		)
+		logger.info("WebSocket joined group '%s' - real-time messaging active", group_name)
 		
 		# Store connection metadata
 		# Extract user-agent from headers (headers is a list of tuples)
@@ -203,6 +206,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
 				await self.handle_typing(data)
 			elif message_type == 'read_receipt':
 				await self.handle_read_receipt(data)
+			elif message_type == 'reaction':
+				await self.handle_reaction(data)
+			elif message_type == 'edit':
+				await self.handle_edit(data)
+			elif message_type == 'delete':
+				await self.handle_delete(data)
 			elif message_type == 'ping':
 				await self.handle_ping(data)
 			else:
@@ -374,14 +383,113 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			'timestamp': timezone.now().isoformat()
 		}))
 
+	async def handle_reaction(self, data):
+		"""Handle reaction add/remove via WebSocket"""
+		try:
+			message_id = data.get('message_id')
+			emoji = data.get('emoji')
+			action = data.get('action', 'add')
+			
+			if not message_id or not emoji:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'message_id and emoji are required'
+				}))
+				return
+			
+			user_id = getattr(self.user, 'user_id', None)
+			
+			# Save to database
+			if action == 'add':
+				await database_sync_to_async(self._add_reaction_to_db)(message_id, user_id, emoji)
+			elif action == 'remove':
+				await database_sync_to_async(self._remove_reaction_from_db)(message_id, user_id, emoji)
+			
+			# Broadcast to conversation group (including sender for confirmation)
+			await self.channel_layer.group_send(
+				f"chat_{self.conversation_id}",
+				{
+					'type': 'reaction_update',
+					'action': action,
+					'message_id': message_id,
+					'emoji': emoji,
+					'user_id': user_id,
+					'user_name': getattr(self.user, 'full_name', ''),
+					'timestamp': timezone.now().isoformat()
+				}
+			)
+			
+			logger.info(f"Reaction {action} for message {message_id} by user {user_id}")
+			
+		except Exception as e:
+			logger.error(f"Error handling reaction: {e}")
+
+	async def handle_edit(self, data):
+		"""Handle message edit via WebSocket"""
+		try:
+			message_id = data.get('message_id')
+			content = data.get('content')
+			
+			if not message_id or not content:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'message_id and content are required'
+				}))
+				return
+			
+			# Broadcast to conversation group
+			await self.channel_layer.group_send(
+				f"chat_{self.conversation_id}",
+				{
+					'type': 'message_edit',
+					'message_id': message_id,
+					'content': content,
+					'timestamp': timezone.now().isoformat()
+				}
+			)
+			
+			logger.info(f"Message {message_id} edited by user {getattr(self.user, 'user_id', None)}")
+			
+		except Exception as e:
+			logger.error(f"Error handling edit: {e}")
+
+	async def handle_delete(self, data):
+		"""Handle message delete via WebSocket"""
+		try:
+			message_id = data.get('message_id')
+			
+			if not message_id:
+				await self.send(text_data=json.dumps({
+					'type': 'error',
+					'message': 'message_id is required'
+				}))
+				return
+			
+			# Broadcast to conversation group
+			await self.channel_layer.group_send(
+				f"chat_{self.conversation_id}",
+				{
+					'type': 'message_delete',
+					'message_id': message_id,
+					'timestamp': timezone.now().isoformat()
+				}
+			)
+			
+			logger.info(f"Message {message_id} deleted by user {getattr(self.user, 'user_id', None)}")
+			
+		except Exception as e:
+			logger.error(f"Error handling delete: {e}")
+
 	async def chat_message(self, event):
 		"""Handle chat message from group"""
 		# Handle both old and new message formats
 		message = event.get('message') or event.get('data', {})
+		logger.info(f"[WebSocket] Broadcasting message {message.get('message_id')} to channel {self.channel_name}")
 		await self.send(text_data=json.dumps({
 			'type': 'message',
 			'message': message
 		}))
+		logger.info("WebSocket message sent to channel %s", self.channel_name)
 
 	async def presence_update(self, event):
 		"""Handle presence update from group"""
@@ -408,6 +516,35 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			'message_id': event['message_id'],
 			'user_id': event['user_id'],
 			'read_at': event['read_at']
+		}))
+
+	async def reaction_update(self, event):
+		"""Handle reaction update from group"""
+		await self.send(text_data=json.dumps({
+			'type': 'reaction',
+			'action': event['action'],
+			'message_id': event['message_id'],
+			'emoji': event['emoji'],
+			'user_id': event['user_id'],
+			'user_name': event.get('user_name', ''),
+			'timestamp': event.get('timestamp', timezone.now().isoformat())
+		}))
+
+	async def message_edit(self, event):
+		"""Handle message edit from group"""
+		await self.send(text_data=json.dumps({
+			'type': 'edit',
+			'message_id': event['message_id'],
+			'content': event['content'],
+			'timestamp': event.get('timestamp', timezone.now().isoformat())
+		}))
+
+	async def message_delete(self, event):
+		"""Handle message delete from group"""
+		await self.send(text_data=json.dumps({
+			'type': 'delete',
+			'message_id': event['message_id'],
+			'timestamp': event.get('timestamp', timezone.now().isoformat())
 		}))
 
 	def _check_conversation_access(self):
@@ -463,6 +600,52 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			message = Message.objects.get(message_id=message_id)
 			# Update read status logic here
 			pass
+		except Exception as e:
+			logger.error(f"Error marking message as read: {e}")
+	
+	def _add_reaction_to_db(self, message_id, user_id, emoji):
+		"""Add reaction to database"""
+		try:
+			from apps.shared.models import MessageReaction
+			
+			# Check if message exists
+			message = Message.objects.get(message_id=message_id)
+			
+			# Create or get reaction (unique constraint prevents duplicates)
+			reaction, created = MessageReaction.objects.get_or_create(
+				message_id=message_id,
+				user_id=user_id,
+				emoji=emoji
+			)
+			
+			logger.info(f"Reaction {'created' if created else 'already exists'}: {emoji} on message {message_id} by user {user_id}")
+			return reaction
+			
+		except Message.DoesNotExist:
+			logger.error(f"Message {message_id} not found")
+			return None
+		except Exception as e:
+			logger.error(f"Error adding reaction to database: {e}")
+			return None
+	
+	def _remove_reaction_from_db(self, message_id, user_id, emoji):
+		"""Remove reaction from database"""
+		try:
+			from apps.shared.models import MessageReaction
+			
+			# Delete the reaction
+			deleted_count, _ = MessageReaction.objects.filter(
+				message_id=message_id,
+				user_id=user_id,
+				emoji=emoji
+			).delete()
+			
+			logger.info(f"Removed {deleted_count} reaction(s): {emoji} from message {message_id} by user {user_id}")
+			return deleted_count > 0
+			
+		except Exception as e:
+			logger.error(f"Error removing reaction from database: {e}")
+			return False
 		except Message.DoesNotExist:
 			pass
 
@@ -593,6 +776,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'notification': event['notification']
 		}))
 		logger.info(f"NotificationConsumer: Sent notification to WebSocket client")
+
+	async def presence_update(self, event):
+		"""Handle presence update from group (ignore for notification consumer)"""
+		# NotificationConsumer doesn't need to handle presence updates
+		# This handler exists to prevent "No handler" errors
+		pass
 
 	async def notification_count_update(self, event):
 		"""Handle notification count update from group"""

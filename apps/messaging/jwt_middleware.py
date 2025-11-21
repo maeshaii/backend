@@ -7,7 +7,7 @@ from channels.db import database_sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from django.utils.functional import LazyObject
 
-from rest_framework_simplejwt.authentication import JWTAuthentication
+from apps.api.authentication import CustomJWTAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class JWTAuthMiddleware:
 
     def __init__(self, inner):
         self.inner = inner
-        self.jwt_auth = JWTAuthentication()
+        self.jwt_auth = CustomJWTAuthentication()
 
     async def __call__(self, scope, receive, send):
         # Ensure we have a user on scope by default

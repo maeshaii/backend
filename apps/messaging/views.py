@@ -15,7 +15,7 @@ from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import logging
 import os
-from apps.shared.models import Conversation, Message, MessageAttachment, User
+from apps.shared.models import Conversation, Message, MessageAttachment, User, MessageReaction
 from apps.shared.serializers import (
 	ConversationSerializer,
 	MessageSerializer,
@@ -147,9 +147,11 @@ class MessageListView(generics.ListCreateAPIView):
             return Message.objects.none()
 
         qs = Message.objects.filter(conversation=conversation).select_related(
-            'sender', 'conversation'
+            'sender', 'conversation', 'reply_to', 'reply_to__sender'
         ).prefetch_related(
-            'attachments'
+            'attachments',
+            'reactions',
+            'reactions__user'
         ).order_by('-created_at', '-message_id')
 
         # Cursor pagination: use `cursor` as message_id to fetch older messages
@@ -305,15 +307,19 @@ class MessageListView(generics.ListCreateAPIView):
             }
             
             # Send to WebSocket group
+            group_name = f"chat_{conversation.conversation_id}"
+            logger.info(f"[WebSocket] Broadcasting message {message.message_id} to group: {group_name}")
             async_to_sync(channel_layer.group_send)(
-                f"chat_{conversation.conversation_id}",
+                group_name,
                 {
                     'type': 'chat_message',
                     'message': message_data  # This is the key the consumer expects
                 }
             )
+            logger.info("WebSocket message %s broadcast successful", message.message_id)
         except Exception as e:
-            logger.error("Failed to broadcast message %s to WebSocket: %s", message.message_id, e)
+            logger.error(f"❌ [WebSocket] Failed to broadcast message {message.message_id}: {str(e)}")
+            logger.exception(e)  # Log full traceback for debugging
         
         # Invalidate cache for this conversation
         message_cache.invalidate_conversation_messages(conversation_id)

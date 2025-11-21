@@ -262,7 +262,7 @@ def reset_daily_task_progress():
                 post_count=0,
                 post_with_photo_count=0,
             )
-            logger.info(f"✅ Reset progress counts for {reset_count} users")
+            logger.info("Reset progress counts for %s users", reset_count)
             
             # Delete milestone task completions so they can be earned again
             # Only delete completions for milestone tasks, not other tasks like verify_email
@@ -270,7 +270,7 @@ def reset_daily_task_progress():
             deleted_count = UserTaskCompletion.objects.filter(
                 task_id__in=milestone_task_ids
             ).delete()[0]
-            logger.info(f"✅ Deleted {deleted_count} milestone task completions")
+            logger.info("Deleted %s milestone task completions", deleted_count)
             
             logger.info("🎉 Daily task progress reset completed successfully")
             return {

@@ -180,6 +180,14 @@ class RedisConnectionManager:
             bool: True if presence was updated successfully
         """
         try:
+            # Ensure types are correct (handle JSON deserialization)
+            try:
+                user_id = int(user_id) if user_id else 0
+                conversation_id = int(conversation_id) if conversation_id else 0
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid user_id or conversation_id: {user_id}, {conversation_id}")
+                return False
+            
             presence_key = f"{self.USER_PRESENCE_PREFIX}{user_id}:{conversation_id}"
             presence_data = {
                 'user_id': user_id,
@@ -355,24 +363,30 @@ class RedisConnectionManager:
             if not self.channel_layer:
                 return
             
-            # Get all users in the conversation
-            users = self.get_conversation_users(conversation_id)
+            # Convert conversation_id to int if it's a string (from JSON deserialization)
+            try:
+                conversation_id = int(conversation_id) if conversation_id else 0
+            except (ValueError, TypeError):
+                conversation_id = 0
             
-            # Send presence update to each user's connections
-            for user_data in users:
-                if user_data['user_id'] != user_id:  # Don't send to the user who changed status
-                    user_connections = self.get_user_connections(user_data['user_id'])
-                    for channel_name in user_connections:
-                        async_to_sync(self.channel_layer.send)(
-                            channel_name,
-                            {
-                                'type': 'presence_update',
-                                'user_id': user_id,
-                                'conversation_id': conversation_id,
-                                'status': status,
-                                'timestamp': timezone.now().isoformat(),
-                            }
-                        )
+            # Use group_send instead of individual channel sends to avoid async issues
+            # Only broadcast if there's a valid conversation_id
+            if conversation_id and conversation_id > 0:
+                try:
+                    async_to_sync(self.channel_layer.group_send)(
+                        f"chat_{conversation_id}",
+                        {
+                            'type': 'presence.update',  # Changed to use dot notation for handler
+                            'user_id': user_id,
+                            'conversation_id': conversation_id,
+                            'status': status,
+                            'timestamp': timezone.now().isoformat(),
+                        }
+                    )
+                except RuntimeError:
+                    # If we're already in an async context, skip broadcasting
+                    # The presence update will be handled by the connection itself
+                    logger.debug(f"Skipped presence broadcast for user {user_id} (already in async context)")
                         
         except Exception as e:
             logger.error(f"Failed to broadcast presence update: {e}")
@@ -380,6 +394,7 @@ class RedisConnectionManager:
 
 # Global instance
 connection_manager = RedisConnectionManager()
+
 
 
 

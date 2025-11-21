@@ -44,9 +44,8 @@ from django.core.files.uploadedfile import InMemoryUploadedFile
 from collections import Counter
 from apps.shared.models import Question
 from django.core.mail import send_mail
-from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
-from rest_framework_simplejwt.authentication import JWTAuthentication
 # 🔒 SECURITY: Import custom permission classes for role-based access control
 from apps.api.permissions import (
     IsAdmin, IsPeso, IsCoordinator, IsAlumni, IsOJT,
@@ -843,7 +842,13 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         # Hashed password only
         if not user.check_password(acc_password):
             raise serializers.ValidationError('Invalid credentials')
+        
+        # Generate JWT tokens with explicit user_id claim
         refresh = RefreshToken.for_user(user)
+        # Explicitly set the user_id claim to match SIMPLE_JWT configuration
+        refresh['user_id'] = user.user_id
+        refresh.access_token['user_id'] = user.user_id
+        
         # Determine if the user must change password on first login
         must_change_password = False
         try:
@@ -970,7 +975,6 @@ def change_password_view(request):
 
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX
 @csrf_exempt
 def import_alumni_view(request):
@@ -7318,7 +7322,6 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
 # ==========================
 
 @api_view(["GET", "POST"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, JSONParser])
 def donation_requests_view(request):
@@ -7365,7 +7368,6 @@ def donation_requests_view(request):
 
 
 @api_view(["POST", "DELETE"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_like_view(request, donation_id):
     """Like or unlike a donation request."""
@@ -7414,7 +7416,6 @@ def donation_like_view(request, donation_id):
 
 
 @api_view(["GET", "POST"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_comments_view(request, donation_id):
     """Fetch or create comments for a donation request."""
@@ -7483,7 +7484,6 @@ def donation_comments_view(request, donation_id):
 
 
 @api_view(["PUT", "DELETE"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_comment_edit_view(request, donation_id, comment_id):
     """Edit or delete a donation comment."""
@@ -7520,7 +7520,6 @@ def donation_comment_edit_view(request, donation_id, comment_id):
 
 
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_repost_view(request, donation_id):
     """Create a repost referencing a donation request."""
@@ -7563,7 +7562,6 @@ def donation_repost_view(request, donation_id):
 
 
 @api_view(["GET", "PUT", "DELETE"])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, JSONParser])
 def donation_detail_edit_view(request, donation_id):
@@ -9890,7 +9888,6 @@ def reset_password_view(request):
 
 
 @api_view(['GET', 'POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def recent_searches_view(request):
     """Manage per-user recent searches.
@@ -10007,7 +10004,6 @@ def recent_searches_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def set_send_date_view(request):
     """Set send date for OJT students"""
@@ -10146,7 +10142,6 @@ def set_send_date_view(request):
         }, status=500)
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def check_all_sent_status_view(request):
     """Check if all completed OJT students are already sent to admin for a specific batch"""
@@ -10198,7 +10193,6 @@ def check_all_sent_status_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
@@ -10247,7 +10241,6 @@ def get_send_dates_view(request):
 
 
 @api_view(['DELETE'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def delete_send_date_view(request):
     """Delete/remove a scheduled send date (idempotent operation)"""
@@ -10300,7 +10293,6 @@ def delete_send_date_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_leaderboard_view(request):
     """
@@ -10366,7 +10358,6 @@ def engagement_leaderboard_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_tasks_view(request):
     """
@@ -10401,7 +10392,6 @@ def engagement_tasks_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def points_tasks_view(request):
     """
@@ -10584,7 +10574,6 @@ def points_tasks_view(request):
 # ============================
 
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_points_settings_view(request):
     """
@@ -10698,7 +10687,6 @@ def engagement_points_settings_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def milestone_tasks_points_view(request):
     """
@@ -10850,7 +10838,6 @@ def milestone_tasks_points_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_requests_list_view(request):
     """
@@ -10970,7 +10957,6 @@ def reward_requests_list_view(request):
 
 
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_items_view(request):
     """
@@ -11066,7 +11052,6 @@ def inventory_items_view(request):
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_item_detail_view(request, item_id):
     """
@@ -11184,7 +11169,6 @@ def inventory_item_detail_view(request, item_id):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_history_view(request):
     """
@@ -11252,7 +11236,6 @@ def reward_history_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def give_reward_view(request):
     """
@@ -11383,7 +11366,6 @@ def give_reward_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def request_reward_view(request):
     """
@@ -11578,7 +11560,6 @@ def get_business_days_after(start_date, days):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_reward_request_view(request, request_id):
     """
@@ -11703,7 +11684,6 @@ def approve_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def claim_reward_request_view(request, request_id):
     """
@@ -11856,7 +11836,6 @@ def claim_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def upload_voucher_file_view(request, request_id):
     """

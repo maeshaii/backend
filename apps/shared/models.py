@@ -267,6 +267,17 @@ class Message(models.Model):
     message_type = models.CharField(max_length=20, choices=MESSAGE_TYPES, default='text')
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Reply functionality
+    reply_to = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='replies',
+        help_text='The message this is replying to'
+    )
+    is_edited = models.BooleanField(default=False, help_text='Whether the message has been edited')
 
     class Meta:
         ordering = ['created_at']
@@ -283,6 +294,43 @@ class Message(models.Model):
     @property
     def sender_name(self):
         return self.sender.full_name
+
+
+class MessageReaction(models.Model):
+    """
+    Message reactions for real-time emoji reactions.
+    Allows users to react to messages with emojis.
+    """
+    reaction_id = models.AutoField(primary_key=True)
+    message = models.ForeignKey(
+        Message,
+        on_delete=models.CASCADE,
+        related_name='reactions',
+        help_text='The message being reacted to'
+    )
+    user = models.ForeignKey(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='message_reactions',
+        help_text='The user who reacted'
+    )
+    emoji = models.CharField(
+        max_length=10,
+        help_text='Unicode emoji character (e.g., 😊, ❤️, 👍)'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'message_reactions'
+        unique_together = [('message', 'user', 'emoji')]  # One reaction per user per emoji per message
+        indexes = [
+            models.Index(fields=['message', 'created_at']),
+            models.Index(fields=['user']),
+        ]
+        ordering = ['created_at']
+    
+    def __str__(self):
+        return f"{self.user.full_name} reacted {self.emoji} to message {self.message.message_id}"
 
 
 class MessageAttachment(models.Model):

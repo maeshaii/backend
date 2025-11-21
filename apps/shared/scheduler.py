@@ -22,7 +22,7 @@ def reset_daily_task_progress_job():
         from apps.shared.points_milestones import reset_daily_task_progress
         logger.info("🔄 Running daily task progress reset...")
         result = reset_daily_task_progress()
-        logger.info(f"✅ Daily task progress reset completed: {result}")
+        logger.info("Daily task progress reset completed: %s", result)
     except Exception as e:
         logger.error(f"❌ Error in daily task progress reset: {e}")
         import traceback
@@ -49,7 +49,7 @@ def process_send_dates_job():
         from django.core.management import call_command
         logger.info("🔄 Running scheduled send dates processing...")
         call_command('process_send_dates')
-        logger.info("✅ Scheduled send dates processing completed")
+        logger.info("Scheduled send dates processing completed")
     except Exception as e:
         logger.error(f"❌ Error in scheduled send dates processing: {e}")
         import traceback

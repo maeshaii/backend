@@ -276,14 +276,39 @@ class MessageSerializer(serializers.ModelSerializer):
     sender = SmallUserSerializer(read_only=True)
     attachments = MessageAttachmentSerializer(many=True, read_only=True)
     sender_name = serializers.CharField(source='sender.full_name', read_only=True)
+    reactions = serializers.SerializerMethodField()
+    reply_to = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
         fields = [
             'message_id', 'sender', 'sender_name', 'content', 'message_type', 
-            'is_read', 'created_at', 'attachments'
+            'is_read', 'created_at', 'attachments', 'reactions', 'reply_to', 'is_edited'
         ]
         read_only_fields = ['message_id', 'sender', 'created_at']
+    
+    def get_reactions(self, obj):
+        """Get reactions for this message"""
+        from apps.shared.models import MessageReaction
+        reactions = MessageReaction.objects.filter(message_id=obj.message_id).select_related('user')
+        return [
+            {
+                'emoji': r.emoji,
+                'userId': r.user_id,
+                'userName': r.user.full_name if r.user else 'Unknown'
+            }
+            for r in reactions
+        ]
+    
+    def get_reply_to(self, obj):
+        """Get reply-to message info"""
+        if obj.reply_to:
+            return {
+                'message_id': obj.reply_to.message_id,
+                'content': obj.reply_to.content,
+                'sender_name': obj.reply_to.sender.full_name if obj.reply_to.sender else 'Unknown'
+            }
+        return None
 
 class ConversationSerializer(serializers.ModelSerializer):
     # FIX: Use SmallUserSerializer instead of full UserSerializer to avoid N+1 queries on nested data
@@ -492,9 +517,11 @@ class CreateConversationSerializer(serializers.ModelSerializer):
 
 class MessageCreateSerializer(serializers.ModelSerializer):
     attachment_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    reply_to_message_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    
     class Meta:
         model = Message
-        fields = ['content', 'message_type', 'attachment_id']
+        fields = ['content', 'message_type', 'attachment_id', 'reply_to_message_id']
     
     def validate_message_type(self, value):
         """Validate and sanitize message type"""
@@ -512,7 +539,18 @@ class MessageCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         attachment_id = validated_data.pop('attachment_id', None)
+        reply_to_message_id = validated_data.pop('reply_to_message_id', None)
+        
+        # Handle reply_to
+        if reply_to_message_id:
+            try:
+                reply_to_message = Message.objects.get(message_id=reply_to_message_id)
+                validated_data['reply_to'] = reply_to_message
+            except Message.DoesNotExist:
+                pass
+        
         message: Message = super().create(validated_data)
+        
         # Attach uploaded file, if provided
         if attachment_id:
             from .models import MessageAttachment
