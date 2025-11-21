@@ -38,6 +38,7 @@ import secrets
 import string
 import base64
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.authentication import JWTAuthentication
 import pandas as pd
 import io
 import os
@@ -45,7 +46,7 @@ from django.core.files.uploadedfile import InMemoryUploadedFile
 from collections import Counter
 from apps.shared.models import Question
 from django.core.mail import send_mail
-from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 # 🔒 SECURITY: Import custom permission classes for role-based access control
 from apps.api.permissions import (
@@ -3926,7 +3927,7 @@ def ojt_by_year_view(request):
                 'age': getattr(profile, 'calculated_age', None) if profile else None,
                 'phone_number': getattr(profile, 'phone_num', None) if profile else None,
                 'address': getattr(profile, 'address', None) if profile else None,
-                'email': getattr(ojt, 'email', None) or getattr(profile, 'email', None) if profile else getattr(ojt, 'email', None),
+                'email': getattr(profile, 'email', None) if profile else None,
                 'civil_status': getattr(profile, 'civil_status', None) if profile else None,
                 'social_media': getattr(profile, 'social_media', None) if profile else None,
                 'course': getattr(academic_info, 'program', None) if academic_info else None,

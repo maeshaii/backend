@@ -1542,14 +1542,6 @@ class OJTInfo(models.Model):
     def __str__(self):
         return f"OJT info for {self.user.full_name} - Status: {self.ojtstatus}"
 
-    @property
-    def email(self):
-        """Expose the student's email based on their profile or user record."""
-        profile = getattr(self.user, 'profile', None)
-        if profile and getattr(profile, 'email', None):
-            return profile.email
-        return getattr(self.user, 'email', None)
-
 
 class OJTCompanyProfile(models.Model):
     """OJT Company Profile - Stores company information for OJT students"""
