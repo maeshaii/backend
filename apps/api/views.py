@@ -33,6 +33,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework import serializers
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import secrets
 import string
 import base64
@@ -54,7 +55,7 @@ from apps.api.permissions import (
 from rest_framework.parsers import MultiPartParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Value, CharField, Q
+from django.db.models import Value, CharField, Q, Count, Max
 from django.db import connection
 from django.db.utils import ProgrammingError
 from django.db.models.functions import Concat, Coalesce
@@ -683,6 +684,44 @@ def build_profile_pic_url(user, request=None):
         pass
     # Return empty string instead of None for consistency
     return ""
+
+INVENTORY_LOW_STOCK_THRESHOLD = 5
+INVENTORY_ANALYTICS_LOOKBACK_DAYS = 30
+
+
+def _compute_inventory_availability(quantity: int, low_stock_threshold: int = INVENTORY_LOW_STOCK_THRESHOLD):
+    """Return machine-readable status and human label for inventory availability."""
+    safe_quantity = max(int(quantity or 0), 0)
+    if safe_quantity <= 0:
+        return ('out_of_stock', 'Out of Stock', safe_quantity)
+    if safe_quantity <= low_stock_threshold:
+        label = f"Low Stock ({safe_quantity} left)"
+        return ('low_stock', label, safe_quantity)
+    return ('in_stock', 'In Stock', safe_quantity)
+
+
+def serialize_inventory_item(item, include_admin_fields: bool = False):
+    """Serialize RewardInventoryItem with availability metadata."""
+    status, label, units_available = _compute_inventory_availability(getattr(item, 'quantity', 0))
+    payload = {
+        'id': item.item_id,
+        'name': item.name,
+        'type': item.type,
+        'quantity': max(getattr(item, 'quantity', 0), 0),
+        'value': item.value,
+        'created_at': item.created_at.isoformat() if item.created_at else None,
+        'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+        'availability': {
+            'status': status,
+            'label': label,
+            'units_available': units_available,
+            'is_available': units_available > 0,
+        },
+    }
+
+    # include_admin_fields currently reserved for future use
+    return payload
+
 
 def build_image_url(image_field, request=None):
     """Build full URL for ContentImage fields"""
@@ -2568,6 +2607,105 @@ def import_ojt_view(request):
             }, status=400)
         print(f"✅ Smart import enabled: CTU_ID required, other fields auto-validated per row")
 
+        # ---- Detect import mode (First vs Second) and prevent mixing ----
+        def normalize_ctu_id_value(raw_value):
+            """Convert CTU_ID values like 123.0 or 1.23E+03 into clean strings."""
+            if raw_value is None:
+                return ''
+            raw_str = str(raw_value).strip()
+            if not raw_str or raw_str.lower() in ('nan', 'none'):
+                return ''
+
+            normalized = raw_str
+            # Handle scientific notation (e.g., 1.234E+05)
+            if 'e' in normalized.lower():
+                try:
+                    normalized = format(Decimal(normalized), 'f')
+                except InvalidOperation:
+                    pass
+
+            # Drop trailing .0 / .000 patterns
+            if '.' in normalized:
+                left, right = normalized.split('.', 1)
+                if right.strip('0') == '':
+                    normalized = left
+                else:
+                    normalized = f"{left}.{right.rstrip('0')}"
+                    if normalized.endswith('.'):
+                        normalized = normalized[:-1]
+
+            return normalized
+
+        ctu_id_series = df['CTU_ID'].dropna().apply(normalize_ctu_id_value)
+        ctu_id_series = ctu_id_series[ctu_id_series != '']
+
+        if ctu_id_series.empty:
+            return JsonResponse({
+                'success': False,
+                'message': 'The file must contain at least one CTU_ID value.'
+            }, status=400)
+
+        all_ctu_ids = set(ctu_id_series.tolist())
+        existing_ctu_ids = set(
+            User.objects.filter(acc_username__in=all_ctu_ids).values_list('acc_username', flat=True)
+        )
+        new_ctu_ids = all_ctu_ids - existing_ctu_ids
+
+        # (Cooldown logic moved below once we confirm the file is a second-import template.)
+
+        personal_columns = ['First_Name', 'Last_Name', 'Gender', 'Section']
+        has_personal_columns = all(col in df.columns for col in personal_columns)
+        has_personal_data = has_personal_columns and any(
+            df[col].notna().any() for col in personal_columns
+        )
+
+        company_columns = [
+            'Company', 'Company Name', 'Company_Name',
+            'Company_Address', 'Company Address',
+            'Company_Email', 'Company Email',
+            'Company_Contact', 'Company Contact',
+            'Contact_Person', 'Contact Person',
+            'Position', 'Status',
+            'Ojt_Start_Date', 'Ojt_End_Date',
+            'Start_Date', 'End_Date'
+        ]
+        company_columns_present = [col for col in company_columns if col in df.columns]
+        has_company_data = any(
+            df[col].notna().any() for col in company_columns_present
+        ) if company_columns_present else False
+
+        print(
+            f"📄 Import mode detection → new_ids: {len(new_ctu_ids)}, "
+            f"existing_ids: {len(existing_ctu_ids)}, "
+            f"has_personal_data: {has_personal_data}, has_company_data: {has_company_data}"
+        )
+
+        if new_ctu_ids and existing_ctu_ids:
+            return JsonResponse({
+                'success': False,
+                'message': (
+                    'Mixed template detected. Please separate NEW students (first import) '
+                    'and updates to existing students (second import) into different files.'
+                )
+            }, status=400)
+
+        if not existing_ctu_ids and has_company_data and not has_personal_data:
+            return JsonResponse({
+                'success': False,
+                'message': (
+                    'Second-import template detected, but none of the listed students exist yet. '
+                    'Please run the first import to create the students before importing updates.'
+                )
+            }, status=400)
+
+        is_second_template = bool(existing_ctu_ids) and not new_ctu_ids and has_company_data and not has_personal_data
+        import_mode = 'SECOND' if is_second_template else 'FIRST'
+        print(f"📄 Final import mode: {import_mode}")
+
+
+        # Reuse the cleaned CTU_IDs later for deactivation logic
+        new_import_ctu_ids = set(all_ctu_ids)
+
         # Create import record
         # Normalize batch_year to a single 4-digit year if possible
         try:
@@ -2612,12 +2750,7 @@ def import_ojt_view(request):
             ojt_account_type = None
         
         # ===== NEW BATCH IMPORT LOGIC =====
-        # Step 1: Get all CTU_IDs from the new import
-        new_import_ctu_ids = set()
-        for idx, row in df.iterrows():
-            ctu_id = str(row.get('CTU_ID', '')).strip()
-            if ctu_id:
-                new_import_ctu_ids.add(ctu_id)
+        # Step 1: Get all CTU_IDs from the new import (already computed above)
         print(f"📋 New import contains {len(new_import_ctu_ids)} unique CTU_IDs")
         
         # Step 2: Find all existing OJT students from old batches for this coordinator
@@ -2748,7 +2881,7 @@ def import_ojt_view(request):
             print(f"--- Processing Row {index+2} ---")
             try:
                 # --- Field Extraction and Cleaning ---
-                ctu_id = str(row.get('CTU_ID', '')).strip()
+                ctu_id = normalize_ctu_id_value(row.get('CTU_ID', ''))
                 
                 print(f"\n{'='*80}")
                 print(f"🔍 PROCESSING ROW {index+2} - CTU_ID: {ctu_id}")
@@ -2758,6 +2891,9 @@ def import_ojt_view(request):
                 middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
                 last_name = str(row.get('Last_Name', '')).strip()
                 gender_raw = str(row.get('Gender', '')).strip()
+
+                ojt_email_value = row.get('Email')
+                ojt_email = str(ojt_email_value).strip() if pd.notna(ojt_email_value) else None
                 
                 # DEBUG: Show all available columns and company data
                 print(f"📋 Available columns in this row: {list(row.keys())}")
@@ -2864,16 +3000,38 @@ def import_ojt_view(request):
                 
                 # IMPORTANT: Check if this CTU_ID was imported by a different coordinator
                 if existing_user_check:
+                    assigned_coordinator = None
+                    try:
+                        ojt_company_profile = getattr(existing_user_check, 'ojt_company_profile', None)
+                        if ojt_company_profile and ojt_company_profile.coordinator:
+                            assigned_coordinator = ojt_company_profile.coordinator
+                    except Exception:
+                        assigned_coordinator = None
+                    
+                    if assigned_coordinator and assigned_coordinator.lower() != coordinator_username.lower():
+                        error_msg = (
+                            f"Row {index + 2}: CTU_ID {ctu_id} belongs to coordinator "
+                            f"{assigned_coordinator}. Duplicate imports are not allowed."
+                        )
+                        print(f"❌ BLOCKED: {error_msg}")
+                        errors.append(error_msg)
+                        skipped_count += 1
+                        continue
+                    
                     # Check if user has academic_info (OJT students should have this)
                     if hasattr(existing_user_check, 'academic_info') and existing_user_check.academic_info:
                         user_year = existing_user_check.academic_info.year_graduated
                         user_section = getattr(existing_user_check.academic_info, 'section', None) or ''
                         
                         # Find which coordinator(s) imported this user's year+section
-                        existing_imports = OJTImport.objects.filter(
-                            batch_year=user_year,
-                            section=user_section
-                        )
+                        filter_kwargs = {'batch_year': user_year}
+                        if user_section:
+                            filter_kwargs['section__iexact'] = user_section
+                        existing_imports = OJTImport.objects.filter(**filter_kwargs)
+                        
+                        # If nothing matched with section filter but we have a year, fall back to year-only
+                        if not existing_imports.exists() and user_year:
+                            existing_imports = OJTImport.objects.filter(batch_year=user_year)
                         
                         if existing_imports.exists():
                             # Check all imports for this year+section
@@ -3114,7 +3272,6 @@ def import_ojt_view(request):
                             # If this is SECOND import (has new company but didn't have one before)
                             # Set start date to TODAY automatically
                             if not has_existing_company:
-                                from django.utils import timezone
                                 ojt_start_date = timezone.now().date()
                                 print(f"Row {index+2} - SECOND IMPORT DETECTED! Auto-setting start_date to TODAY: {ojt_start_date}")
                                 
@@ -3148,30 +3305,19 @@ def import_ojt_view(request):
                         if 'ojt_end_date' in locals() and ojt_end_date:
                             ojt_info.ojt_end_date = ojt_end_date
                         
-                        # Update basic OJT information fields
-                        ojt_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
-                        
-                        # Email is required - try to get from Excel, or fallback to UserProfile
-                        if not ojt_email:
-                            # Try to get email from UserProfile if not in Excel
-                            if profile and hasattr(profile, 'email') and profile.email:
-                                ojt_email = profile.email
-                                print(f"Row {index+2} - Email not in Excel, using email from UserProfile: {ojt_email}")
-                        
-                        # Email is required - validate it exists
-                        if not ojt_email:
-                            error_msg = f"Row {index + 2}: Email is required for OJT students"
-                            print(f"SKIPPING: {error_msg}")
-                            errors.append(error_msg)
-                            skipped_count += 1
-                            continue
-                        
-                        ojt_info.email = ojt_email
-                        # Also update UserProfile email if it's different
-                        if profile and (not profile.email or profile.email != ojt_email):
-                            profile.email = ojt_email
-                            profile.save()
-                            print(f"Row {index+2} - Updated UserProfile email to match OJTInfo: {ojt_email}")
+                        # Ensure UserProfile always has an email even if template skipped it
+                        preferred_email = ojt_email
+                        if not preferred_email and profile and getattr(profile, 'email', None):
+                            preferred_email = profile.email
+                            print(f"Row {index+2} - Email not in Excel, keeping existing UserProfile email: {preferred_email}")
+                        if not preferred_email:
+                            preferred_email = f"{ctu_id}@placeholder.local"
+                            print(f"Row {index+2} - No email available; using placeholder {preferred_email}")
+
+                        if profile and preferred_email and (profile.email != preferred_email):
+                            profile.email = preferred_email
+                            profile.save(update_fields=['email'])
+                            print(f"Row {index+2} - Updated UserProfile email to: {preferred_email}")
                         
                         ojt_info.save()
                         
@@ -3320,7 +3466,6 @@ def import_ojt_view(request):
                         user=ojt_user,
                         ojt_end_date=ojt_end_date if 'ojt_end_date' in locals() else None,
                         ojtstatus=final_status,
-                        email=ojt_email,
                     )
                     if 'ojt_start_date' in locals() and ojt_start_date:
                         print(f"Row {index+2} - Created new user with status: '{final_status}' (start date exists)")
@@ -3781,7 +3926,7 @@ def ojt_by_year_view(request):
                 'age': getattr(profile, 'calculated_age', None) if profile else None,
                 'phone_number': getattr(profile, 'phone_num', None) if profile else None,
                 'address': getattr(profile, 'address', None) if profile else None,
-                'email': getattr(ojt_info, 'email', None) if ojt_info else None,  # Student email from OJTInfo
+                'email': getattr(ojt, 'email', None) or getattr(profile, 'email', None) if profile else getattr(ojt, 'email', None),
                 'civil_status': getattr(profile, 'civil_status', None) if profile else None,
                 'social_media': getattr(profile, 'social_media', None) if profile else None,
                 'course': getattr(academic_info, 'program', None) if academic_info else None,
@@ -10968,18 +11113,12 @@ def inventory_items_view(request):
         is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
 
         if request.method == 'GET':
-            items = RewardInventoryItem.objects.all().order_by('-updated_at')
-            items_data = []
-            for item in items:
-                items_data.append({
-                    'id': item.item_id,
-                    'name': item.name,
-                    'type': item.type,
-                    'quantity': item.quantity,
-                    'value': item.value,
-                    'created_at': item.created_at.isoformat() if item.created_at else None,
-                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
-                })
+            items_qs = RewardInventoryItem.objects.all().order_by('-updated_at')
+
+            items_data = [
+                serialize_inventory_item(item, include_admin_fields=is_admin)
+                for item in items_qs
+            ]
 
             return JsonResponse({
                 'success': True,
@@ -11032,19 +11171,115 @@ def inventory_items_view(request):
         return JsonResponse({
             'success': True,
             'message': 'Inventory item created successfully',
-            'item': {
-                'id': item.item_id,
-                'name': item.name,
-                'type': item.type,
-                'quantity': item.quantity,
-                'value': item.value,
-                'created_at': item.created_at.isoformat() if item.created_at else None,
-                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
-            }
+            'item': serialize_inventory_item(item, include_admin_fields=True),
         }, status=201)
 
     except Exception as e:
         logger.error(f"inventory_items_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def inventory_analytics_view(request):
+    """Provide redemption trends and simple stock forecasts for admins."""
+    try:
+        user = request.user
+        is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+        if not is_admin:
+            return JsonResponse(
+                {'success': False, 'message': 'Admin access required'},
+                status=403
+            )
+
+        now_ts = timezone.now()
+        lookback_start = now_ts - timedelta(days=INVENTORY_ANALYTICS_LOOKBACK_DAYS)
+
+        items_with_stats = (
+            RewardInventoryItem.objects
+            .annotate(
+                total_claims=Count('requests', filter=Q(requests__status='claimed')),
+                claims_lookback=Count(
+                    'requests',
+                    filter=Q(requests__status='claimed', requests__requested_at__gte=lookback_start)
+                ),
+                last_claimed_at=Max(
+                    'requests__requested_at',
+                    filter=Q(requests__status='claimed')
+                ),
+            )
+            .order_by('name')
+        )
+
+        items_data = []
+        total_stock = 0
+        total_claims_lookback = 0
+
+        for item in items_with_stats:
+            quantity = max(getattr(item, 'quantity', 0), 0)
+            claims_30d = getattr(item, 'claims_lookback', 0) or 0
+            total_claims = getattr(item, 'total_claims', 0) or 0
+            total_stock += quantity
+            total_claims_lookback += claims_30d
+
+            avg_daily = claims_30d / INVENTORY_ANALYTICS_LOOKBACK_DAYS if claims_30d else 0
+            projected_run_out = round(quantity / avg_daily, 1) if avg_daily and quantity > 0 else None
+
+            if claims_30d >= 10:
+                demand_level = 'high'
+            elif claims_30d >= 3:
+                demand_level = 'medium'
+            else:
+                demand_level = 'low'
+
+            items_data.append({
+                'id': item.item_id,
+                'name': item.name,
+                'type': item.type,
+                'quantity': quantity,
+                'value': item.value,
+                'total_claims': total_claims,
+                'claims_last_30_days': claims_30d,
+                'avg_daily_redemption': round(avg_daily, 2),
+                'projected_run_out_days': projected_run_out,
+                'demand_level': demand_level,
+                'last_claimed_at': item.last_claimed_at.isoformat() if item.last_claimed_at else None,
+                'stockout_risk': projected_run_out is not None and projected_run_out <= 14,
+            })
+
+        avg_daily_overall = (
+            round(total_claims_lookback / INVENTORY_ANALYTICS_LOOKBACK_DAYS, 2)
+            if total_claims_lookback else 0
+        )
+
+        top_movers = sorted(
+            items_data,
+            key=lambda x: (x['claims_last_30_days'], x['total_claims']),
+            reverse=True
+        )[:5]
+        slow_movers = [item for item in items_data if item['claims_last_30_days'] == 0][:5]
+
+        response_payload = {
+            'success': True,
+            'generated_at': now_ts.isoformat(),
+            'lookback_days': INVENTORY_ANALYTICS_LOOKBACK_DAYS,
+            'summary': {
+                'total_items': len(items_data),
+                'total_stock': total_stock,
+                'total_claims_30d': total_claims_lookback,
+                'avg_daily_redemption': avg_daily_overall,
+            },
+            'items': items_data,
+            'top_movers': top_movers,
+            'slow_movers': slow_movers,
+        }
+        return JsonResponse(response_payload)
+    except Exception as e:
+        logger.error(f"inventory_analytics_view error: {e}")
         return JsonResponse(
             {'success': False, 'message': f'Error: {str(e)}'},
             status=500
@@ -11074,15 +11309,7 @@ def inventory_item_detail_view(request, item_id):
         if request.method == 'GET':
             return JsonResponse({
                 'success': True,
-                'item': {
-                    'id': item.item_id,
-                    'name': item.name,
-                    'type': item.type,
-                    'quantity': item.quantity,
-                    'value': item.value,
-                    'created_at': item.created_at.isoformat() if item.created_at else None,
-                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
-                }
+                'item': serialize_inventory_item(item, include_admin_fields=is_admin),
             })
 
         if not is_admin:
@@ -11092,11 +11319,42 @@ def inventory_item_detail_view(request, item_id):
             )
 
         if request.method == 'DELETE':
-            logger.info(f"Inventory item deleted by {user.full_name}: {item}")
-            item.delete()
+            with transaction.atomic():
+                active_requests = list(
+                    RewardRequest.objects.select_related('user').filter(
+                        reward_item=item,
+                        status__in=['pending', 'approved', 'ready_for_pickup']
+                    )
+                )
+
+                for req in active_requests:
+                    req.status = 'rejected'
+                    note = 'Item removed from inventory'
+                    if req.notes:
+                        req.notes = f"{req.notes}\n{note}"
+                    else:
+                        req.notes = note
+                    req.save(update_fields=['status', 'notes'])
+
+                    Notification.objects.create(
+                        user=req.user,
+                        notif_type='Reward Request',
+                        subject='Reward Request Cancelled',
+                        notifi_content=f'Your request for "{item.name}" was cancelled because the reward was removed from inventory.',
+                        notif_date=timezone.now(),
+                        is_read=False
+                    )
+
+                logger.info(
+                    f"Inventory item deleted by {user.full_name}: {item}. "
+                    f"Cancelled {len(active_requests)} active requests."
+                )
+                item.delete()
+
             return JsonResponse({
                 'success': True,
-                'message': 'Inventory item deleted successfully'
+                'message': 'Inventory item deleted successfully',
+                'requests_cancelled': len(active_requests)
             })
 
         # PUT - update item
@@ -11149,15 +11407,7 @@ def inventory_item_detail_view(request, item_id):
         return JsonResponse({
             'success': True,
             'message': 'Inventory item updated successfully',
-            'item': {
-                'id': item.item_id,
-                'name': item.name,
-                'type': item.type,
-                'quantity': item.quantity,
-                'value': item.value,
-                'created_at': item.created_at.isoformat() if item.created_at else None,
-                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
-            }
+            'item': serialize_inventory_item(item, include_admin_fields=is_admin),
         })
 
     except Exception as e:
@@ -11430,7 +11680,7 @@ def request_reward_view(request):
                     {'success': False, 'message': 'You already have an active request for this reward.'},
                     status=400
                 )
-
+            
             reward_request = RewardRequest.objects.create(
                 user=user,
                 reward_item=reward_item,
@@ -11494,6 +11744,93 @@ def request_reward_view(request):
         )
     except Exception as e:
         logger.error(f"request_reward_view error: {e}")
+        return JsonResponse(
+            {'success': False, 'message': f'Error: {str(e)}'},
+            status=500
+        )
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def cancel_reward_request_view(request, request_id):
+    """Allow a user to cancel their own pending reward request."""
+    try:
+        user = request.user
+        try:
+            reward_request = RewardRequest.objects.select_related('reward_item', 'user').get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse(
+                {'success': False, 'message': 'Reward request not found'},
+                status=404
+            )
+
+        if reward_request.user_id != user.user_id:
+            return JsonResponse(
+                {'success': False, 'message': 'You can only cancel your own requests'},
+                status=403
+            )
+
+        if reward_request.status not in ['pending', 'approved', 'ready_for_pickup']:
+            return JsonResponse(
+                {'success': False, 'message': f'Cannot cancel a {reward_request.status} request'},
+                status=400
+            )
+
+        # Check if user has already cancelled a request today (limit: 1 per day)
+        now = timezone.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+        today_cancellations = RewardRequest.objects.filter(
+            user=user,
+            status='cancelled',
+            updated_at__gte=start_of_day,
+            updated_at__lte=end_of_day
+        ).exclude(request_id=request_id).count()  # Exclude current request
+        
+        if today_cancellations >= 1:
+            return JsonResponse(
+                {
+                    'success': False,
+                    'message': 'You can only cancel 1 reward request per day. Please try again tomorrow.'
+                },
+                status=400
+            )
+
+        reward_request.status = 'cancelled'
+        cancellation_note = 'Request cancelled by user'
+        if reward_request.notes:
+            reward_request.notes = f"{reward_request.notes}\n{cancellation_note}"
+        else:
+            reward_request.notes = cancellation_note
+        reward_request.save(update_fields=['status', 'notes'])
+
+        notification = Notification.objects.create(
+            user=reward_request.user,
+            notif_type='Reward Request',
+            subject='Reward Request Cancelled',
+            notifi_content=f'You cancelled your request for "{reward_request.reward_item.name}".',
+            notif_date=timezone.now(),
+            is_read=False
+        )
+        try:
+            from apps.messaging.notification_broadcaster import broadcast_notification
+            broadcast_notification(notification)
+        except Exception as e:
+            logger.warning(f"Failed to broadcast cancellation notification: {e}")
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Reward request cancelled successfully',
+            'request': {
+                'request_id': reward_request.request_id,
+                'status': reward_request.status,
+                'notes': reward_request.notes,
+            }
+        })
+    except Exception as e:
+        logger.error(f"cancel_reward_request_view error: {e}")
         return JsonResponse(
             {'success': False, 'message': f'Error: {str(e)}'},
             status=500

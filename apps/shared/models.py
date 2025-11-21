@@ -1542,6 +1542,14 @@ class OJTInfo(models.Model):
     def __str__(self):
         return f"OJT info for {self.user.full_name} - Status: {self.ojtstatus}"
 
+    @property
+    def email(self):
+        """Expose the student's email based on their profile or user record."""
+        profile = getattr(self.user, 'profile', None)
+        if profile and getattr(profile, 'email', None):
+            return profile.email
+        return getattr(self.user, 'email', None)
+
 
 class OJTCompanyProfile(models.Model):
     """OJT Company Profile - Stores company information for OJT students"""
@@ -1920,6 +1928,7 @@ class RewardRequest(models.Model):
         ('claimed', 'Claimed'),
         ('expired', 'Expired'),
         ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled'),
     ]
     
     request_id = models.AutoField(primary_key=True)
@@ -1934,6 +1943,8 @@ class RewardRequest(models.Model):
     approved_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_rewards')
     expires_at = models.DateTimeField(null=True, blank=True)  # For voucher rewards (5 days from approval)
     notes = models.TextField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)  # When request was cancelled
+    cancellation_stage = models.CharField(max_length=20, null=True, blank=True)  # Stage when cancelled (pending/approved/ready_for_pickup)
     
     class Meta:
         db_table = 'shared_rewardrequest'

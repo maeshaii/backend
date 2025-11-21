@@ -169,6 +169,7 @@ urlpatterns = [
     
     # Reward Inventory Management
     path('inventory/', views.inventory_items_view, name='inventory_items'),
+    path('inventory/analytics/', views.inventory_analytics_view, name='inventory_analytics'),
     path('inventory/<int:item_id>/', views.inventory_item_detail_view, name='inventory_item_detail'),
     path('rewards/give/', views.give_reward_view, name='give_reward'),
     path('rewards/history/', views.reward_history_view, name='reward_history'),
@@ -176,6 +177,8 @@ urlpatterns = [
     path('rewards/requests/', views.reward_requests_list_view, name='reward_requests'),
     path('rewards/requests/<int:request_id>/approve/', views.approve_reward_request_view, name='approve_reward_request'),
     path('rewards/requests/<int:request_id>/claim/', views.claim_reward_request_view, name='claim_reward_request'),
+    path('rewards/requests/<int:request_id>/cancel/', views.cancel_reward_request_view, name='cancel_reward_request'),
+    path('rewards/requests/<int:request_id>/cancel', views.cancel_reward_request_view, name='cancel_reward_request_no_slash'),
     path('rewards/requests/<int:request_id>/upload-voucher/', views.upload_voucher_file_view, name='upload_voucher_file'),
     
 ]
