@@ -6955,7 +6955,7 @@ def recent_searches_view(request):
                     'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
                     'm_name': getattr(searched_user, 'm_name', ''),
                     'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
-                    'profile_pic': build_profile_pic_url(searched_user),
+                    'profile_pic': build_profile_pic_url(searched_user, request),
                 }
                 entry = {
                     'id': search.id,
@@ -6994,6 +6994,8 @@ def recent_searches_view(request):
             
         elif request.method == "POST":
             try:
+                from apps.messaging.notification_broadcaster import broadcast_recent_search_update
+                
                 data = json.loads(request.body or '{}')
             except json.JSONDecodeError:
                 return JsonResponse({'success': False, 'error': 'Invalid JSON'}, status=400)
@@ -7029,16 +7031,65 @@ def recent_searches_view(request):
                 old_searches = RecentSearch.objects.filter(owner=user).order_by('-created_at')[10:]
                 RecentSearch.objects.filter(id__in=[s.id for s in old_searches]).delete()
             
+            # Broadcast update to all connected clients (web and mobile)
+            recent_query = RecentSearch.objects.filter(owner=user).select_related('searched_user').order_by('-created_at')[:10]
+            searches_data = []
+            flat_recent = []
+            for search in recent_query:
+                searched_user_obj = search.searched_user
+                user_payload = {
+                    'user_id': getattr(searched_user_obj, 'user_id', getattr(searched_user_obj, 'id', None)),
+                    'f_name': getattr(searched_user_obj, 'f_name', '') or getattr(searched_user_obj, 'first_name', ''),
+                    'm_name': getattr(searched_user_obj, 'm_name', ''),
+                    'l_name': getattr(searched_user_obj, 'l_name', '') or getattr(searched_user_obj, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user_obj, request),
+                }
+                searches_data.append({
+                    'id': search.id,
+                    'searched_user': user_payload,
+                    'created_at': search.created_at.isoformat(),
+                })
+                flat_recent.append({
+                    'id': search.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': search.created_at.isoformat(),
+                })
+            
+            broadcast_recent_search_update(
+                getattr(user, 'user_id', None) or getattr(user, 'id', None),
+                searches_data,
+                flat_recent
+            )
+            
             return JsonResponse({
                 'success': True,
                 'message': 'Recent search saved'
             })
             
         elif request.method == "DELETE":
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_recent_search_update
+            except ImportError:
+                pass
+            
             # Clear all recent searches (mobile-friendly)
             RecentSearch.objects.filter(owner=user).delete()
             logger.info("recent_searches_view DELETE cleared all searches for user=%s", 
                        getattr(user, 'user_id', None) or getattr(user, 'id', None))
+            
+            # Broadcast empty list to all connected clients (web and mobile)
+            try:
+                broadcast_recent_search_update(
+                    getattr(user, 'user_id', None) or getattr(user, 'id', None),
+                    [],
+                    []
+                )
+            except NameError:
+                pass  # broadcast_recent_search_update not available
+            
             return JsonResponse({'success': True, 'message': 'All recent searches cleared'})
             
     except Exception as e:
@@ -7050,9 +7101,60 @@ def recent_searches_view(request):
 def recent_search_delete_view(request, search_id):
     """Delete a specific recent search"""
     try:
+        from apps.messaging.notification_broadcaster import broadcast_recent_search_update
+        
         user = request.user
         recent_search = RecentSearch.objects.get(id=search_id, owner=user)
         recent_search.delete()
+        
+        # Broadcast update to all connected clients (web and mobile)
+        def serialize_recent_searches(owner, limit_value=10):
+            try:
+                limit_value = int(limit_value)
+            except (TypeError, ValueError):
+                limit_value = 10
+            limit_value = max(1, min(limit_value, 50))
+            
+            qs = (
+                RecentSearch.objects
+                .filter(owner=owner)
+                .select_related('searched_user')
+                .order_by('-created_at')[:limit_value]
+            )
+            
+            detailed_results = []
+            legacy_results = []
+            for rs in qs:
+                searched_user = rs.searched_user
+                user_payload = {
+                    'user_id': getattr(searched_user, 'user_id', getattr(searched_user, 'id', None)),
+                    'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
+                    'm_name': getattr(searched_user, 'm_name', ''),
+                    'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
+                    'profile_pic': build_profile_pic_url(searched_user, request),
+                }
+                detailed_results.append({
+                    'id': rs.id,
+                    'searched_user': user_payload,
+                    'created_at': rs.created_at.isoformat(),
+                })
+                legacy_results.append({
+                    'id': rs.id,
+                    'user_id': user_payload['user_id'],
+                    'f_name': user_payload['f_name'],
+                    'l_name': user_payload['l_name'],
+                    'profile_pic': user_payload['profile_pic'],
+                    'created_at': rs.created_at.isoformat(),
+                })
+            return detailed_results, legacy_results
+        
+        # Serialize and broadcast updated list
+        detailed_results, legacy_results = serialize_recent_searches(user)
+        broadcast_recent_search_update(
+            getattr(user, 'user_id', None) or getattr(user, 'id', None),
+            detailed_results,
+            legacy_results
+        )
         
         return JsonResponse({
             'success': True,
@@ -10067,7 +10169,7 @@ def recent_searches_view(request):
                     'f_name': getattr(searched_user, 'f_name', '') or getattr(searched_user, 'first_name', ''),
                     'm_name': getattr(searched_user, 'm_name', ''),
                     'l_name': getattr(searched_user, 'l_name', '') or getattr(searched_user, 'last_name', ''),
-                    'profile_pic': build_profile_pic_url(searched_user),
+                    'profile_pic': build_profile_pic_url(searched_user, request),
                 }
                 detailed_results.append({
                     'id': rs.id,
@@ -10112,17 +10214,11 @@ def recent_searches_view(request):
             RecentSearch.objects.create(owner=request.user, searched_user=target)
             logger.info("recent_searches_view POST created owner=%s searched_user=%s", getattr(request.user, 'user_id', None) or getattr(request.user, 'id', None), getattr(target, 'user_id', None) or getattr(target, 'id', None))
 
-            # Diagnostics: log DB connection and counts to ensure we're writing to the expected database
-            try:
-                from django.db import connection
-                settings_dict = getattr(connection, 'settings_dict', {})
-                db_name = settings_dict.get('NAME')
-                db_host = settings_dict.get('HOST')
-                db_port = settings_dict.get('PORT')
-                owner_count = RecentSearch.objects.filter(owner=request.user).count()
-                logger.info("recent_searches_view DB: name=%s host=%s port=%s owner_recent_count=%s", db_name, db_host, db_port, owner_count)
-            except Exception as diag_e:
-                logger.warning("recent_searches_view diagnostics failed: %s", diag_e)
+            # Mobile-friendly: Limit total searches to prevent bloat (keep only 10 most recent)
+            total_searches = RecentSearch.objects.filter(owner=request.user).count()
+            if total_searches > 10:
+                old_searches = RecentSearch.objects.filter(owner=request.user).order_by('-created_at')[10:]
+                RecentSearch.objects.filter(id__in=[s.id for s in old_searches]).delete()
 
             detailed_results, legacy_results = serialize_recent_searches(request.user)
             broadcast_recent_search_update(
