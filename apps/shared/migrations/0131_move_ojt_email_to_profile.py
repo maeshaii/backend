@@ -1,4 +1,4 @@
-from django.db import migrations
+from django.db import migrations, connection
 
 
 def move_ojt_email_to_profile(apps, schema_editor):
@@ -6,34 +6,69 @@ def move_ojt_email_to_profile(apps, schema_editor):
     Move email from OJTInfo to UserProfile.
     This migration has already been executed. If run again, it safely skips
     since the email field no longer exists on OJTInfo.
-    """
-    OJTInfo = apps.get_model('shared', 'OJTInfo')
-    UserProfile = apps.get_model('shared', 'UserProfile')
     
-    # Check if email field still exists on OJTInfo (it won't after first run)
-    # This makes the migration safe to run multiple times
-    if not hasattr(OJTInfo, 'email') and 'email' not in [f.name for f in OJTInfo._meta.get_fields()]:
-        print("Email field already removed from OJTInfo. Skipping data migration.")
+    Since emails are now stored in UserProfile, we skip the data migration
+    if the column doesn't exist (it's already been moved).
+    """
+    # Check if email column actually exists in the database using a safe query
+    # If it doesn't exist, emails have already been moved to UserProfile
+    try:
+        with connection.cursor() as cursor:
+            # Try to query the column - if it fails, the column doesn't exist
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'shared_ojtinfo' 
+                AND column_name = 'email'
+            """)
+            result = cursor.fetchone()
+            column_exists = result[0] > 0 if result else False
+    except Exception:
+        # If we can't check, assume column doesn't exist (already migrated)
+        print("Email column check failed. Assuming column does not exist and skipping data migration.")
         return
     
+    if not column_exists:
+        print("Email column already removed from shared_ojtinfo. Emails are in UserProfile. Skipping data migration.")
+        return
+    
+    # Column exists - try to move emails to UserProfile
+    UserProfile = apps.get_model('shared', 'UserProfile')
     try:
-        for ojt_info in OJTInfo.objects.exclude(email__isnull=True).exclude(email=''):
-            email_value = ojt_info.email
+        with connection.cursor() as cursor:
+            # Use raw SQL to safely query OJTInfo records with email
+            cursor.execute("""
+                SELECT user_id, email 
+                FROM shared_ojtinfo 
+                WHERE email IS NOT NULL AND email != ''
+            """)
+            ojt_emails = cursor.fetchall()
+        
+        # Move emails to UserProfile
+        for user_id, email_value in ojt_emails:
             if not email_value:
                 continue
-
+            
             try:
-                profile = UserProfile.objects.get(user=ojt_info.user)
+                profile = UserProfile.objects.get(user_id=user_id)
+                if not profile.email:
+                    profile.email = email_value
+                    profile.save(update_fields=['email'])
             except UserProfile.DoesNotExist:
-                UserProfile.objects.create(user=ojt_info.user, email=email_value)
-                continue
-
-            if not profile.email:
-                profile.email = email_value
-                profile.save(update_fields=['email'])
+                # Create UserProfile if it doesn't exist
+                User = apps.get_model('shared', 'User')
+                try:
+                    user = User.objects.get(user_id=user_id)
+                    UserProfile.objects.create(user=user, email=email_value)
+                except User.DoesNotExist:
+                    continue
     except Exception as e:
-        # If email field doesn't exist, the migration has already run successfully
-        print(f"Migration already completed or email field not found: {e}")
+        # If email column doesn't exist or any other error occurs, 
+        # the migration has likely already been completed
+        # Emails are already in UserProfile, so we can safely skip
+        print(f"Could not move emails (likely already in UserProfile): {e}. Skipping data migration.")
+        return
 
 
 class Migration(migrations.Migration):

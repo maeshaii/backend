@@ -10,12 +10,19 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveIndex(
-            model_name='ojtinfo',
-            name='shared_ojti_email_5c6bf2_idx',
+        # Use RunSQL to safely remove index and field if they exist
+        # This makes the migration safe to run even if the column was already removed
+        migrations.RunSQL(
+            sql=[
+                # Remove index if it exists (PostgreSQL/MySQL compatible)
+                "DROP INDEX IF EXISTS shared_ojti_email_5c6bf2_idx;",
+                # For PostgreSQL, also try this format
+                "ALTER TABLE shared_ojtinfo DROP CONSTRAINT IF EXISTS shared_ojti_email_5c6bf2_idx;",
+            ],
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RemoveField(
-            model_name='ojtinfo',
-            name='email',
+        migrations.RunSQL(
+            sql="ALTER TABLE shared_ojtinfo DROP COLUMN IF EXISTS email;",
+            reverse_sql="ALTER TABLE shared_ojtinfo ADD COLUMN IF NOT EXISTS email varchar(254);",
         ),
     ]
