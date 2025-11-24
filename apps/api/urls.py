@@ -61,6 +61,7 @@ urlpatterns = [
     path('tracker/questions/', tracker_questions_view, name='tracker_questions'),
     path('tracker/responses/', submit_tracker_response_view, name='submit_tracker_response'),  # POST for submission
     path('tracker/list-responses/', tracker_responses_view, name='tracker_responses'),         # GET for listing
+    path('tracker/employment-respondents/', employment_history_respondents_view, name='employment_history_respondents'),  # GET for users with employment history
     path('tracker/user-responses/<int:user_id>/', tracker_responses_by_user_view, name='tracker_responses_by_user'),
     path('tracker/check-status/', check_user_tracker_status_view, name='check_user_tracker_status'),
     path('tracker/save-draft/', save_tracker_draft_view, name='save_tracker_draft'),  # POST for auto-save draft
