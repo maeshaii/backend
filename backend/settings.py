@@ -121,7 +121,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://10.0.2.2:8000",
     "http://192.168.2.112:8000",
     "http://192.168.101.70:8000",
-    "https://nonalliterative-brian-tastefully.ngrok-free.dev",
+    "https://carlos-unripening-henley.ngrok-free.dev",
     "http://172.16.59.112:8000",
     "https://nxlclfy-akmia-8081.exp.direct",
 
@@ -304,14 +304,28 @@ DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHER
 
 # CACHING CONFIGURATION
 # Redis cache for production - supports multiple servers and WebSocket scaling
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-        'KEY_PREFIX': 'capstone',
-        'TIMEOUT': 300,  # 5 minutes default
+# In DEBUG mode, uses dummy cache by default to avoid Redis connection errors
+# Set USE_REDIS=true in .env to force Redis usage even in development
+REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1')
+USE_REDIS = os.getenv('USE_REDIS', 'false' if DEBUG else 'true').lower() == 'true'
+
+if USE_REDIS:
+    # Use Redis cache (production or when explicitly enabled)
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+            'KEY_PREFIX': 'capstone',
+            'TIMEOUT': 300,  # 5 minutes default
+        }
     }
-}
+else:
+    # Use dummy cache (development - no Redis needed, no errors)
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
+        }
+    }
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
