@@ -81,10 +81,30 @@ class RedisConnectionManager:
             
             # Add to user's connections set
             user_connections_key = f"{self.USER_CONNECTIONS_PREFIX}{user_id}"
-            user_connections = cache.get(user_connections_key, set())
-            if not isinstance(user_connections, set):
-                user_connections = set()
-            user_connections.add(channel_name)
+            user_connections = cache.get(user_connections_key)
+            if user_connections is None:
+                user_connections = []
+                logger.debug(f"Creating new connection list for user {user_id}")
+            elif isinstance(user_connections, list):
+                # Already a list, use as is
+                logger.debug(f"Found existing connection list for user {user_id} with {len(user_connections)} connections")
+            elif isinstance(user_connections, set):
+                # Convert set to list
+                user_connections = list(user_connections)
+                logger.debug(f"Converted set to list for user {user_id}")
+            else:
+                # Unexpected type, create new list
+                logger.warning(f"Unexpected connection type for user {user_id}: {type(user_connections)}, creating new list")
+                user_connections = []
+            
+            # Add channel if not already present
+            if channel_name not in user_connections:
+                user_connections.append(channel_name)
+                logger.info(f"Added connection {channel_name} for user {user_id} (conversation_id={conversation_id}). Total connections: {len(user_connections)}")
+            else:
+                logger.debug(f"Connection {channel_name} already exists for user {user_id}")
+            
+            # Store as a list for better Redis compatibility
             cache.set(user_connections_key, user_connections, timeout=self.CONNECTION_TTL)
             
             # Add to conversation's users set
@@ -133,11 +153,17 @@ class RedisConnectionManager:
             
             # Remove from user's connections
             user_connections_key = f"{self.USER_CONNECTIONS_PREFIX}{user_id}"
-            user_connections = cache.get(user_connections_key, set())
-            if isinstance(user_connections, set):
+            user_connections = cache.get(user_connections_key)
+            if user_connections is not None:
+                # Handle both set and list
+                if isinstance(user_connections, list):
+                    user_connections = set(user_connections)
+                elif not isinstance(user_connections, set):
+                    user_connections = set()
+                
                 user_connections.discard(channel_name)
                 if user_connections:
-                    cache.set(user_connections_key, user_connections, timeout=self.CONNECTION_TTL)
+                    cache.set(user_connections_key, list(user_connections), timeout=self.CONNECTION_TTL)
                 else:
                     cache.delete(user_connections_key)
                     # Update user presence to offline if no more connections
@@ -249,11 +275,40 @@ class RedisConnectionManager:
         """
         try:
             user_connections_key = f"{self.USER_CONNECTIONS_PREFIX}{user_id}"
-            connections = cache.get(user_connections_key, set())
-            return list(connections) if isinstance(connections, set) else []
+            connections = cache.get(user_connections_key)
+            
+            if connections is None:
+                logger.debug(f"No connections found for user {user_id} (key: {user_connections_key})")
+                return []
+            
+            # Handle both set and list (since we store as list for Redis compatibility)
+            if isinstance(connections, list):
+                # Filter out any None or empty values
+                valid_connections = [c for c in connections if c]
+                logger.debug(f"Found {len(valid_connections)} valid connections for user {user_id} (list, filtered from {len(connections)})")
+                return valid_connections
+            elif isinstance(connections, set):
+                valid_connections = [c for c in connections if c]
+                logger.debug(f"Found {len(valid_connections)} valid connections for user {user_id} (set, converting to list)")
+                return valid_connections
+            elif isinstance(connections, (str, bytes)):
+                # Handle case where Redis might return a string representation
+                try:
+                    import json
+                    parsed = json.loads(connections) if isinstance(connections, str) else json.loads(connections.decode())
+                    if isinstance(parsed, list):
+                        valid_connections = [c for c in parsed if c]
+                        logger.debug(f"Found {len(valid_connections)} valid connections for user {user_id} (parsed from string)")
+                        return valid_connections
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    logger.warning(f"Failed to parse connection string for user {user_id}")
+            else:
+                logger.warning(f"Unexpected connection type for user {user_id}: {type(connections)}, value: {connections}")
+            
+            return []
             
         except Exception as e:
-            logger.error(f"Failed to get user connections: {e}")
+            logger.error(f"Failed to get user connections for user {user_id}: {e}", exc_info=True)
             return []
     
     def get_connection_analytics(self, conversation_id: Optional[int] = None) -> Dict:

@@ -423,8 +423,58 @@ def search_users(request):
         user_status='active',
     ).exclude(user_id=request.user.user_id).distinct()[:10]
     from apps.shared.serializers import UserSerializer
+    from django.conf import settings
     serializer = UserSerializer(users, many=True)
-    return Response({'users': serializer.data, 'count': len(users), 'query': query})
+    
+    # Enhance response with avatar_url for each user
+    def get_profile_pic_url(user, request=None):
+        """Get profile picture URL for a user"""
+        if not user or not hasattr(user, 'profile'):
+            return None
+        try:
+            profile = getattr(user, 'profile', None)
+            if not profile:
+                return None
+            profile_pic = getattr(profile, 'profile_pic', None)
+            if not profile_pic:
+                return None
+            
+            # Get the URL
+            pic_url = profile_pic.url if hasattr(profile_pic, 'url') else str(profile_pic)
+            if not pic_url:
+                return None
+            
+            # Build absolute URL
+            if request and not str(pic_url).startswith('http'):
+                return request.build_absolute_uri(pic_url)
+            elif not str(pic_url).startswith('http'):
+                # Use settings to build absolute URL
+                base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+                if pic_url.startswith('/'):
+                    return f"{base_url}{pic_url}"
+                return f"{base_url}/{pic_url}"
+            return pic_url
+        except Exception:
+            return None
+    
+    users_data = []
+    for user_data in serializer.data:
+        # Find the corresponding user object
+        user_obj = next((u for u in users if u.user_id == user_data['user_id']), None)
+        if user_obj:
+            avatar_url = get_profile_pic_url(user_obj, request)
+            user_data['avatar_url'] = avatar_url
+            # Ensure m_name is included (UserSerializer should include it, but double-check)
+            if 'm_name' not in user_data:
+                user_data['m_name'] = getattr(user_obj, 'm_name', None)
+        else:
+            user_data['avatar_url'] = None
+            if 'm_name' not in user_data:
+                user_data['m_name'] = None
+        users_data.append(user_data)
+    
+    logger.info(f"Search users API returning {len(users_data)} users for query '{query}'")
+    return Response({'users': users_data, 'count': len(users_data), 'query': query})
 
 
 @api_view(['GET'])
