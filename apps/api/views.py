@@ -6092,6 +6092,7 @@ def repost_detail_view(request, repost_id):
                 'order': img.order
             } for img in repost.post.images.all()],
             'created_at': repost.post.created_at.isoformat() if hasattr(repost.post, 'created_at') else None,
+            'reposts_count': Repost.objects.filter(post=repost.post).count(),
         }
     elif repost.forum:
         # Forum repost
@@ -6113,6 +6114,7 @@ def repost_detail_view(request, repost_id):
                 'order': img.order
             } for img in repost.forum.images.all()],
             'created_at': repost.forum.created_at.isoformat() if hasattr(repost.forum, 'created_at') else None,
+            'reposts_count': Repost.objects.filter(forum=repost.forum).count(),
         }
     elif repost.donation_request:
         # Donation repost
@@ -6134,6 +6136,7 @@ def repost_detail_view(request, repost_id):
                 'order': img.order
             } for img in repost.donation_request.images.all()],
             'created_at': repost.donation_request.created_at.isoformat() if hasattr(repost.donation_request, 'created_at') else None,
+            'reposts_count': Repost.objects.filter(donation_request=repost.donation_request).count(),
         }
     
     data = {
@@ -7277,8 +7280,11 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
+        # Check if user already reposted this post - update existing repost instead of creating duplicate
+        existing_repost = Repost.objects.filter(user=user, post=post).first()
+        is_new_repost = existing_repost is None
+        
         # Create repost with optional caption
-        # NOTE: Users can repost the same post multiple times - no restrictions
         # NOTE: If reposting a repost, the original post is always reposted (handled above)
         payload = {}
         try:
@@ -7290,23 +7296,32 @@ def post_repost_view(request, post_id):
         # Check if user is reposting their own post - don't count for milestones
         is_own_post = user.user_id == post.user.user_id
         
-        repost = Repost.objects.create(
-            user=user,
-            post=post,
-            repost_date=timezone.now(),
-            caption=caption,
-        )
-        
-        # Award engagement points (+5 for share/repost) - only if reposting someone else's post
-        # Milestone task requires sharing posts from OTHER users
-        if not is_own_post:
-            award_engagement_points(user, 'share')
+        if existing_repost:
+            # Update existing repost
+            existing_repost.repost_date = timezone.now()
+            if caption is not None:
+                existing_repost.caption = caption
+            existing_repost.save()
+            repost = existing_repost
         else:
-            # Log that self-repost was attempted (for debugging)
-            logger.info(f"User {user.user_id} reposted their own post {post.post_id} - points not awarded")
+            # Create new repost
+            repost = Repost.objects.create(
+                user=user,
+                post=post,
+                repost_date=timezone.now(),
+                caption=caption,
+            )
+            
+            # Award engagement points (+5 for share/repost) - only if reposting someone else's post
+            # Milestone task requires sharing posts from OTHER users
+            if not is_own_post:
+                award_engagement_points(user, 'share')
+            else:
+                # Log that self-repost was attempted (for debugging)
+                logger.info(f"User {user.user_id} reposted their own post {post.post_id} - points not awarded")
 
-        # Create notification for post owner (only if the reposter is not the post owner)
-        if user.user_id != post.user.user_id:
+        # Create notification for post owner (only if the reposter is not the post owner and it's a new repost)
+        if is_new_repost and user.user_id != post.user.user_id:
             repost_notification = Notification.objects.create(
                 user=post.user,
                 notif_type='repost',
@@ -8485,6 +8500,10 @@ def forum_repost_view(request, forum_id):
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         
+        # Check if user already reposted this forum - update existing repost instead of creating duplicate
+        existing_repost = Repost.objects.filter(user=request.user, forum=forum).first()
+        is_new_repost = existing_repost is None
+        
         # Create repost with optional caption
         payload = {}
         try:
@@ -8496,23 +8515,32 @@ def forum_repost_view(request, forum_id):
         # Check if user is reposting their own forum post - don't count for milestones
         is_own_forum = request.user.user_id == forum.user.user_id
         
-        r = Repost.objects.create(
-            forum=forum, 
-            user=request.user, 
-            repost_date=timezone.now(),
-            caption=caption
-        )
-        
-        # Award engagement points (+5 for share/repost) - only if reposting someone else's forum post
-        # Milestone task requires sharing posts from OTHER users
-        if not is_own_forum:
-            award_engagement_points(request.user, 'share')
+        if existing_repost:
+            # Update existing repost
+            existing_repost.repost_date = timezone.now()
+            if caption is not None:
+                existing_repost.caption = caption
+            existing_repost.save()
+            r = existing_repost
         else:
-            # Log that self-repost was attempted (for debugging)
-            logger.info(f"User {request.user.user_id} reposted their own forum post {forum.forum_id} - points not awarded")
+            # Create new repost
+            r = Repost.objects.create(
+                forum=forum, 
+                user=request.user, 
+                repost_date=timezone.now(),
+                caption=caption
+            )
+            
+            # Award engagement points (+5 for share/repost) - only if reposting someone else's forum post
+            # Milestone task requires sharing posts from OTHER users
+            if not is_own_forum:
+                award_engagement_points(request.user, 'share')
+            else:
+                # Log that self-repost was attempted (for debugging)
+                logger.info(f"User {request.user.user_id} reposted their own forum post {forum.forum_id} - points not awarded")
         
-        # Create notification for forum owner (only if the reposter is not the forum owner)
-        if request.user.user_id != forum.user.user_id:
+        # Create notification for forum owner (only if the reposter is not the forum owner and it's a new repost)
+        if is_new_repost and request.user.user_id != forum.user.user_id:
             forum_repost_notification = Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
@@ -8539,6 +8567,10 @@ def donation_repost_view(request, donation_id):
     try:
         donation = DonationRequest.objects.select_related('user').get(donation_id=donation_id)
         
+        # Check if user already reposted this donation - update existing repost instead of creating duplicate
+        existing_repost = Repost.objects.filter(user=request.user, donation_request=donation).first()
+        is_new_repost = existing_repost is None
+        
         # Create repost with optional caption
         payload = {}
         try:
@@ -8550,23 +8582,32 @@ def donation_repost_view(request, donation_id):
         # Check if user is reposting their own donation - don't count for milestones
         is_own_donation = request.user.user_id == donation.user.user_id
         
-        repost = Repost.objects.create(
-            donation_request=donation,
-            user=request.user,
-            repost_date=timezone.now(),
-            caption=caption
-        )
-        
-        # Award engagement points (+5 for share/repost) - only if reposting someone else's donation
-        # Milestone task requires sharing posts from OTHER users
-        if not is_own_donation:
-            award_engagement_points(request.user, 'share')
+        if existing_repost:
+            # Update existing repost
+            existing_repost.repost_date = timezone.now()
+            if caption is not None:
+                existing_repost.caption = caption
+            existing_repost.save()
+            repost = existing_repost
         else:
-            # Log that self-repost was attempted (for debugging)
-            logger.info(f"User {request.user.user_id} reposted their own donation {donation_id} - points not awarded")
+            # Create new repost
+            repost = Repost.objects.create(
+                donation_request=donation,
+                user=request.user,
+                repost_date=timezone.now(),
+                caption=caption
+            )
+            
+            # Award engagement points (+5 for share/repost) - only if reposting someone else's donation
+            # Milestone task requires sharing posts from OTHER users
+            if not is_own_donation:
+                award_engagement_points(request.user, 'share')
+            else:
+                # Log that self-repost was attempted (for debugging)
+                logger.info(f"User {request.user.user_id} reposted their own donation {donation_id} - points not awarded")
         
-        # Create notification for donation owner (only if the reposter is not the donation owner)
-        if request.user.user_id != donation.user.user_id:
+        # Create notification for donation owner (only if the reposter is not the donation owner and it's a new repost)
+        if is_new_repost and request.user.user_id != donation.user.user_id:
             donation_repost_notification = Notification.objects.create(
                 user=donation.user,
                 notif_type='repost',
@@ -9345,6 +9386,7 @@ def posts_view(request):
                                 'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
                                 'post_images': post_images,  # Multiple images (already calculated above)
                                 'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                                'reposts_count': Repost.objects.filter(post=post).count(),
                                 'user': {
                                     'user_id': post.user.user_id,
                                     'f_name': post.user.f_name,
