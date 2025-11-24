@@ -243,7 +243,7 @@ def export_detailed_ojt_data(request):
 			ojt_qs = ojt_qs.filter(ojtstatus=status_filter)
 		export_data = []
 		for ojt_user in ojt_qs:
-			# Get related objects safely
+
 			profile = getattr(ojt_user, 'profile', None)
 			academic_info = getattr(ojt_user, 'academic_info', None)
 			ojt_info = getattr(ojt_user, 'ojt_info', None)
@@ -263,6 +263,15 @@ def export_detailed_ojt_data(request):
 				'Ojt_End_Date': ojt_info.ojt_end_date if ojt_info else None,
 				'Status': ojt_info.ojtstatus if ojt_info else None,
 				'Civil_Status': profile.civil_status if profile else None,
+				'Birthdate': getattr(profile, 'birthdate', None) if profile else None,
+				'Phone_Number': getattr(profile, 'phone_num', None) if profile else None,
+				'Social_Media': getattr(profile, 'email', None) if profile else None,
+				'Address': getattr(profile, 'address', None) if profile else None,
+				'Course': getattr(academic_info, 'program', None) if academic_info else None,
+				'Ojt_Start_Date': getattr(ojt_info, 'ojt_start_date', None) if ojt_info else None,
+				'Ojt_End_Date': getattr(ojt_info, 'ojt_end_date', None) if ojt_info else None,
+				'Status': getattr(ojt_info, 'ojtstatus', None) if ojt_info else None,
+				'Civil_Status': getattr(profile, 'civil_status', None) if profile else None,
 			}
 			export_data.append(user_data)
 		return JsonResponse({
