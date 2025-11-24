@@ -243,7 +243,6 @@ def export_detailed_ojt_data(request):
 			ojt_qs = ojt_qs.filter(ojtstatus=status_filter)
 		export_data = []
 		for ojt_user in ojt_qs:
-
 			profile = getattr(ojt_user, 'profile', None)
 			academic_info = getattr(ojt_user, 'academic_info', None)
 			ojt_info = getattr(ojt_user, 'ojt_info', None)
@@ -254,15 +253,6 @@ def export_detailed_ojt_data(request):
 				'Middle_Name': ojt_user.m_name,
 				'Last_Name': ojt_user.l_name,
 				'Gender': ojt_user.gender,
-				'Birthdate': profile.birthdate if profile else None,
-				'Phone_Number': profile.phone_num if profile else None,
-				'Social_Media': profile.email if profile else None,  # Use email from UserProfile
-				'Address': profile.address if profile else None,
-				'Course': academic_info.program if academic_info else None,
-				'Ojt_Start_Date': ojt_info.ojt_start_date if ojt_info else None,
-				'Ojt_End_Date': ojt_info.ojt_end_date if ojt_info else None,
-				'Status': ojt_info.ojtstatus if ojt_info else None,
-				'Civil_Status': profile.civil_status if profile else None,
 				'Birthdate': getattr(profile, 'birthdate', None) if profile else None,
 				'Phone_Number': getattr(profile, 'phone_num', None) if profile else None,
 				'Social_Media': getattr(profile, 'email', None) if profile else None,
