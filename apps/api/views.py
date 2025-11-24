@@ -6041,6 +6041,7 @@ def post_likes_view(request, post_id):
         data.append({
             'user_id': l.user.user_id,
             'f_name': l.user.f_name,
+            'm_name': l.user.m_name,
             'l_name': l.user.l_name,
             'profile_pic': pic,
             'initials': initials,
@@ -6079,6 +6080,7 @@ def repost_detail_view(request, repost_id):
             'user': {
                 'user_id': repost.post.user.user_id,
                 'f_name': repost.post.user.f_name,
+                'm_name': repost.post.user.m_name,
                 'l_name': repost.post.user.l_name,
                 'profile_pic': build_profile_pic_url(repost.post.user),
             },
@@ -6099,6 +6101,7 @@ def repost_detail_view(request, repost_id):
             'user': {
                 'user_id': repost.forum.user.user_id,
                 'f_name': repost.forum.user.f_name,
+                'm_name': repost.forum.user.m_name,
                 'l_name': repost.forum.user.l_name,
                 'profile_pic': build_profile_pic_url(repost.forum.user),
             },
@@ -6119,6 +6122,7 @@ def repost_detail_view(request, repost_id):
             'user': {
                 'user_id': repost.donation_request.user.user_id,
                 'f_name': repost.donation_request.user.f_name,
+                'm_name': repost.donation_request.user.m_name,
                 'l_name': repost.donation_request.user.l_name,
                 'profile_pic': build_profile_pic_url(repost.donation_request.user),
             },
@@ -6139,6 +6143,7 @@ def repost_detail_view(request, repost_id):
         'user': {
             'user_id': repost.user.user_id,
             'f_name': repost.user.f_name,
+            'm_name': repost.user.m_name,
             'l_name': repost.user.l_name,
             'profile_pic': build_profile_pic_url(repost.user),
         },
