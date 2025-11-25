@@ -319,7 +319,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     other_participant = serializers.SerializerMethodField()
-    is_message_request = serializers.BooleanField(read_only=True)
+    is_message_request = serializers.SerializerMethodField()  # Changed to SerializerMethodField to check if user is initiator
     
     class Meta:
         model = Conversation
@@ -328,6 +328,25 @@ class ConversationSerializer(serializers.ModelSerializer):
             'other_participant', 'updated_at', 'is_message_request'
         ]
         read_only_fields = ['conversation_id', 'created_at', 'updated_at']
+    
+    def get_is_message_request(self, obj):
+        """
+        Message requests should only appear for the recipient, not the sender.
+        If the current user is the request_initiator, return False (not a message request for them).
+        """
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # If this is a message request, check if current user is the initiator
+            if obj.is_message_request:
+                initiator_id = getattr(obj.request_initiator, 'user_id', None) if obj.request_initiator else None
+                current_user_id = request.user.user_id
+                # If current user is the initiator, this is NOT a message request for them
+                if initiator_id == current_user_id:
+                    return False
+                # If current user is NOT the initiator, this IS a message request for them
+                return True
+        # Return the original value if no request context or not authenticated
+        return obj.is_message_request
     
     def get_last_message(self, obj):
         # FIX: Use prefetched data if available

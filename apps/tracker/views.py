@@ -119,13 +119,28 @@ def tracker_responses_view(request):
                         logger.warning(f"🧹 Cleaning broken file reference for question {question_id} in response {resp.id}")
                         merged_answers[question_id] = "No file uploaded"
             
-            # Attach file uploads metadata
+            # Attach file uploads metadata with absolute URLs
             for file_upload in resp.files.all():
                 question_id_str = str(file_upload.question_id)
+                # Build absolute URL for file
+                file_url = None
+                if file_upload.file:
+                    try:
+                        # Get relative URL from FileField
+                        relative_url = file_upload.file.url
+                        # Ensure absolute URL
+                        if relative_url.startswith('http://') or relative_url.startswith('https://'):
+                            file_url = relative_url
+                        else:
+                            file_url = request.build_absolute_uri(relative_url)
+                    except Exception as e:
+                        logger.error(f"Error building file URL for file_upload {file_upload.id}: {e}")
+                        file_url = None
+                
                 merged_answers[question_id_str] = {
                     'type': 'file',
                     'filename': file_upload.original_filename,
-                    'file_url': file_upload.file.url,
+                    'file_url': file_url,
                     'file_size': file_upload.file_size,
                     'uploaded_at': file_upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S')
                 }
@@ -467,13 +482,22 @@ def save_tracker_draft_view(request):
         
         # SANITIZE: Remove empty objects, null, undefined, and other invalid values
         # that React can't render as text in input fields
+        # IMPORTANT: Preserve file upload markers ({ type: 'file', uploaded: true, ... })
         sanitized_answers = {}
         for key, value in answers.items():
             # Skip empty objects, empty dicts, null, None
             if value is None:
                 continue
-            if isinstance(value, dict) and len(value) == 0:
-                continue
+            # PRESERVE file markers (indicate files were uploaded but lost after refresh)
+            if isinstance(value, dict):
+                # Check if it's a file marker (has 'type' and 'uploaded' keys)
+                if 'type' in value and 'uploaded' in value and value.get('type') == 'file' and value.get('uploaded') is True:
+                    # This is a file marker - PRESERVE IT
+                    sanitized_answers[key] = value
+                    continue
+                # Skip empty dicts (but file markers are not empty)
+                if len(value) == 0:
+                    continue
             # Skip empty strings only if explicitly empty (keep spaces, keep "0")
             if isinstance(value, str) and value.strip() == '':
                 continue
@@ -551,13 +575,22 @@ def load_tracker_draft_view(request):
         if draft:
             # SANITIZE: Remove empty objects and invalid values from loaded data
             # This protects against corrupted data that's already in the database
+            # IMPORTANT: Preserve file upload markers ({ type: 'file', uploaded: true, ... })
             sanitized_answers = {}
             for key, value in draft.answers.items():
                 # Skip empty objects, empty dicts, null, None
                 if value is None:
                     continue
-                if isinstance(value, dict) and len(value) == 0:
-                    continue
+                # PRESERVE file markers (indicate files were uploaded but lost after refresh)
+                if isinstance(value, dict):
+                    # Check if it's a file marker (has 'type' and 'uploaded' keys)
+                    if 'type' in value and 'uploaded' in value and value.get('type') == 'file' and value.get('uploaded') is True:
+                        # This is a file marker - PRESERVE IT
+                        sanitized_answers[key] = value
+                        continue
+                    # Skip empty dicts (but file markers are not empty)
+                    if len(value) == 0:
+                        continue
                 # Skip empty strings
                 if isinstance(value, str) and value.strip() == '':
                     continue
@@ -846,7 +879,7 @@ def file_upload_stats_view(request):
         # Get all file uploads
         file_uploads = TrackerFileUpload.objects.select_related('response__user').all()
         
-        # Add file upload data to stats
+        # Add file upload data to stats with absolute URLs
         for upload in file_uploads:
             question = Question.objects.filter(id=upload.question_id).first()
             if question and question.text in stats:
@@ -854,12 +887,28 @@ def file_upload_stats_view(request):
                 stats[question_text]['total_files'] += 1
                 stats[question_text]['total_size_mb'] += upload.file_size / 1024 / 1024
                 stats[question_text]['users'].add(upload.response.user.user_id)
+                
+                # Build absolute URL for file
+                file_url = None
+                if upload.file:
+                    try:
+                        # Get relative URL from FileField
+                        relative_url = upload.file.url
+                        # Ensure absolute URL
+                        if relative_url.startswith('http://') or relative_url.startswith('https://'):
+                            file_url = relative_url
+                        else:
+                            file_url = request.build_absolute_uri(relative_url)
+                    except Exception as e:
+                        logger.error(f"Error building file URL for upload {upload.id}: {e}")
+                        file_url = None
+                
                 stats[question_text]['files'].append({
                     'filename': upload.original_filename,
                     'user': f"{upload.response.user.f_name} {upload.response.user.l_name}",
                     'file_size_mb': round(upload.file_size / 1024 / 1024, 2),
                     'uploaded_at': upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S'),
-                    'file_url': upload.file.url
+                    'file_url': file_url
                 })
         
         # Convert sets to counts and format the response (sorted by question_id)

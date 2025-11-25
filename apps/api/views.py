@@ -8095,25 +8095,43 @@ def online_users_view(request):
         
         # Get online status for mutual follows
         online_users = []
+        logger.info(f"Checking online status for {len(mutual_follow_ids)} mutual follows: {list(mutual_follow_ids)}")
         for user_id in mutual_follow_ids:
             # Check if user is online (has active connections)
-            user_connections = connection_manager.get_user_connections(user_id)
-            if user_connections:
-                try:
-                    user = User.objects.get(user_id=user_id)
-                    online_users.append({
-                        'user_id': user.user_id,
-                        'ctu_id': user.acc_username,
-                        'name': ' '.join(filter(None, [user.f_name, user.m_name, user.l_name])),
-                        'f_name': user.f_name,
-                        'm_name': user.m_name,
-                        'l_name': user.l_name,
-                        'profile_pic': build_profile_pic_url(user),
-                        'is_online': True,
-                        'last_seen': timezone.now().isoformat()
-                    })
-                except User.DoesNotExist:
-                    continue
+            # A user is considered online if they have ANY WebSocket connection:
+            # - Notification WebSocket (conversation_id=0)
+            # - Conversation WebSocket (any conversation_id)
+            try:
+                user_connections = connection_manager.get_user_connections(user_id)
+                connection_count = len(user_connections) if user_connections else 0
+                logger.info(f"User {user_id} has {connection_count} WebSocket connection(s)")
+                
+                if connection_count > 0:
+                    try:
+                        user = User.objects.get(user_id=user_id)
+                        online_users.append({
+                            'user_id': user.user_id,
+                            'ctu_id': user.acc_username,
+                            'name': ' '.join(filter(None, [user.f_name, user.m_name, user.l_name])),
+                            'f_name': user.f_name,
+                            'm_name': user.m_name,
+                            'l_name': user.l_name,
+                            'profile_pic': build_profile_pic_url(user),
+                            'is_online': True,
+                            'last_seen': timezone.now().isoformat()
+                        })
+                        logger.info(f"✓ User {user_id} ({user.f_name} {user.l_name}) is ONLINE with {connection_count} connection(s)")
+                    except User.DoesNotExist:
+                        logger.warning(f"User {user_id} not found in database")
+                        continue
+                else:
+                    # Log for debugging
+                    logger.debug(f"✗ User {user_id} has no active WebSocket connections (not online)")
+            except Exception as e:
+                logger.error(f"Error checking online status for user {user_id}: {e}", exc_info=True)
+                continue
+        
+        logger.info(f"Found {len(online_users)} online users out of {len(mutual_follow_ids)} mutual follows")
         
         return JsonResponse({
             'success': True,

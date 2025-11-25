@@ -560,11 +560,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
 		try:
 			conversation = Conversation.objects.get(conversation_id=self.conversation_id)
 			
-			# Convert message request to regular conversation when someone replies
+			# Convert message request to regular conversation only if the non-initiator replies
+			# This matches the REST API logic for consistency
 			if conversation.is_message_request:
-				conversation.is_message_request = False
-				conversation.save()
-				logger.info(f"Converted message request {self.conversation_id} to regular conversation via WebSocket")
+				try:
+					initiator_id = getattr(conversation.request_initiator, 'user_id', None)
+					if not initiator_id or initiator_id != self.user.user_id:
+						# Non-initiator is replying, convert to regular conversation
+						conversation.is_message_request = False
+						conversation.request_initiator = None
+						conversation.save(update_fields=['is_message_request', 'request_initiator', 'updated_at'])
+						logger.info(f"Converted message request {self.conversation_id} to regular conversation via WebSocket (non-initiator reply)")
+				except Exception as e:
+					# Fallback: keep previous behavior if field missing
+					logger.warning(f"Error checking request_initiator in WebSocket: {e}, using fallback")
+					conversation.is_message_request = False
+					conversation.save(update_fields=['is_message_request', 'updated_at'])
+					logger.info(f"Converted message request {self.conversation_id} to regular conversation via WebSocket (fallback)")
 			
 			# Create message
 			message = Message.objects.create(
@@ -694,17 +706,19 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 		try:
 			from apps.messaging.connection_manager import connection_manager
 			# Use conversation_id = 0 to indicate a non-conversation global connection
-			connection_manager.add_connection(
+			# Use database_sync_to_async to properly handle the sync call in async context
+			await database_sync_to_async(connection_manager.add_connection)(
 				user_id=user_id,
 				conversation_id=0,
 				channel_name=self.channel_name,
 				# Only include JSON-serializable metadata
 				connection_metadata={
-					'ip_address': self.scope.get('client', [None, None])[0],
+					'ip_address': str(self.scope.get('client', [None, None])[0]) if self.scope.get('client', [None, None])[0] else None,
 				}
 			)
+			logger.info(f"Successfully registered notification WebSocket for user {user_id} in connection manager")
 		except Exception as e:
-			logger.warning(f"Failed to register notification WS in connection manager: {e}")
+			logger.error(f"Failed to register notification WS in connection manager: {e}", exc_info=True)
 
 		# Send connection confirmation
 		await self.send(text_data=json.dumps({
@@ -728,9 +742,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 		# Unregister from global presence
 		try:
 			from apps.messaging.connection_manager import connection_manager
-			connection_manager.remove_connection(self.channel_name)
+			await database_sync_to_async(connection_manager.remove_connection)(self.channel_name)
+			logger.info(f"Successfully unregistered notification WebSocket for user {user_id} from connection manager")
 		except Exception as e:
-			logger.warning(f"Failed to unregister notification WS: {e}")
+			logger.error(f"Failed to unregister notification WS: {e}", exc_info=True)
 		
 		logger.info(f"Notification WebSocket disconnected: user {user_id}")
 

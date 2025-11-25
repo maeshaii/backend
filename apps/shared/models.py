@@ -1057,6 +1057,43 @@ class EmploymentHistory(models.Model):
         normalized = _normalize_text(company)
         return normalized.upper() if normalized else None
 
+    def _normalize_company_name_for_comparison(self, company: str) -> str:
+        """
+        Normalize company name for comparison by removing common suffixes/prefixes
+        and extra whitespace. This helps match variations like:
+        - "ABC Company" vs "ABC Company Inc"
+        - "XYZ Corp" vs "XYZ Corporation"
+        """
+        if not company:
+            return ''
+        
+        # Normalize to uppercase and strip
+        normalized = company.upper().strip()
+        
+        # Remove common company suffixes (case-insensitive)
+        # Order matters - remove longer phrases first
+        suffixes_to_remove = [
+            ' INCORPORATED', ' INC.',
+            ' CORPORATION', ' CORP.',
+            ' LIMITED', ' LTD.',
+            ' COMPANY', ' CO.',
+            ' LLC',
+            ' INC',
+            ' CORP',
+            ' LTD',
+            ' CO',
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)].strip()
+                break  # Only remove one suffix
+        
+        # Remove extra whitespace
+        normalized = ' '.join(normalized.split())
+        
+        return normalized
+
     def _check_job_alignment_for_position(self, position, program):
         """Check job alignment for a specific position without saving to database
         Used during form completion for real-time alignment checking
@@ -1172,44 +1209,22 @@ class EmploymentHistory(models.Model):
         
         self.high_position = is_high_position
         
-        # STEP 3: Check for absorbed status (for AACUP) - typically first job after graduation
-        # Priority 1: If current company matches OJT company, they were absorbed
-        absorbed_by_ojt_match = False
+        # STEP 3: Check for absorbed status (for AACUP)
+        # Absorbed = OJT company hired them as full employee (OJT Company = Current Employment Company)
+        # This is the ONLY way to be absorbed - no fallback logic!
+        self.absorbed = False  # Default to False
+        
         if self.company_name_current and hasattr(self.user, 'ojt_company_profile') and self.user.ojt_company_profile:
             ojt_company = getattr(self.user.ojt_company_profile, 'company_name', '')
             if ojt_company and self.company_name_current:
-                # Case-insensitive comparison with normalization
-                current_company_normalized = self.company_name_current.lower().strip()
-                ojt_company_normalized = ojt_company.lower().strip()
+                # Both are already normalized to uppercase (from save methods)
+                # Compare with strict matching - remove common suffixes for better matching
+                current_normalized = self._normalize_company_name_for_comparison(self.company_name_current)
+                ojt_normalized = self._normalize_company_name_for_comparison(ojt_company)
                 
-                # Check for exact match or partial match (for variations in company names)
-                if (current_company_normalized == ojt_company_normalized or 
-                    current_company_normalized in ojt_company_normalized or
-                    ojt_company_normalized in current_company_normalized):
-                    absorbed_by_ojt_match = True
+                # Only set absorbed=True if companies match exactly (after normalization)
+                if current_normalized == ojt_normalized:
                     self.absorbed = True
-        
-        # Priority 2: If not absorbed by OJT match, check if hired within 6 months of graduation
-        if not absorbed_by_ojt_match and self.date_started and hasattr(self.user, 'academic_info') and self.user.academic_info.year_graduated:
-            # If hired within 6 months of graduation, consider absorbed
-            from datetime import date
-            graduation_date = date(self.user.academic_info.year_graduated, 6, 30)  # Assume June graduation
-            
-            # Ensure date_started is a date object for comparison
-            if isinstance(self.date_started, str):
-                try:
-                    from datetime import datetime
-                    self.date_started = datetime.strptime(self.date_started, '%Y-%m-%d').date()
-                except (ValueError, TypeError):
-                    self.date_started = None
-            
-            if self.date_started and self.date_started <= graduation_date:
-                self.absorbed = True
-            else:
-                self.absorbed = False
-        elif not absorbed_by_ojt_match:
-            # If no date started or graduation info, default to False
-            self.absorbed = False
         
         # STEP 4: Smart Job Alignment with Database Expansion
         # SENIOR DEV: Intelligent job alignment with automatic database expansion

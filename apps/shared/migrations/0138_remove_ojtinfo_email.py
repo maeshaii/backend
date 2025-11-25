@@ -15,5 +15,11 @@ class Migration(migrations.Migration):
         migrations.RunSQL(
             sql="ALTER TABLE shared_ojtinfo DROP COLUMN IF EXISTS email;",
             reverse_sql="ALTER TABLE shared_ojtinfo ADD COLUMN IF NOT EXISTS email varchar(254);",
+            state_operations=[
+                migrations.RemoveField(
+                    model_name='ojtinfo',
+                    name='email',
+                ),
+            ],
         ),
     ]
