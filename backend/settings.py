@@ -476,6 +476,9 @@ if REDIS_URL:
             'BACKEND': 'channels_redis.core.RedisChannelLayer',
             'CONFIG': {
                 'hosts': [REDIS_URL],
+                # Channel layer configuration to improve connection handling
+                'capacity': 1000,  # Maximum number of messages to store per channel
+                'expiry': 10,      # Message expiry time in seconds
             },
         },
     }
@@ -483,5 +486,14 @@ else:
     CHANNEL_LAYERS = {
         'default': {
             'BACKEND': 'channels.layers.InMemoryChannelLayer',
+            'CONFIG': {
+                'capacity': 1000,
+                'expiry': 10,
+            },
         },
     }
+
+# Note: The "took too long to shut down" warning is common in development
+# when the server is stopped while requests are in progress. This is expected
+# behavior and doesn't indicate a problem. In production, ensure proper
+# graceful shutdown handling via your ASGI server (Daphne/Uvicorn) configuration.
