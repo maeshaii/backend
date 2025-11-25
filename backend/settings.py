@@ -20,6 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load environment variables from .env file
 load_dotenv(BASE_DIR / '.env')
+REDIS_URL = os.getenv('REDIS_URL')
 
 
 # Quick-start development settings - unsuitable for production
@@ -78,11 +79,26 @@ CORS_ALLOWED_ORIGINS = [
     'http://192.168.2.112:8000',
     'http://192.168.101.70:8000',
 ]
-CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'True').lower() == 'true'
 
-# Do not use wildcard '*' when credentials are included. Prefer specific origins and regex for ngrok.
-# Enable this for mobile development - mobile apps don't send traditional origin headers
-CORS_ALLOW_ALL_ORIGINS = True
+# FIXED: Cannot use CORS_ALLOW_ALL_ORIGINS=True with CORS_ALLOW_CREDENTIALS=True
+# Browsers will reject requests if both are True. For JWT tokens, we don't need credentials
+# (tokens are sent in Authorization header, not cookies), so we can safely set this to False.
+CORS_ALLOW_CREDENTIALS = os.getenv('CORS_ALLOW_CREDENTIALS', 'False').lower() == 'true'
+
+# Enable for mobile development (mobile apps don't send origin headers)
+# This allows all origins, which is fine for development when credentials are False
+CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'True').lower() == 'true'
+
+# If CORS_ALLOW_ALL_ORIGINS is True and CORS_ALLOW_CREDENTIALS is True, browsers will block it
+# So we ensure credentials is False when allowing all origins
+if CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS:
+    import warnings
+    warnings.warn(
+        "CORS_ALLOW_ALL_ORIGINS=True with CORS_ALLOW_CREDENTIALS=True is not allowed by browsers. "
+        "Setting CORS_ALLOW_CREDENTIALS=False to avoid CORS errors.",
+        UserWarning
+    )
+    CORS_ALLOW_CREDENTIALS = False
 
 # Allow typical headers/methods during development
 CORS_ALLOW_HEADERS = [
@@ -303,14 +319,7 @@ DEFAULT_COORDINATOR_USERNAME = os.getenv('DEFAULT_COORDINATOR_USERNAME', 'ITCOOR
 DEFAULT_COORDINATOR_PASSWORD = os.getenv('DEFAULT_COORDINATOR_PASSWORD', 'ITWHERENAYOU')
 
 # CACHING CONFIGURATION
-# Redis cache for production - supports multiple servers and WebSocket scaling
-# In DEBUG mode, uses dummy cache by default to avoid Redis connection errors
-# Set USE_REDIS=true in .env to force Redis usage even in development
-REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/1')
-USE_REDIS = os.getenv('USE_REDIS', 'false' if DEBUG else 'true').lower() == 'true'
-
-if USE_REDIS:
-    # Use Redis cache (production or when explicitly enabled)
+if REDIS_URL:
     CACHES = {
         'default': {
             'BACKEND': 'django.core.cache.backends.redis.RedisCache',
@@ -320,10 +329,11 @@ if USE_REDIS:
         }
     }
 else:
-    # Use dummy cache (development - no Redis needed, no errors)
     CACHES = {
         'default': {
-            'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'capstone-cache',
+            'TIMEOUT': 300,
         }
     }
 
@@ -339,6 +349,8 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ],
+    # Custom exception handler to ensure CORS headers are always present
+    'EXCEPTION_HANDLER': 'apps.api.exceptions.custom_exception_handler',
 }
 
 SIMPLE_JWT = {
@@ -458,7 +470,6 @@ else:
 # Add these at the bottom of the file
 ASGI_APPLICATION = 'backend.asgi.application'
 # Prefer Redis if available, otherwise fallback to in-memory for development
-REDIS_URL = os.getenv('REDIS_URL')
 if REDIS_URL:
     CHANNEL_LAYERS = {
         'default': {

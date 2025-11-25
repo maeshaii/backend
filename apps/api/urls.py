@@ -1,7 +1,6 @@
 from django.urls import path, include
 from . import views
-from rest_framework_simplejwt.views import TokenRefreshView
-from .views import CustomTokenObtainPairView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view, approve_ojt_to_alumni_view, approve_individual_ojt_to_alumni_view
+from .views import CustomTokenObtainPairView, CustomTokenRefreshView, send_reminder_view, notifications_view, delete_notifications_view, import_ojt_view, ojt_statistics_view, ojt_by_year_view, ojt_clear_view, ojt_clear_all_view, ojt_status_update_view, approve_ojt_to_alumni_view, approve_individual_ojt_to_alumni_view
 from apps.tracker.views import *
 from apps.alumni_users.views import alumni_list_view, alumni_detail_view
 from apps.shared.views import import_exported_alumni_excel, export_initial_passwords
@@ -18,7 +17,7 @@ urlpatterns = [
     # Used by Mobile: JWT obtain (POST acc_username, acc_password)
     path('token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     # Used by Mobile: JWT refresh (POST refresh)
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     # Used by Mobile: change password
     path('change-password/', views.change_password_view, name='change_password'),
     # Alumni import/export (keep single implementation)
@@ -34,7 +33,7 @@ urlpatterns = [
     # OJT-specific routes for coordinators
     path('ojt/import/', import_ojt_view, name='import_ojt'),
     path('ojt/statistics/', ojt_statistics_view, name='ojt_statistics'),
-    # path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),  # TODO: Implement this view
+    path('ojt/company-statistics/', views.ojt_company_statistics_view, name='ojt_company_statistics'),
     path('ojt/students-by-company/', views.ojt_students_by_company_view, name='ojt_students_by_company'),
     path('ojt/students/', views.get_ojt_students_view, name='get_ojt_students'),
     path('ojt/by-year/', ojt_by_year_view, name='ojt_by_year'),
@@ -157,9 +156,12 @@ urlpatterns = [
     path('donations/<int:donation_id>/comments/<int:comment_id>/', views.donation_comment_edit_view, name='donation_comment_edit'),
     path('donations/<int:donation_id>/repost/', views.donation_repost_view, name='donation_repost'),
     
-    # # User Management API endpoints (Admin only)
-    # path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),
-    # path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
+    # User Management API endpoints (Admin only)
+    path('admin/users/', views.fetch_all_users_view, name='fetch_all_users'),  # GET - list all users
+    path('admin/users/create/', views.create_user_view, name='create_user'),  # POST - create new user
+    path('admin/users/<int:user_id>/password/', views.update_user_password_view, name='update_user_password'),
+    path('admin/users/<int:user_id>/status/', views.update_user_status_view, name='update_user_status'),
+    path('admin/verify-password/', views.verify_admin_password_view, name='verify_admin_password'),
     
     # Engagement Points & Leaderboard
     path('engagement/leaderboard/', views.engagement_leaderboard_view, name='engagement_leaderboard'),

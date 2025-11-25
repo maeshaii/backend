@@ -20,7 +20,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile, PasswordResetToken
 from apps.shared.models import Follow
 from apps.shared.services import UserService
 from apps.shared.points_milestones import (
@@ -29,7 +29,7 @@ from apps.shared.points_milestones import (
 )
 from apps.shared.serializers import UserSerializer, AlumniListSerializer, UserCreateSerializer
 import json
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework import serializers
 from datetime import datetime, timedelta
@@ -38,7 +38,6 @@ import secrets
 import string
 import base64
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.authentication import JWTAuthentication
 import pandas as pd
 import io
 import os
@@ -48,15 +47,11 @@ from apps.shared.models import Question
 from django.core.mail import send_mail
 from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
-# 🔒 SECURITY: Import custom permission classes for role-based access control
-from apps.api.permissions import (
-    IsAdmin, IsPeso, IsCoordinator, IsAlumni, IsOJT,
-    IsAdminOrPeso, IsAdminOrCoordinator, IsAlumniOrOJT
-)
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.parsers import MultiPartParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Value, CharField, Q, Count, Max
+from django.db.models import Value, CharField, Q
 from django.db import connection
 from django.db.utils import ProgrammingError
 from django.db.models.functions import Concat, Coalesce
@@ -372,176 +367,6 @@ def get_content_images_safe(content_id, content_type):
         print(f"Warning: Could not load ContentImage for {content_type} {content_id}: {e}")
         return []
 
-
-def _serialize_basic_user(user, request=None):
-    """Return a standardized payload for user info used in donation responses."""
-    if not user:
-        return {}
-    academic = getattr(user, 'academic_info', None)
-    middle = user.m_name or ''
-    full_name = ' '.join(filter(None, [user.f_name, middle, user.l_name])).strip()
-    year_graduated = getattr(academic, 'year_graduated', None) if academic else None
-    return {
-        'user_id': getattr(user, 'user_id', getattr(user, 'id', None)),
-        'f_name': user.f_name,
-        'm_name': user.m_name,
-        'l_name': user.l_name,
-        'profile_pic': build_profile_pic_url(user, request),
-        'year_graduated': year_graduated,
-        'batch': year_graduated,
-        'name': full_name,
-    }
-
-
-def _build_user_initials(user):
-    """Best-effort initials for users without profile photos."""
-    try:
-        first = (user.f_name or '').strip()[:1].upper()
-        last = (user.l_name or '').strip()[:1].upper()
-        initials = (first + last).strip()
-        return initials or None
-    except Exception:
-        return None
-
-
-def _serialize_like_entry(like, request=None):
-    user_payload = _serialize_basic_user(like.user, request)
-    return {
-        'like_id': like.like_id,
-        'user': user_payload,
-        'profile_pic': user_payload.get('profile_pic'),
-        'initials': _build_user_initials(like.user) if not user_payload.get('profile_pic') else None,
-    }
-
-
-def _serialize_comment_entry(comment, request=None):
-    return {
-        'comment_id': comment.comment_id,
-        'comment_content': comment.comment_content,
-        'date_created': comment.date_created.isoformat() if comment.date_created else None,
-        'user': _serialize_basic_user(comment.user, request),
-    }
-
-
-def _serialize_repost_entry(repost, request=None):
-    likes_qs = Like.objects.filter(repost=repost).select_related('user__profile')
-    comments_qs = Comment.objects.filter(repost=repost).select_related('user__profile').order_by('-date_created')
-    return {
-        'repost_id': repost.repost_id,
-        'repost_date': repost.repost_date.isoformat() if repost.repost_date else None,
-        'repost_caption': repost.caption,
-        'type': 'donation' if repost.donation_request_id else None,
-        'user': _serialize_basic_user(repost.user, request),
-        'likes_count': likes_qs.count(),
-        'comments_count': comments_qs.count(),
-        'likes': [_serialize_like_entry(like, request) for like in likes_qs],
-        'comments': [_serialize_comment_entry(comment, request) for comment in comments_qs],
-        'original_post': {
-            'donation_id': repost.donation_request.donation_id if repost.donation_request else None,
-            'description': repost.donation_request.description if repost.donation_request else None,
-            'created_at': repost.donation_request.created_at.isoformat() if repost.donation_request and repost.donation_request.created_at else None,
-            'user': _serialize_basic_user(repost.donation_request.user, request) if repost.donation_request else None,
-        } if repost.donation_request else None,
-    }
-
-
-def serialize_donation_request(donation, current_user=None, request=None):
-    """Return a fully-populated donation payload consumed by the web dashboard/mobile."""
-    images = get_content_images_safe(donation.donation_id, 'donation')
-    likes_qs = Like.objects.filter(donation_request=donation).select_related('user__profile')
-    comments_qs = Comment.objects.filter(donation_request=donation).select_related('user__profile').order_by('-date_created')
-    reposts_qs = Repost.objects.filter(donation_request=donation).select_related('user__profile')
-
-    likes_data = []
-    is_liked = False
-    for like in likes_qs:
-        if current_user and like.user_id == current_user.user_id:
-            is_liked = True
-        likes_data.append(_serialize_like_entry(like, request))
-
-    comments_data = [_serialize_comment_entry(comment, request) for comment in comments_qs]
-
-    reposts_data = []
-    is_reposted = False
-    for repost in reposts_qs:
-        if current_user and repost.user_id == current_user.user_id:
-            is_reposted = True
-        reposts_data.append(_serialize_repost_entry(repost, request))
-
-    return {
-        'donation_id': donation.donation_id,
-        'post_id': donation.donation_id,  # for frontend components expecting post shape
-        'type': 'donation',
-        'description': donation.description,
-        'status': donation.status,
-        'created_at': donation.created_at.isoformat() if donation.created_at else None,
-        'updated_at': donation.updated_at.isoformat() if donation.updated_at else None,
-        'images': images,
-        'user': _serialize_basic_user(donation.user, request),
-        'likes_count': len(likes_data),
-        'comments_count': len(comments_data),
-        'reposts_count': len(reposts_data),
-        'likes': likes_data,
-        'comments': comments_data,
-        'reposts': reposts_data,
-        'is_liked': is_liked,
-        'is_reposted': is_reposted,
-    }
-
-
-def _handle_donation_images_upload(donation, request):
-    """
-    Persist donation images coming from either Multipart (mobile) or base64 (web) payloads.
-    Returns the number of images saved.
-    """
-    saved = 0
-    data = getattr(request, 'data', {}) or {}
-
-    try:
-        if request.FILES:
-            image_files = []
-            for key, file in request.FILES.items():
-                if key.startswith('images') and file:
-                    image_files.append((key, file))
-            image_files.sort(key=lambda x: x[0])
-
-            for order_index, (_, file) in enumerate(image_files):
-                content_image = ContentImage.objects.create(
-                    content_type='donation',
-                    content_id=donation.donation_id,
-                    order=order_index
-                )
-                content_image.image.save(file.name, file, save=True)
-                saved += 1
-
-        images_payload = data.get('images') or data.get('post_images')
-        if images_payload and not isinstance(images_payload, list):
-            images_payload = [images_payload]
-
-        if images_payload:
-            for index, image_data in enumerate(images_payload):
-                if isinstance(image_data, str) and image_data.startswith('data:image'):
-                    try:
-                        format_part, encoded = image_data.split(';base64,')
-                        ext = format_part.split('/')[-1]
-                        file_name = f"{uuid.uuid4()}.{ext}"
-                        img_bytes = base64.b64decode(encoded)
-                        content_image = ContentImage.objects.create(
-                            content_type='donation',
-                            content_id=donation.donation_id,
-                            order=index + saved
-                        )
-                        content_image.image.save(file_name, ContentFile(img_bytes), save=True)
-                        saved += 1
-                    except Exception as img_exc:
-                        logger.warning(f"Failed to save donation image index={index}: {img_exc}")
-                        continue
-    except Exception as exc:
-        logger.error(f"Donation image handling failed for donation_id={donation.donation_id}: {exc}")
-
-    return saved
-
-
 # --- Helpers for Posts ---
 
 @ensure_csrf_cookie
@@ -686,44 +511,6 @@ def build_profile_pic_url(user, request=None):
     # Return empty string instead of None for consistency
     return ""
 
-INVENTORY_LOW_STOCK_THRESHOLD = 5
-INVENTORY_ANALYTICS_LOOKBACK_DAYS = 30
-
-
-def _compute_inventory_availability(quantity: int, low_stock_threshold: int = INVENTORY_LOW_STOCK_THRESHOLD):
-    """Return machine-readable status and human label for inventory availability."""
-    safe_quantity = max(int(quantity or 0), 0)
-    if safe_quantity <= 0:
-        return ('out_of_stock', 'Out of Stock', safe_quantity)
-    if safe_quantity <= low_stock_threshold:
-        label = f"Low Stock ({safe_quantity} left)"
-        return ('low_stock', label, safe_quantity)
-    return ('in_stock', 'In Stock', safe_quantity)
-
-
-def serialize_inventory_item(item, include_admin_fields: bool = False):
-    """Serialize RewardInventoryItem with availability metadata."""
-    status, label, units_available = _compute_inventory_availability(getattr(item, 'quantity', 0))
-    payload = {
-        'id': item.item_id,
-        'name': item.name,
-        'type': item.type,
-        'quantity': max(getattr(item, 'quantity', 0), 0),
-        'value': item.value,
-        'created_at': item.created_at.isoformat() if item.created_at else None,
-        'updated_at': item.updated_at.isoformat() if item.updated_at else None,
-        'availability': {
-            'status': status,
-            'label': label,
-            'units_available': units_available,
-            'is_available': units_available > 0,
-        },
-    }
-
-    # include_admin_fields currently reserved for future use
-    return payload
-
-
 def build_image_url(image_field, request=None):
     """Build full URL for ContentImage fields"""
     try:
@@ -800,7 +587,7 @@ def get_current_user_from_request(request):
 # login has been removed. All authentication uses securely hashed passwords.
 
 @api_view(["POST"])
-# 🔒 SECURITY FIX: Removed @permission_classes([IsAuthenticated]) - login should be accessible without auth
+@permission_classes([IsAuthenticated])
 def login_view(request):
     """Used by Mobile (legacy) – mobile prefers POST /api/token/ for JWT."""
     """
@@ -882,19 +669,19 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         # Hashed password only
         if not user.check_password(acc_password):
             raise serializers.ValidationError('Invalid credentials')
-        
-        # Generate JWT tokens with explicit user_id claim
         refresh = RefreshToken.for_user(user)
-        # Explicitly set the user_id claim to match SIMPLE_JWT configuration
-        refresh['user_id'] = user.user_id
-        refresh.access_token['user_id'] = user.user_id
-        
         # Determine if the user must change password on first login
+        # Coordinator and Peso accounts are exempt from first-time login password change
         must_change_password = False
         try:
-            initial = getattr(user, 'initial_password', None)
-            if initial and getattr(initial, 'is_active', False):
-                must_change_password = True
+            # Skip first-time login requirement for coordinator and peso accounts
+            is_coordinator = user.account_type and user.account_type.coordinator
+            is_peso = user.account_type and user.account_type.peso
+            
+            if not (is_coordinator or is_peso):
+                initial = getattr(user, 'initial_password', None)
+                if initial and getattr(initial, 'is_active', False):
+                    must_change_password = True
         except Exception:
             must_change_password = False
         academic = getattr(user, 'academic_info', None)
@@ -947,6 +734,11 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """Custom token refresh view for JWT token refresh"""
+    pass
 
 
 # ---- Password management ----
@@ -1015,7 +807,8 @@ def change_password_view(request):
 
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 @api_view(["POST"])
-@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
 @csrf_exempt
 def import_alumni_view(request):
     if request.method == "OPTIONS":
@@ -1452,7 +1245,7 @@ def import_alumni_view(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': f'Server error: {str(e)}'}, status=500)
 @api_view(["GET"])
-@permission_classes([IsAdminOrPeso])  # 🔒 SECURITY FIX
+@permission_classes([IsAuthenticated])
 def alumni_statistics_view(request):
     """Comprehensive alumni statistics including employment status counts and available years."""
     try:
@@ -1628,12 +1421,10 @@ def send_reminder_view(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX: Changed from IsAuthenticated
+@permission_classes([IsAuthenticated])
 def send_email_reminder_view(request):
     """
     Send tracker form reminders via email to selected users.
-    
-    🔒 SECURITY: Only admins and coordinators can send bulk emails.
     
     Expected payload:
     {
@@ -1794,62 +1585,22 @@ def send_email_reminder_view(request):
             'message': f'Server error: {str(e)}'
         }, status=500)
 
-
 @api_view(["POST"])
-@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX: Changed from IsAuthenticated
+@permission_classes([IsAuthenticated])
 def send_sms_reminder_view(request):
     """
-    Send tracker form reminders via SMS using Semaphore (Philippine SMS service).
-    
-    🔒 SECURITY: Only admins and coordinators can send bulk SMS.
+    Send tracker form reminders via SMS to selected users.
     
     Expected payload:
     {
         "user_ids": [1, 2, 3],
-        "message": "Text message with [User's Name] placeholder",
+        "message": "SMS message with [User's Name] placeholder",
         "tracker_link_base": "https://domain.com"
     }
+    
+    Note: SMS functionality is not yet implemented.
     """
     try:
-        # Check if SMS is enabled
-        if not getattr(settings, 'SMS_ENABLED', False):
-            return JsonResponse({
-                'success': False,
-                'message': 'SMS is disabled on this server.'
-            }, status=503)
-        
-        # Check SMS provider
-        sms_provider = getattr(settings, 'SMS_PROVIDER', 'globe').lower()
-        
-        # Verify credentials based on provider
-        if sms_provider == 'globe':
-            if not all([
-                getattr(settings, 'GLOBE_APP_ID', None),
-                getattr(settings, 'GLOBE_APP_SECRET', None),
-                getattr(settings, 'GLOBE_SHORT_CODE', None)
-            ]):
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Globe Labs credentials are not configured. Please contact the administrator.'
-                }, status=500)
-        elif sms_provider == 'semaphore':
-            if not getattr(settings, 'SEMAPHORE_API_KEY', None):
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Semaphore API key is not configured. Please contact the administrator.'
-                }, status=500)
-        else:  # twilio
-            if not all([
-                getattr(settings, 'TWILIO_ACCOUNT_SID', None),
-                getattr(settings, 'TWILIO_AUTH_TOKEN', None),
-                getattr(settings, 'TWILIO_FROM_NUMBER', None)
-            ]):
-                return JsonResponse({
-                    'success': False,
-                    'message': 'SMS credentials are not configured. Please contact the administrator.'
-                }, status=500)
-        
-        # Parse request data
         data = json.loads(request.body)
         user_ids = data.get('user_ids', [])
         message = data.get('message', '')
@@ -1858,315 +1609,21 @@ def send_sms_reminder_view(request):
         # Validation
         if not user_ids:
             return JsonResponse({
-                'success': False,
+                'success': False, 
                 'message': 'No users selected'
             }, status=400)
         
         if not message:
             return JsonResponse({
-                'success': False,
+                'success': False, 
                 'message': 'Message content is required'
             }, status=400)
         
-        if not tracker_link_base:
-            return JsonResponse({
-                'success': False,
-                'message': 'Tracker link base URL is required'
-            }, status=400)
-        
-        # Helper function to normalize phone numbers
-        def normalize_phone_number(phone: str, provider: str = 'semaphore') -> str | None:
-            """
-            Convert Philippine phone numbers to the correct format for SMS provider.
-            Semaphore: 09171234567 (local format)
-            Twilio: +639171234567 (E.164 format)
-            """
-            if not phone:
-                return None
-            
-            # Remove all non-digit characters
-            digits = ''.join(filter(str.isdigit, phone))
-            
-            # Handle different Philippine phone formats
-            if digits.startswith('63'):
-                # Has country code (639171234567)
-                local_number = '0' + digits[2:]  # Convert to 09171234567
-            elif digits.startswith('0'):
-                # Already in local format (09171234567)
-                local_number = digits
-            elif len(digits) == 10:
-                # Missing leading 0 (9171234567)
-                local_number = '0' + digits
-            else:
-                return None
-            
-            # Return format based on provider
-            if provider == 'semaphore':
-                return local_number  # 09171234567
-            else:  # twilio
-                return f"+63{local_number[1:]}"  # +639171234567
-        
-        # Helper function to build SMS body (plain text, no HTML)
-        def build_sms_body(base_text: str, full_name: str, tracker_link: str) -> str:
-            """Convert HTML-like text to plain SMS and personalize it"""
-            import re
-            # Strip HTML tags
-            plain = re.sub(r'<[^>]+>', '', base_text)
-            # Replace placeholders
-            plain = plain.replace('[User\'s Name]', full_name)
-            # Replace the "Fill Out the Tracker Form" text with actual link
-            plain = plain.replace('👉 Fill Out the Tracker Form', f'👉 Fill out the form: {tracker_link}')
-            # Clean up extra whitespace
-            plain = re.sub(r'\n\s*\n', '\n\n', plain)
-            return plain.strip()
-        
-        # Helper function to send SMS via Semaphore
-        def send_sms_semaphore(phone_number: str, sms_body: str) -> dict:
-            """Send SMS using Semaphore API"""
-            import requests
-            
-            try:
-                response = requests.post(
-                    'https://api.semaphore.co/api/v4/messages',
-                    data={
-                        'apikey': settings.SEMAPHORE_API_KEY,
-                        'number': phone_number,  # Format: 09171234567
-                        'message': sms_body,
-                        'sendername': settings.SEMAPHORE_SENDER_NAME
-                    },
-                    timeout=10
-                )
-                
-                # Log the raw response for debugging
-                logger.info(f"Semaphore API response status: {response.status_code}")
-                logger.info(f"Semaphore API response text: {response.text[:200]}")
-                
-                # Check if response is empty
-                if not response.text or response.text.strip() == '':
-                    return {'success': False, 'error': 'Empty response from Semaphore API. Check your API key.'}
-                
-                try:
-                    result = response.json()
-                except ValueError as json_err:
-                    return {'success': False, 'error': f'Invalid JSON response: {response.text[:100]}'}
-                
-                if response.status_code == 200:
-                    # Semaphore returns different response formats
-                    if isinstance(result, list) and len(result) > 0:
-                        first_result = result[0]
-                        if first_result.get('status') == 'success' or first_result.get('message_id'):
-                            return {'success': True, 'message_id': first_result.get('message_id', 'N/A')}
-                        else:
-                            error_msg = first_result.get('message', 'Unknown error')
-                            return {'success': False, 'error': error_msg}
-                    elif isinstance(result, dict):
-                        if result.get('status') == 'success' or result.get('message_id'):
-                            return {'success': True, 'message_id': result.get('message_id', 'N/A')}
-                        else:
-                            error_msg = result.get('message', 'Unknown error')
-                            return {'success': False, 'error': error_msg}
-                    else:
-                        return {'success': False, 'error': f'Unexpected response format: {str(result)[:100]}'}
-                else:
-                    error_msg = result.get('message', f'HTTP {response.status_code}')
-                    return {'success': False, 'error': error_msg}
-                    
-            except requests.exceptions.Timeout:
-                return {'success': False, 'error': 'Request timeout - Semaphore API not responding'}
-            except requests.exceptions.RequestException as e:
-                return {'success': False, 'error': f'Network error: {str(e)}'}
-            except Exception as e:
-                return {'success': False, 'error': f'Unexpected error: {str(e)}'}
-        
-        # Helper function to send SMS via Globe Labs
-        def send_sms_globe(phone_number: str, sms_body: str) -> dict:
-            """Send SMS using Globe Labs API"""
-            import requests
-            from apps.shared.models import GlobeAccessToken
-            
-            try:
-                # Globe Labs uses subscriber number format (9171234567 without leading 0)
-                # Convert 09171234567 to 9171234567
-                if phone_number.startswith('0'):
-                    subscriber_number = phone_number[1:]
-                else:
-                    subscriber_number = phone_number
-                
-                # Get access token for this subscriber
-                try:
-                    token_obj = GlobeAccessToken.objects.get(
-                        subscriber_number=subscriber_number,
-                        is_active=True
-                    )
-                    access_token = token_obj.access_token
-                except GlobeAccessToken.DoesNotExist:
-                    return {
-                        'success': False,
-                        'error': f'No access token for {phone_number}. User must text INFO to 21665316 and reply YES to subscribe.'
-                    }
-                
-                # Globe Labs SMS API endpoint
-                url = f"https://devapi.globelabs.com.ph/smsmessaging/v1/outbound/{settings.GLOBE_SHORT_CODE}/requests"
-                
-                payload = {
-                    "outboundSMSMessageRequest": {
-                        "clientCorrelator": f"ctu_{subscriber_number}",
-                        "senderAddress": settings.GLOBE_SHORT_CODE,
-                        "outboundSMSTextMessage": {
-                            "message": sms_body
-                        },
-                        "address": subscriber_number
-                    }
-                }
-                
-                headers = {
-                    'Content-Type': 'application/json',
-                    'Authorization': f'Bearer {access_token}'
-                }
-                
-                response = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=10
-                )
-                
-                # Log the response for debugging
-                logger.info(f"Globe Labs API response status: {response.status_code}")
-                logger.info(f"Globe Labs API response text: {response.text[:200]}")
-                
-                if response.status_code in [200, 201]:
-                    try:
-                        result = response.json()
-                        # Globe Labs returns outboundSMSMessageRequest with resourceURL
-                        if 'outboundSMSMessageRequest' in result:
-                            resource_url = result['outboundSMSMessageRequest'].get('resourceURL', 'N/A')
-                            return {'success': True, 'message_id': resource_url}
-                        else:
-                            return {'success': True, 'message_id': 'sent'}
-                    except ValueError:
-                        return {'success': True, 'message_id': 'sent'}
-                else:
-                    try:
-                        error_result = response.json()
-                        error_msg = error_result.get('error', {}).get('message', f'HTTP {response.status_code}')
-                    except:
-                        error_msg = f'HTTP {response.status_code}: {response.text[:100]}'
-                    return {'success': False, 'error': error_msg}
-                    
-            except requests.exceptions.Timeout:
-                return {'success': False, 'error': 'Request timeout - Globe Labs API not responding'}
-            except requests.exceptions.RequestException as e:
-                return {'success': False, 'error': f'Network error: {str(e)}'}
-            except Exception as e:
-                return {'success': False, 'error': f'Unexpected error: {str(e)}'}
-        
-        # Helper function to send SMS via Twilio (fallback)
-        def send_sms_twilio(phone_number: str, sms_body: str) -> dict:
-            """Send SMS using Twilio API"""
-            try:
-                from twilio.rest import Client as TwilioClient
-                
-                client = TwilioClient(
-                    settings.TWILIO_ACCOUNT_SID,
-                    settings.TWILIO_AUTH_TOKEN
-                )
-                
-                message_response = client.messages.create(
-                    body=sms_body,
-                    from_=settings.TWILIO_FROM_NUMBER,
-                    to=phone_number
-                )
-                
-                return {'success': True, 'message_id': message_response.sid}
-                
-            except Exception as e:
-                return {'success': False, 'error': str(e)}
-        
-        # Fetch users with their profiles
-        users = User.objects.filter(
-            user_id__in=user_ids
-        ).select_related('profile')
-        
-        sent_count = 0
-        failed_count = 0
-        no_phone_count = 0
-        errors = []
-        
-        for user in users:
-            try:
-                # Check if user has a profile with phone number
-                if not hasattr(user, 'profile') or not user.profile:
-                    no_phone_count += 1
-                    errors.append({
-                        'user': f"{user.f_name} {user.l_name}",
-                        'reason': 'No profile found'
-                    })
-                    continue
-                
-                # Get phone number and normalize it
-                raw_phone = getattr(user.profile, 'phone_num', None)
-                phone_number = normalize_phone_number(raw_phone, sms_provider)
-                
-                if not phone_number:
-                    no_phone_count += 1
-                    errors.append({
-                        'user': f"{user.f_name} {user.l_name}",
-                        'reason': f'Invalid or missing phone number: {raw_phone}'
-                    })
-                    continue
-                
-                # Personalize the message
-                full_name = f"{user.f_name} {user.l_name}"
-                
-                # Generate tracker link
-                tracker_link = f"{tracker_link_base}/alumni/tracker?user_id={user.user_id}"
-                
-                # Build plain text SMS body
-                sms_body = build_sms_body(message, full_name, tracker_link)
-                
-                # Send SMS based on provider
-                if sms_provider == 'globe':
-                    result = send_sms_globe(phone_number, sms_body)
-                elif sms_provider == 'semaphore':
-                    result = send_sms_semaphore(phone_number, sms_body)
-                else:  # twilio
-                    result = send_sms_twilio(phone_number, sms_body)
-                
-                if result['success']:
-                    sent_count += 1
-                    logger.info(f"SMS sent successfully to {full_name} ({phone_number}) via {sms_provider.upper()}, ID: {result.get('message_id')}")
-                else:
-                    failed_count += 1
-                    error_msg = result.get('error', 'Unknown error')
-                    logger.error(f"Failed to send SMS to {full_name} ({phone_number}): {error_msg}")
-                    errors.append({
-                        'user': f"{user.f_name} {user.l_name}",
-                        'reason': error_msg
-                    })
-                
-            except Exception as e:
-                failed_count += 1
-                error_msg = str(e)
-                logger.error(f"Failed to send SMS to {user.f_name} {user.l_name}: {error_msg}")
-                errors.append({
-                    'user': f"{user.f_name} {user.l_name}",
-                    'reason': error_msg
-                })
-        
-        # Prepare response
-        response_data = {
-            'success': sent_count > 0,
-            'sent': sent_count,
-            'failed': failed_count,
-            'no_phone': no_phone_count,
-            'total': len(user_ids)
-        }
-        
-        if errors:
-            response_data['errors'] = errors
-        
-        return JsonResponse(response_data)
+        # SMS functionality not yet implemented
+        return JsonResponse({
+            'success': False,
+            'message': 'SMS reminder functionality is not yet implemented. Please use email reminders instead.'
+        }, status=501)  # 501 Not Implemented
         
     except json.JSONDecodeError:
         return JsonResponse({
@@ -2180,6 +1637,38 @@ def send_sms_reminder_view(request):
             'message': f'Server error: {str(e)}'
         }, status=500)
 
+@api_view(["GET", "POST"])
+def globe_callback_view(request):
+    """
+    Globe Labs OAuth callback endpoint for SMS functionality.
+    
+    This endpoint handles OAuth callbacks from Globe Labs API
+    to store access tokens for SMS sending capabilities.
+    
+    Note: SMS functionality is not yet fully implemented.
+    """
+    try:
+        # Handle OPTIONS for CORS
+        if request.method == "OPTIONS":
+            response = JsonResponse({'detail': 'OK'})
+            response["Access-Control-Allow-Origin"] = "*"
+            response["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
+            return response
+        
+        # For now, return a not implemented response
+        # This can be implemented when SMS functionality is needed
+        return JsonResponse({
+            'success': False,
+            'message': 'Globe SMS callback functionality is not yet implemented.'
+        }, status=501)  # 501 Not Implemented
+        
+    except Exception as e:
+        logger.error(f"Error in globe_callback_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -2187,21 +1676,6 @@ def notifications_view(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
-    
-    # 🔒 SECURITY: IDOR Protection - Verify user can access these notifications
-    requesting_user_id = request.user.user_id
-    is_admin = getattr(request.user.account_type, 'admin', False)
-    
-    if str(requesting_user_id) != str(user_id) and not is_admin:
-        logger.warning(
-            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} ({request.user.acc_username}) "
-            f"attempted to access notifications for user {user_id}"
-        )
-        return JsonResponse({
-            'success': False,
-            'error': 'Permission denied. You can only access your own notifications.'
-        }, status=403)
-    
     try:
         user = User.objects.get(user_id=user_id)
     except User.DoesNotExist:
@@ -2253,20 +1727,6 @@ def notifications_view(request):
 @permission_classes([IsAuthenticated])
 def notifications_count_view(request):
     user_id = request.GET.get('user_id')
-    if not user_id:
-        return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
-    
-    # 🔒 SECURITY: IDOR Protection
-    requesting_user_id = request.user.user_id
-    is_admin = getattr(request.user.account_type, 'admin', False)
-    
-    if str(requesting_user_id) != str(user_id) and not is_admin:
-        logger.warning(
-            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to access "
-            f"notification count for user {user_id}"
-        )
-        return JsonResponse({'success': False, 'error': 'Permission denied.'}, status=403)
-    
     if not user_id:
         return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
     try:
@@ -2423,7 +1883,7 @@ def delete_notifications_view(request):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 # OJT-specific import function for coordinators
 @api_view(["POST"])
-@permission_classes([IsAdminOrCoordinator])  # 🔒 SECURITY FIX
+@permission_classes([IsAuthenticated])
 def import_ojt_view(request):
     print("IMPORT OJT VIEW CALLED")  # Debug print
     if request.method == "OPTIONS":
@@ -4467,13 +3927,8 @@ def ojt_status_update_view(request):
 
 # Clear ALL OJT-related data imported (OJT users, OJTInfo, OJTImport, and AcademicInfo for OJT users)
 @api_view(["POST"])
-@permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated to IsAdmin
+@permission_classes([IsAuthenticated])
 def ojt_clear_all_view(request):
-    # 🔒 SECURITY: Log this critical mass-deletion operation
-    logger.warning(
-        f"🔒 CRITICAL OPERATION: OJT Clear All requested by user {request.user.user_id} "
-        f"(username: {request.user.acc_username})"
-    )
     try:
         from apps.shared.models import (
             OJTImport, OJTInfo, AcademicInfo, OJTCompanyProfile,
@@ -5151,16 +4606,6 @@ def profile_bio_view(request, user_id):
         if request.method == "GET":
             return JsonResponse({'profile_bio': profile.profile_bio or ''})
         elif request.method == "PUT":
-            # 🔒 SECURITY: IDOR Protection for profile updates
-            requesting_user_id = request.user.user_id
-            is_admin = getattr(request.user.account_type, 'admin', False)
-            
-            if str(requesting_user_id) != str(user_id) and not is_admin:
-                logger.warning(
-                    f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update bio of user {user_id}"
-                )
-                return JsonResponse({'success': False, 'error': 'Permission denied'}, status=403)
-            
             data = json.loads(request.body)
             profile.profile_bio = data.get('profile_bio', '')
             profile.save()
@@ -5175,16 +4620,6 @@ def update_alumni_profile(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return Response({'message': 'Missing user_id'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # 🔒 SECURITY: IDOR Protection
-    requesting_user_id = request.user.user_id
-    is_admin = getattr(request.user.account_type, 'admin', False)
-    
-    if str(requesting_user_id) != str(user_id) and not is_admin:
-        logger.warning(
-            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update profile of user {user_id}"
-        )
-        return Response({'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         user = User.objects.get(user_id=user_id)
@@ -5320,17 +4755,6 @@ def alumni_employment_view(request, user_id):
         from apps.shared.services import UserService
         
         user = User.objects.get(user_id=user_id)
-        
-        # 🔒 SECURITY: IDOR Protection
-        requesting_user_id = request.user.user_id
-        is_admin = getattr(request.user.account_type, 'admin', False)
-        
-        if request.method == 'PUT':
-            if str(requesting_user_id) != str(user_id) and not is_admin:
-                logger.warning(
-                    f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to update employment of user {user_id}"
-                )
-                return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         # Determine account type
         is_alumni = user.account_type.user if hasattr(user.account_type, 'user') else False
@@ -5823,16 +5247,6 @@ def delete_alumni_profile_pic(request):
     user_id = request.GET.get('user_id')
     if not user_id:
         return Response({'message': 'Missing user_id'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # 🔒 SECURITY: IDOR Protection
-    requesting_user_id = request.user.user_id
-    is_admin = getattr(request.user.account_type, 'admin', False)
-    
-    if str(requesting_user_id) != str(user_id) and not is_admin:
-        logger.warning(
-            f"🔒 IDOR ATTACK PREVENTED: User {requesting_user_id} attempted to delete profile pic of user {user_id}"
-        )
-        return Response({'message': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         user = User.objects.get(user_id=user_id)
@@ -6498,8 +5912,14 @@ def post_like_view(request, post_id):
                 
                 # Award engagement points (+1 for like) - only if liking someone else's post
                 # Milestone task requires liking posts from OTHER users
+                response_data = {'success': True, 'message': 'Post liked'}
                 if not is_own_post:
-                    award_engagement_points(user, 'like')
+                    points_result = award_engagement_points(user, 'like')
+                    if points_result and points_result.get('milestones_unlocked'):
+                        milestones = points_result['milestones_unlocked']
+                        if milestones and len(milestones) > 0:
+                            logger.info(f"User {user.user_id} unlocked {len(milestones)} milestone(s) from liking post {post_id}: {milestones}")
+                            response_data['milestones_unlocked'] = milestones
                 else:
                     logger.info(f"User {user.user_id} liked their own post {post_id} - points not awarded")
                 
@@ -6519,7 +5939,7 @@ def post_like_view(request, post_id):
                         broadcast_notification(like_notification)
                     except Exception as e:
                         logger.error(f"Error broadcasting like notification: {e}")
-                return JsonResponse({'success': True, 'message': 'Post liked'})
+                return JsonResponse(response_data)
             else:
                 return JsonResponse({'success': False, 'message': 'Post already liked'})
         elif request.method == "DELETE":
@@ -6697,8 +6117,14 @@ def post_comments_view(request, post_id):
             
             # Award engagement points (+3 for comment) - only if commenting on someone else's post
             # Milestone task requires commenting on posts from OTHER users
+            response_data = {'success': True, 'message': 'Comment added', 'comment_id': comment.comment_id}
             if not is_own_post:
-                award_engagement_points(user, 'comment')
+                points_result = award_engagement_points(user, 'comment')
+                if points_result and points_result.get('milestones_unlocked'):
+                    milestones = points_result['milestones_unlocked']
+                    if milestones and len(milestones) > 0:
+                        logger.info(f"User {user.user_id} unlocked {len(milestones)} milestone(s) from commenting on post {post.post_id}: {milestones}")
+                        response_data['milestones_unlocked'] = milestones
             else:
                 # Log that self-comment was attempted (for debugging)
                 logger.info(f"User {user.user_id} commented on their own post {post.post_id} - points not awarded")
@@ -6728,11 +6154,7 @@ def post_comments_view(request, post_id):
                 except Exception as e:
                     logger.error(f"Error broadcasting comment notification: {e}")
 
-            return JsonResponse({
-                'success': True,
-                'message': 'Comment added',
-                'comment_id': comment.comment_id
-            })
+            return JsonResponse(response_data)
     except Post.DoesNotExist:
         return JsonResponse({'error': 'Post not found'}, status=404)
     except Exception as e:
@@ -7584,305 +7006,6 @@ def notify_users_of_admin_peso_post(post_author, post_type="post", post_id=None)
     except Exception as e:
         print(f"Error creating notifications: {e}")
         return 0
-
-# ==========================
-# Donation API (shared_donationrequest)
-# ==========================
-
-@api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
-@parser_classes([MultiPartParser, JSONParser])
-def donation_requests_view(request):
-    """List donation requests or create a new one."""
-    try:
-        if request.method == "GET":
-            donations = (DonationRequest.objects
-                         .select_related('user', 'user__profile', 'user__academic_info')
-                         .order_by('-created_at'))
-            data = [serialize_donation_request(donation, request.user, request) for donation in donations]
-            return JsonResponse({'success': True, 'donations': data})
-
-        description = (request.data.get('description') or '').strip()
-        if not description:
-            return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
-
-        donation = DonationRequest.objects.create(
-            user=request.user,
-            description=description
-        )
-
-        images_saved = _handle_donation_images_upload(donation, request)
-        has_images = images_saved > 0 or ContentImage.objects.filter(
-            content_type='donation',
-            content_id=donation.donation_id
-        ).exists()
-
-        if has_images:
-            award_engagement_points(request.user, 'post_with_photo')
-        else:
-            award_engagement_points(request.user, 'post')
-
-        notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
-
-        payload = serialize_donation_request(donation, request.user, request)
-        return JsonResponse({
-            'success': True,
-            'message': 'Donation request created successfully',
-            'donation': payload
-        }, status=201)
-    except Exception as exc:
-        logger.error(f"donation_requests_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to process donation request'}, status=500)
-
-
-@api_view(["POST", "DELETE"])
-@permission_classes([IsAuthenticated])
-def donation_like_view(request, donation_id):
-    """Like or unlike a donation request."""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        if request.method == "POST":
-            like, created = Like.objects.get_or_create(
-                donation_request=donation,
-                user=request.user,
-                defaults={'post': None, 'forum': None, 'repost': None}
-            )
-            if created:
-                award_engagement_points(request.user, 'like')
-                if donation.user_id != request.user.user_id:
-                    notif = Notification.objects.create(
-                        user=donation.user,
-                        notif_type='like',
-                        subject='Donation Request Liked',
-                        notifi_content=(
-                            f"{request.user.full_name} liked your donation request"
-                            f"<!--DONATION_ID:{donation.donation_id}-->"
-                            f"<!--ACTOR_ID:{request.user.user_id}-->"
-                        ),
-                        notif_date=timezone.now()
-                    )
-                    try:
-                        from apps.messaging.notification_broadcaster import broadcast_notification
-                        broadcast_notification(notif)
-                    except Exception as e:
-                        logger.error(f"Error broadcasting donation like notification: {e}")
-                return JsonResponse({'success': True, 'message': 'Donation liked'})
-            return JsonResponse({'success': False, 'message': 'Already liked'})
-
-        try:
-            like = Like.objects.get(donation_request=donation, user=request.user)
-            like.delete()
-            deduct_engagement_points(request.user, 'like')
-            return JsonResponse({'success': True, 'message': 'Donation unliked'})
-        except Like.DoesNotExist:
-            return JsonResponse({'success': False, 'message': 'Donation not liked'})
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as exc:
-        logger.error(f"donation_like_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
-
-
-@api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
-def donation_comments_view(request, donation_id):
-    """Fetch or create comments for a donation request."""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        if request.method == "GET":
-            comments = (Comment.objects
-                        .filter(donation_request=donation)
-                        .select_related('user__profile')
-                        .order_by('-date_created'))
-            results = []
-            for comment in comments:
-                comment_payload = _serialize_comment_entry(comment, request)
-                comment_payload['replies_count'] = Reply.objects.filter(comment=comment).count()
-                results.append(comment_payload)
-            return JsonResponse({'success': True, 'comments': results})
-
-        comment_content = (request.data.get('comment_content') or '').strip()
-        if not comment_content:
-            return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
-
-        comment = Comment.objects.create(
-            donation_request=donation,
-            user=request.user,
-            comment_content=comment_content,
-            date_created=timezone.now()
-        )
-        award_engagement_points(request.user, 'comment')
-
-        create_mention_notifications(
-            comment_content,
-            request.user,
-            donation_id=donation.donation_id,
-            comment_id=comment.comment_id
-        )
-
-        if donation.user_id != request.user.user_id:
-            notif = Notification.objects.create(
-                user=donation.user,
-                notif_type='comment',
-                subject='Donation Request Commented',
-                notifi_content=(
-                    f"{request.user.full_name} commented on your donation request"
-                    f"<!--DONATION_ID:{donation.donation_id}-->"
-                    f"<!--COMMENT_ID:{comment.comment_id}-->"
-                    f"<!--ACTOR_ID:{request.user.user_id}-->"
-                ),
-                notif_date=timezone.now()
-            )
-            try:
-                from apps.messaging.notification_broadcaster import broadcast_notification
-                broadcast_notification(notif)
-            except Exception as e:
-                logger.error(f"Error broadcasting donation comment notification: {e}")
-
-        return JsonResponse({
-            'success': True,
-            'message': 'Comment added successfully',
-            'comment': _serialize_comment_entry(comment, request)
-        })
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as exc:
-        logger.error(f"donation_comments_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to handle comment'}, status=500)
-
-
-@api_view(["PUT", "DELETE"])
-@permission_classes([IsAuthenticated])
-def donation_comment_edit_view(request, donation_id, comment_id):
-    """Edit or delete a donation comment."""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
-        is_owner = comment.user_id == request.user.user_id
-        is_donation_owner = donation.user_id == request.user.user_id
-        is_admin = getattr(request.user.account_type, 'admin', False)
-
-        if not (is_owner or is_donation_owner or is_admin):
-            return JsonResponse({'error': 'Unauthorized'}, status=403)
-
-        if request.method == "PUT":
-            if not is_owner:
-                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
-            content = (request.data.get('comment_content') or '').strip()
-            if not content:
-                return JsonResponse({'error': 'No content provided'}, status=400)
-            comment.comment_content = content
-            comment.save(update_fields=['comment_content'])
-            return JsonResponse({'success': True})
-
-        deduct_engagement_points(comment.user, 'comment')
-        comment.delete()
-        return JsonResponse({'success': True})
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'error': 'Donation request not found'}, status=404)
-    except Comment.DoesNotExist:
-        return JsonResponse({'error': 'Comment not found'}, status=404)
-    except Exception as exc:
-        logger.error(f"donation_comment_edit_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to modify comment'}, status=500)
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def donation_repost_view(request, donation_id):
-    """Create a repost referencing a donation request."""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        caption = (request.data.get('caption') or '').strip() or None
-        repost = Repost.objects.create(
-            donation_request=donation,
-            user=request.user,
-            caption=caption,
-            repost_date=timezone.now()
-        )
-        award_engagement_points(request.user, 'share')
-
-        if donation.user_id != request.user.user_id:
-            notif = Notification.objects.create(
-                user=donation.user,
-                notif_type='repost',
-                subject='Donation Request Reposted',
-                notifi_content=(
-                    f"{request.user.full_name} reposted your donation request"
-                    f"<!--DONATION_ID:{donation.donation_id}-->"
-                    f"<!--REPOST_ID:{repost.repost_id}-->"
-                    f"<!--ACTOR_ID:{request.user.user_id}-->"
-                ),
-                notif_date=timezone.now()
-            )
-            try:
-                from apps.messaging.notification_broadcaster import broadcast_notification
-                broadcast_notification(notif)
-            except Exception as e:
-                logger.error(f"Error broadcasting donation repost notification: {e}")
-
-        return JsonResponse({'success': True, 'message': 'Donation reposted successfully', 'repost_id': repost.repost_id})
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as exc:
-        logger.error(f"donation_repost_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
-
-
-@api_view(["GET", "PUT", "DELETE"])
-@permission_classes([IsAuthenticated])
-@parser_classes([MultiPartParser, JSONParser])
-def donation_detail_edit_view(request, donation_id):
-    """Retrieve, update, or delete a donation request."""
-    try:
-        donation = DonationRequest.objects.get(donation_id=donation_id)
-        is_owner = donation.user_id == request.user.user_id
-        is_admin = getattr(request.user.account_type, 'admin', False)
-        is_peso = getattr(request.user.account_type, 'peso', False)
-
-        if request.method == "GET":
-            return JsonResponse(serialize_donation_request(donation, request.user, request))
-
-        if not (is_owner or is_admin or is_peso):
-            return JsonResponse({'success': False, 'message': 'Permission denied'}, status=403)
-
-        if request.method == "PUT":
-            description = request.data.get('description')
-            status_value = request.data.get('status')
-            fields = []
-            if description is not None:
-                donation.description = description
-                fields.append('description')
-            if status_value is not None:
-                donation.status = status_value
-                fields.append('status')
-            if fields:
-                donation.updated_at = timezone.now()
-                fields.append('updated_at')
-                donation.save(update_fields=fields)
-            _handle_donation_images_upload(donation, request)
-            return JsonResponse({'success': True, 'message': 'Donation updated successfully'})
-
-        has_images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id).exists()
-        images = ContentImage.objects.filter(content_type='donation', content_id=donation.donation_id)
-        for img in images:
-            if getattr(img, 'image', None):
-                img.image.delete(save=False)
-        images.delete()
-
-        if has_images:
-            deduct_engagement_points(donation.user, 'post_with_photo')
-        else:
-            deduct_engagement_points(donation.user, 'post')
-
-        donation.delete()
-        return JsonResponse({'success': True, 'message': 'Donation deleted successfully'})
-    except DonationRequest.DoesNotExist:
-        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
-    except Exception as exc:
-        logger.error(f"donation_detail_edit_view error: {exc}")
-        return JsonResponse({'success': False, 'message': 'Failed to process donation request'}, status=500)
-
 # ==========================
 # Forum API (shared_forum links to shared_post)
 # ==========================
@@ -9168,10 +8291,22 @@ def posts_view(request):
             except Exception as e:
                 print(f"Warning: Could not check ContentImage for engagement points: {e}")
             
+            # Capture milestones from points award
+            milestones_unlocked = []
             if has_images:
-                award_engagement_points(request.user, 'post_with_photo')
+                points_result = award_engagement_points(request.user, 'post_with_photo')
+                if points_result and points_result.get('milestones_unlocked'):
+                    milestones = points_result['milestones_unlocked']
+                    if milestones and len(milestones) > 0:
+                        logger.info(f"User {request.user.user_id} unlocked {len(milestones)} milestone(s) from posting with image: {milestones}")
+                        milestones_unlocked = milestones
             else:
-                award_engagement_points(request.user, 'post')
+                points_result = award_engagement_points(request.user, 'post')
+                if points_result and points_result.get('milestones_unlocked'):
+                    milestones = points_result['milestones_unlocked']
+                    if milestones and len(milestones) > 0:
+                        logger.info(f"User {request.user.user_id} unlocked {len(milestones)} milestone(s) from posting: {milestones}")
+                        milestones_unlocked = milestones
 
             # Get multiple images for response
             post_images = []
@@ -9188,7 +8323,7 @@ def posts_view(request):
                 print(f"Warning: Could not load ContentImage for response: {e}")
                 post_images = []
             
-            return JsonResponse({
+            response_data = {
                 'success': True,
                 'post': {
                     'post_id': new_post.post_id,
@@ -9206,7 +8341,12 @@ def posts_view(request):
                     'category': {
                     }
                 }
-            }, status=201)
+            }
+            
+            if milestones_unlocked:
+                response_data['milestones_unlocked'] = milestones_unlocked
+            
+            return JsonResponse(response_data, status=201)
 
         # Use the filtered posts from above (don't override with all posts)
         # Build a combined feed with both posts and reposts as separate items
@@ -9749,19 +8889,8 @@ def userprofile_email_view(request, user_id):
 @api_view(["POST"])
 def forgot_password_view(request):
     """
-    🔐 SECURE Password Reset Request - Step 1 of 2
-    
-    Validates user email and sends a secure password reset link.
+    Forgot password endpoint - validates user credentials and generates temporary password.
     Only available for alumni (user=True) and OJT (ojt=True) account types.
-    
-    Security Features:
-    - Only requires email (reduces information exposure)
-    - Generates secure one-time token (expires in 1 hour)
-    - Sends reset link via email (not password itself)
-    - Rate-limited per user (prevents abuse)
-    - Generic error messages (prevents user enumeration)
-    
-    Expected payload: { "email": "user@example.com" }
     """
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
@@ -9772,249 +8901,104 @@ def forgot_password_view(request):
 
     try:
         data = json.loads(request.body)
+        ctu_id = data.get('ctu_id', '').strip()
         email = data.get('email', '').strip()
+        last_name = data.get('last_name', '').strip()
+        first_name = data.get('first_name', '').strip()
+        middle_name = data.get('middle_name', '').strip()
 
-        # Validate email field
-        if not email:
+        # Validate required fields
+        if not all([ctu_id, email, last_name, first_name]):
             return JsonResponse({
                 'success': False, 
-                'message': 'Email is required'
+                'message': 'All fields are required: CTU ID, Email, Last Name, First Name'
             }, status=400)
 
-        # Basic email format validation
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
-            return JsonResponse({
-                'success': False,
-                'message': 'Please enter a valid email address'
-            }, status=400)
-
-        # 🔒 SECURITY: Rate Limiting - Prevent brute force/spam attacks
-        from django.core.cache import cache
-        
-        # Get client IP address
-        def get_client_ip(request):
-            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-            if x_forwarded_for:
-                ip = x_forwarded_for.split(',')[0]
-            else:
-                ip = request.META.get('REMOTE_ADDR')
-            return ip
-        
-        client_ip = get_client_ip(request)
-        
-        # Rate limit by email (max 3 per hour)
-        email_cache_key = f"password_reset_email_{email.lower()}"
-        email_attempts = cache.get(email_cache_key, 0)
-        
-        # Rate limit by IP (max 5 per hour across all emails)
-        ip_cache_key = f"password_reset_ip_{client_ip}"
-        ip_attempts = cache.get(ip_cache_key, 0)
-        
-        if email_attempts >= 3:
-            logger.warning(f"🔒 SECURITY: Rate limit exceeded for email: {email}")
-            return JsonResponse({
-                'success': True,
-                'message': 'If an account with that email exists, a password reset link has been sent.'
-            })
-        
-        if ip_attempts >= 5:
-            logger.warning(f"🔒 SECURITY: Rate limit exceeded for IP: {client_ip}")
-            return JsonResponse({
-                'success': False,
-                'message': 'Too many password reset attempts. Please try again later.'
-            }, status=429)
-        
-        # Increment counters (expire in 1 hour)
-        cache.set(email_cache_key, email_attempts + 1, 3600)
-        cache.set(ip_cache_key, ip_attempts + 1, 3600)
-
-        # Check if email is configured on server
-        if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
-            logger.error("Password reset failed: Email not configured on server")
-            return JsonResponse({
-                'success': False,
-                'message': 'Email service is not configured. Please contact the administrator.'
-            }, status=500)
-
-        # Find user by email
-        # 🔒 SECURITY: Use generic error message to prevent user enumeration
+        # Find user by CTU ID
         try:
-            user = User.objects.select_related('profile', 'account_type').get(
-                profile__email__iexact=email
-            )
+            user = User.objects.select_related('profile', 'account_type').get(acc_username=ctu_id)
         except User.DoesNotExist:
-            # 🔒 SECURITY LOG: Track attempts to non-existent emails (for monitoring abuse)
-            logger.warning(
-                f"🔒 SECURITY: Password reset attempt for NON-EXISTENT email: {email} "
-                f"from IP: {client_ip}"
-            )
-            # Return success message anyway to prevent user enumeration
+            logger.warning(f"Forgot password failed: CTU ID {ctu_id} does not exist.")
             return JsonResponse({
-                'success': True,
-                'message': 'If an account with that email exists, a password reset link has been sent.'
-            })
+                'success': False,
+                'message': 'Invalid credentials. Please check your information and try again.'
+            }, status=404)
 
         # Check if user is alumni or OJT (not admin, peso, or coordinator)
         if not (user.account_type.user or user.account_type.ojt):
-            logger.warning(f"Password reset denied: User {user.acc_username} is not alumni or OJT.")
-            # Return generic message for security
+            logger.warning(f"Forgot password denied: User {ctu_id} is not alumni or OJT.")
             return JsonResponse({
-                'success': True,
-                'message': 'If an account with that email exists, a password reset link has been sent.'
-            })
+                'success': False, 
+                'message': 'Password reset is only available for alumni and OJT students.'
+            }, status=403)
 
-        if not _table_exists('password_reset_tokens'):
-            logger.error("Password reset token table missing. Run shared migration 0128 or re-apply migrations.")
-            return JsonResponse({
-                'success': False,
-                'message': 'Password reset is temporarily unavailable. Please contact the administrator.'
-            }, status=503)
-
-        # 🔒 SECURITY: Invalidate any existing active tokens for this user
-        from apps.shared.models import PasswordResetToken
-        PasswordResetToken.objects.filter(
-            user=user,
-            used=False,
-            expires_at__gt=timezone.now()
-        ).update(used=True, used_at=timezone.now())
-
-        # Generate secure reset token
-        token = PasswordResetToken.generate_token()
-        expires_at = timezone.now() + timedelta(hours=1)  # 1 hour expiration
+        # Validate credentials against user data
+        profile = getattr(user, 'profile', None)
+        user_email = getattr(profile, 'email', None) if profile else None
         
-        # Create password reset token
-        reset_token = PasswordResetToken.objects.create(
-            user=user,
-            token=token,
-            expires_at=expires_at
-        )
-
-        # Generate reset link
-        # 🔒 SECURITY: Use frontend URL (not backend) for the reset page
-        # Get frontend URL from settings or environment variable
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-        reset_url = f"{frontend_url}/reset-password?token={token}"
-
-        # Send email with reset link
-        try:
-            from django.core.mail import EmailMultiAlternatives
-            
-            subject = "Password Reset Request - CTU Alumni System"
-            
-            # Plain text version
-            text_message = f"""
-Hello {user.f_name},
-
-You requested to reset your password for the CTU Alumni Management System.
-
-Click the link below to reset your password:
-{reset_url}
-
-This link will expire in 1 hour.
-
-If you did not request this password reset, please ignore this email and your password will remain unchanged.
-
----
-CTU CCICT Alumni Management System
-This is an automated message, please do not reply.
-            """
-            
-            # HTML version with better styling
-            html_message = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
-    <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-        <div style="background-color:#1e4c7a;color:#ffffff;padding:20px;border-radius:8px 8px 0 0;text-align:center;">
-            <h1 style="margin:0;font-size:24px;">🔐 Password Reset Request</h1>
-        </div>
-        <div style="padding:30px;color:#333333;line-height:1.6;">
-            <p>Hello <strong>{user.f_name}</strong>,</p>
-            <p>You requested to reset your password for the CTU Alumni Management System.</p>
-            <p>Click the button below to reset your password:</p>
-            <div style="text-align:center;margin:30px 0;">
-                <a href="{reset_url}" style="display:inline-block;background-color:#1e4c7a;color:#ffffff;padding:12px 30px;text-decoration:none;border-radius:5px;font-weight:bold;">Reset Password</a>
-            </div>
-            <p style="font-size:14px;color:#666;">Or copy and paste this link into your browser:</p>
-            <p style="font-size:12px;color:#999;word-break:break-all;background-color:#f8f9fa;padding:10px;border-radius:4px;">{reset_url}</p>
-            <p style="margin-top:30px;padding-top:20px;border-top:1px solid #eee;color:#666;font-size:14px;">
-                ⏱️ <strong>This link will expire in 1 hour.</strong>
-            </p>
-            <p style="color:#666;font-size:14px;">
-                If you did not request this password reset, please ignore this email and your password will remain unchanged.
-            </p>
-        </div>
-        <div style="background-color:#f8f9fa;padding:20px;border-radius:0 0 8px 8px;text-align:center;font-size:12px;color:#666;">
-            <p style="margin:0;">This is an automated message from CTU CCICT Alumni Management System</p>
-            <p style="margin:5px 0 0 0;">Please do not reply to this email</p>
-        </div>
-    </div>
-</body>
-</html>
-            """
-            
-            email_msg = EmailMultiAlternatives(
-                subject=subject,
-                body=text_message,
-                from_email=settings.EMAIL_HOST_USER,
-                to=[email],
-            )
-            email_msg.attach_alternative(html_message, "text/html")
-            email_msg.send()
-            
-            logger.info(
-                f"🔒 SECURITY: Password reset email sent to {email} "
-                f"for user {user.acc_username} from IP: {client_ip}"
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to send password reset email to {email}: {e}")
-            # Delete the token since email failed
-            reset_token.delete()
+        # Case-insensitive comparison for names and email
+        # Check middle name if provided, otherwise allow empty middle name
+        middle_name_match = True
+        if middle_name:  # If middle name is provided, it must match
+            user_middle_name = user.m_name or ''
+            middle_name_match = user_middle_name.lower() == middle_name.lower()
+        
+        if (user.f_name.lower() != first_name.lower() or 
+            user.l_name.lower() != last_name.lower() or
+            not middle_name_match or
+            (user_email and user_email.lower() != email.lower())):
+            logger.warning(f"Forgot password failed: Credential mismatch for user {ctu_id}.")
             return JsonResponse({
                 'success': False,
-                'message': 'Failed to send reset email. Please try again later.'
-            }, status=500)
+                'message': 'Invalid credentials. Please check your information and try again.'
+            }, status=400)
 
-        # Return success response (generic message for security)
+        # Generate temporary password
+        alphabet = string.ascii_letters + string.digits
+        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        
+        # Update user password
+        user.set_password(temp_password)
+        user.save()
+        
+        # Store temporary password for tracking
+        try:
+            initial_password, created = UserInitialPassword.objects.get_or_create(user=user)
+            initial_password.set_plaintext(temp_password)
+            initial_password.is_active = True
+            initial_password.save()
+        except Exception as e:
+            logger.error(f"Failed to store initial password for user {ctu_id}: {e}")
+            # Continue anyway - password was already updated
+
+        logger.info(f"Temporary password generated for user {ctu_id} ({user.full_name})")
+        
         return JsonResponse({
             'success': True,
-            'message': 'If an account with that email exists, a password reset link has been sent.'
+            'message': 'Temporary password generated successfully',
+            'temp_password': temp_password,
+            'user_name': user.full_name
         })
 
     except json.JSONDecodeError:
-        logger.error("Password reset failed: Invalid JSON in request body.")
+        logger.error("Forgot password failed: Invalid JSON in request body.")
         return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
     except Exception as e:
-        logger.error(f"Password reset failed: Unexpected error: {e}")
+        logger.error(f"Forgot password failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
-
 
 @api_view(["GET", "POST"])
 def reset_password_view(request):
     """
-    🔐 SECURE Password Reset - Step 2 of 2
+    Password reset endpoint - validates token and resets password.
     
-    Validates reset token and updates user password.
+    GET: Validates reset token and returns user info
+        Query params: token (required)
+        Returns: { success: bool, user: { name, email }, expires_in_minutes: int }
     
-    GET: Validates token and returns user info (for display on reset form)
-    POST: Validates token and updates password
-    
-    Security Features:
-    - Token is one-time use only
-    - Token expires after 1 hour
-    - Password complexity requirements
-    - Token invalidated after successful reset
-    - All tokens invalidated on successful password change
-    
-    GET params: ?token=<reset_token>
-    POST payload: { "token": "<reset_token>", "new_password": "secure123", "confirm_password": "secure123" }
+    POST: Resets password using token
+        Body: { token: str, new_password: str, confirm_password: str }
+        Returns: { success: bool, message: str }
     """
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
@@ -10023,166 +9007,832 @@ def reset_password_view(request):
         response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
         return response
 
-    if not _table_exists('password_reset_tokens'):
-        logger.error("Password reset token table missing. Run shared migration 0128 or re-apply migrations.")
-        return JsonResponse({
-            'success': False,
-            'message': 'Password reset is temporarily unavailable. Please contact the administrator.'
-        }, status=503)
-
-    from apps.shared.models import PasswordResetToken
-
     if request.method == "GET":
-        # Validate token and return user info for the reset form
-        token_str = request.GET.get('token', '').strip()
+        # Validate token
+        token = request.GET.get('token', '').strip()
         
-        if not token_str:
+        if not token:
             return JsonResponse({
                 'success': False,
-                'message': 'Reset token is required'
+                'message': 'Token is required',
+                'expired': False
             }, status=400)
-
+        
         try:
-            reset_token = PasswordResetToken.objects.select_related('user').get(token=token_str)
+            reset_token = PasswordResetToken.objects.select_related('user', 'user__profile').get(token=token)
             
             if not reset_token.is_valid():
-                if reset_token.used:
-                    message = 'This reset link has already been used. Please request a new password reset.'
-                else:
-                    message = 'This reset link has expired. Please request a new password reset.'
-                
                 return JsonResponse({
                     'success': False,
-                    'message': message,
+                    'message': 'Invalid or expired reset link',
                     'expired': True
                 }, status=400)
             
-            # Token is valid, return user info
+            user = reset_token.user
+            profile = getattr(user, 'profile', None)
+            user_email = getattr(profile, 'email', None) if profile else None
+            
+            # Calculate remaining time
+            expires_at = reset_token.expires_at
+            now = timezone.now()
+            if expires_at > now:
+                expires_in_minutes = int((expires_at - now).total_seconds() / 60)
+            else:
+                expires_in_minutes = 0
+            
             return JsonResponse({
                 'success': True,
                 'user': {
-                    'name': reset_token.user.f_name,
-                    'email': reset_token.user.profile.email if hasattr(reset_token.user, 'profile') else None
+                    'name': user.full_name,
+                    'email': user_email
                 },
-                'expires_in_minutes': int((reset_token.expires_at - timezone.now()).total_seconds() / 60)
+                'expires_in_minutes': expires_in_minutes
             })
             
         except PasswordResetToken.DoesNotExist:
             return JsonResponse({
                 'success': False,
-                'message': 'Invalid reset link. Please request a new password reset.',
+                'message': 'Invalid or expired reset link',
                 'expired': True
-            }, status=400)
+            }, status=404)
         except Exception as e:
-            logger.error(f"Token validation error: {e}")
+            logger.error(f"Token validation failed: {e}")
             return JsonResponse({
                 'success': False,
-                'message': 'Error validating reset link'
+                'message': 'Error validating reset link',
+                'expired': False
             }, status=500)
-
+    
     elif request.method == "POST":
-        # Process password reset
+        # Reset password using token
         try:
             data = json.loads(request.body)
-            token_str = data.get('token', '').strip()
+            token = data.get('token', '').strip()
             new_password = data.get('new_password', '').strip()
             confirm_password = data.get('confirm_password', '').strip()
-
-            # Validate inputs
-            if not token_str:
+            
+            # Validate required fields
+            if not all([token, new_password, confirm_password]):
                 return JsonResponse({
                     'success': False,
-                    'message': 'Reset token is required'
+                    'message': 'Token, new password, and confirm password are required'
                 }, status=400)
-
-            if not new_password or not confirm_password:
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Both password fields are required'
-                }, status=400)
-
+            
+            # Check passwords match
             if new_password != confirm_password:
                 return JsonResponse({
                     'success': False,
                     'message': 'Passwords do not match'
                 }, status=400)
-
-            # Password strength validation
+            
+            # Validate password length (minimum 8 characters as per frontend)
             if len(new_password) < 8:
                 return JsonResponse({
                     'success': False,
                     'message': 'Password must be at least 8 characters long'
                 }, status=400)
-
-            # Check for at least one letter and one number
-            import re
-            if not re.search(r'[A-Za-z]', new_password) or not re.search(r'\d', new_password):
-                return JsonResponse({
-                    'success': False,
-                    'message': 'Password must contain at least one letter and one number'
-                }, status=400)
-
-            # Validate token
+            
+            # Find and validate token
             try:
-                reset_token = PasswordResetToken.objects.select_related('user').get(token=token_str)
-                
-                if not reset_token.is_valid():
-                    if reset_token.used:
-                        message = 'This reset link has already been used. Please request a new password reset.'
-                    else:
-                        message = 'This reset link has expired. Please request a new password reset.'
-                    
-                    return JsonResponse({
-                        'success': False,
-                        'message': message,
-                        'expired': True
-                    }, status=400)
-
-                # Update password
-                user = reset_token.user
-                user.set_password(new_password)
-                user.save()
-
-                # Mark token as used
-                reset_token.mark_as_used()
-
-                # 🔒 SECURITY: Invalidate ALL other reset tokens for this user
-                PasswordResetToken.objects.filter(
-                    user=user,
-                    used=False
-                ).exclude(id=reset_token.id).update(used=True, used_at=timezone.now())
-
-                # Update UserInitialPassword to mark password as changed
-                try:
-                    if hasattr(user, 'initial_password'):
-                        user.initial_password.is_active = False
-                        user.initial_password.save()
-                except Exception:
-                    pass  # Non-critical
-
-                logger.info(f"Password successfully reset for user {user.acc_username} ({user.full_name})")
-
-                return JsonResponse({
-                    'success': True,
-                    'message': 'Password reset successful! You can now login with your new password.'
-                })
-
+                reset_token = PasswordResetToken.objects.select_related('user').get(token=token)
             except PasswordResetToken.DoesNotExist:
                 return JsonResponse({
                     'success': False,
-                    'message': 'Invalid reset link. Please request a new password reset.',
+                    'message': 'Invalid or expired reset link',
+                    'expired': True
+                }, status=404)
+            
+            if not reset_token.is_valid():
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid or expired reset link',
                     'expired': True
                 }, status=400)
-
+            
+            user = reset_token.user
+            
+            # Validate password strength using Django validators
+            try:
+                from django.contrib.auth.password_validation import validate_password
+                from django.core.exceptions import ValidationError as DjangoValidationError
+                validate_password(new_password)
+            except DjangoValidationError as e:
+                message = '; '.join([str(m) for m in (e.messages if hasattr(e, 'messages') else [str(e)])])
+                return JsonResponse({
+                    'success': False,
+                    'message': message
+                }, status=400)
+            
+            # Update password
+            user.set_password(new_password)
+            user.save(update_fields=['acc_password', 'updated_at'])
+            
+            # Deactivate any active initial password records
+            try:
+                initial = getattr(user, 'initial_password', None)
+                if initial:
+                    initial.is_active = False
+                    initial.save(update_fields=['is_active'])
+            except Exception as e:
+                logger.warning(f"Failed to deactivate initial password for user {user.acc_username}: {e}")
+            
+            # Mark token as used
+            reset_token.mark_as_used()
+            
+            logger.info(f"Password reset successful for user {user.acc_username} ({user.full_name})")
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Password has been reset successfully. You can now log in with your new password.'
+            })
+            
         except json.JSONDecodeError:
-            logger.error("Password reset failed: Invalid JSON in request body.")
+            logger.error("Reset password failed: Invalid JSON in request body.")
             return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
         except Exception as e:
-            logger.error(f"Password reset failed: Unexpected error: {e}")
+            logger.error(f"Reset password failed: Unexpected error: {e}")
             return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
 
+# Donation API Views
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+@parser_classes([JSONParser, MultiPartParser])
+def donation_requests_view(request):
+    """Handle donation request listing and creation"""
+    if request.method == 'GET':
+        try:
+            # Get all donation requests with user info
+            donations = DonationRequest.objects.select_related('user').all()
+            logger.info(f"Found {donations.count()} donation requests in database")
+            
+            donation_data = []
+            for donation in donations:
+                # Get likes and comments for this donation
+                likes = Like.objects.filter(donation_request=donation)
+                comments = Comment.objects.filter(donation_request=donation).select_related('user')
+                # Get reposts for this donation
+                reposts = Repost.objects.filter(donation_request=donation).select_related('user').prefetch_related('user__profile', 'user__academic_info')
+                
+                # Check if current user liked this donation
+                is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
+                
+                donation_info = {
+                    'donation_id': donation.donation_id,
+                    'user': {
+                        'user_id': donation.user.user_id,
+                        'f_name': donation.user.f_name,
+                        'm_name': donation.user.m_name,
+                        'l_name': donation.user.l_name,
+                        'profile_pic': build_profile_pic_url(donation.user),
+                        'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                        'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                    },
+                    'description': donation.description,
+                    'status': donation.status,
+                    'created_at': donation.created_at.isoformat(),
+                    'updated_at': donation.updated_at.isoformat(),
+                    'images': get_content_images_safe(donation.donation_id, 'donation'),
+                    'likes_count': likes.count(),
+                    'comments_count': comments.count(),
+                    'reposts_count': reposts.count(),
+                    'is_liked': is_liked,
+                    'likes': [
+                        {
+                            'like_id': like.like_id,
+                            'user': {
+                                'user_id': like.user.user_id,
+                                'f_name': like.user.f_name,
+                                'm_name': like.user.m_name,
+                                'l_name': like.user.l_name,
+                                'profile_pic': like.user.profile.profile_pic.url if hasattr(like.user, 'profile') and like.user.profile.profile_pic else None
+                            }
+                        } for like in likes
+                    ],
+                    'comments': [
+                        {
+                            'comment_id': comment.comment_id,
+                            'comment_content': comment.comment_content,
+                            'date_created': comment.date_created.isoformat(),
+                            'user': {
+                                'user_id': comment.user.user_id,
+                                'f_name': comment.user.f_name,
+                                'm_name': comment.user.m_name,
+                                'l_name': comment.user.l_name,
+                                'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                            }
+                        } for comment in comments
+                    ],
+                    'reposts': [
+                        {
+                            'repost_id': repost.repost_id,
+                            'repost_date': repost.repost_date.isoformat(),
+                            'repost_caption': repost.caption,
+                            'user': {
+                                'user_id': repost.user.user_id,
+                                'f_name': repost.user.f_name,
+                                'm_name': repost.user.m_name,
+                                'l_name': repost.user.l_name,
+                                'profile_pic': repost.user.profile.profile_pic.url if hasattr(repost.user, 'profile') and repost.user.profile.profile_pic else None,
+                            },
+                            'likes_count': Like.objects.filter(repost=repost).count(),
+                            'comments_count': Comment.objects.filter(repost=repost).count(),
+                            'is_liked': Like.objects.filter(repost=repost, user=request.user).exists(),
+                            'likes': [
+                                {
+                                    'like_id': like.like_id,
+                                    'user_id': like.user.user_id,
+                                    'user': {
+                                        'user_id': like.user.user_id,
+                                        'f_name': like.user.f_name,
+                                        'm_name': like.user.m_name,
+                                        'l_name': like.user.l_name,
+                                        'profile_pic': build_profile_pic_url(like.user),
+                                    }
+                                } for like in Like.objects.filter(repost=repost).select_related('user')
+                            ],
+                            'comments': [
+                                {
+                                    'comment_id': comment.comment_id,
+                                    'comment_content': comment.comment_content,
+                                    'date_created': comment.date_created.isoformat(),
+                                    'replies_count': Reply.objects.filter(comment=comment).count(),
+                                    'user': {
+                                        'user_id': comment.user.user_id,
+                                        'f_name': comment.user.f_name,
+                                        'm_name': comment.user.m_name,
+                                        'l_name': comment.user.l_name,
+                                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                                    }
+                                } for comment in Comment.objects.filter(repost=repost).select_related('user')
+                            ],
+                            'original_post': {
+                                'donation_id': donation.donation_id,
+                                'post_content': donation.description,
+                                'post_images': get_content_images_safe(donation.donation_id, 'donation'),
+                                'status': donation.status,
+                                'created_at': donation.created_at.isoformat(),
+                                'user': {
+                                    'user_id': donation.user.user_id,
+                                    'f_name': donation.user.f_name,
+                                    'm_name': donation.user.m_name,
+                                    'l_name': donation.user.l_name,
+                                    'profile_pic': build_profile_pic_url(donation.user),
+                                }
+                            }
+                        } for repost in reposts
+                    ]
+                }
+                donation_data.append(donation_info)
+            
+            response_data = {
+                'success': True,
+                'donations': donation_data
+            }
+            
+            logger.info(f"Returning {len(donation_data)} donations to frontend")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error fetching donation requests: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to fetch donation requests'}, status=500)
+    
+    elif request.method == 'POST':
+        try:
+            data = request.data
+            description = data.get('description')
+            images = data.get('images', [])
+            
+            logger.info(f"Creating donation request for user {request.user.user_id}: {description[:50]}...")
+            
+            if not description or not description.strip():
+                logger.warning("Donation request failed: Description is required")
+                return JsonResponse({'success': False, 'message': 'Description is required'}, status=400)
+            
+            # Create donation request
+            donation = DonationRequest.objects.create(
+                user=request.user,
+                description=description.strip()
+            )
+            
+            # Create mention notifications for users mentioned in the donation post
+            create_mention_notifications(
+                description.strip(),
+                request.user,
+                donation_id=donation.donation_id
+            )
+            
+            # Notify OJT and alumni users if post author is admin or PESO
+            notify_users_of_admin_peso_post(request.user, "donation", donation.donation_id)
+            
+            # Handle image uploads if any
+            # Handle FormData file uploads (mobile app)
+            if request.FILES:
+                logger.info(f'Received {len(request.FILES)} files via FormData for donation')
+                
+                # Get all image files and sort them by key to ensure consistent ordering
+                image_files = []
+                for key, file in request.FILES.items():
+                    if key.startswith('images') and file:
+                        image_files.append((key, file))
+                
+                # Sort by key to ensure consistent ordering
+                image_files.sort(key=lambda x: x[0])
+                
+                for order_index, (key, file) in enumerate(image_files):
+                    try:
+                        # Create ContentImage instance for donation
+                        donation_image = ContentImage.objects.create(
+                            content_type='donation',
+                            content_id=donation.donation_id,
+                            order=order_index
+                        )
+                        donation_image.image.save(file.name, file, save=True)
+                        logger.info(f'Saved FormData donation image {order_index}: {donation_image.image.url}')
+                    except Exception as e:
+                        logger.error(f'Error saving FormData donation image {order_index}: {e}')
+                        continue
+            # Handle base64 images (backward compatibility)
+            elif images:
+                for index, image_data in enumerate(images):
+                    if image_data and image_data.startswith('data:image'):
+                        # Handle base64 image data
+                        try:
+                            format, imgstr = image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            imgdata = base64.b64decode(imgstr)
+                            
+                            # Create a unique filename
+                            filename = f"donation_{donation.donation_id}_image_{index}_{uuid.uuid4().hex[:8]}.{ext}"
+                            
+                            # Save the image
+                            donation_image = ContentImage.objects.create(
+                                content_type='donation',
+                                content_id=donation.donation_id,
+                                order=index
+                            )
+                            donation_image.image.save(filename, ContentFile(imgdata), save=True)
+                        except Exception as e:
+                            logger.error(f"Error saving donation image {index}: {e}")
+                            # Continue with other images even if one fails
+                            continue
+            
+            # Return the created donation with full details
+            likes = Like.objects.filter(donation_request=donation)
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            reposts = Repost.objects.filter(donation_request=donation)
+            
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name,
+                    'm_name': donation.user.m_name,
+                    'l_name': donation.user.l_name,
+                    'profile_pic': donation.user.profile.profile_pic.url if hasattr(donation.user, 'profile') and donation.user.profile.profile_pic else None,
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name} {donation.user.m_name} {donation.user.l_name}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                                'images': get_content_images_safe(donation.donation_id, 'donation'),
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'likes': [],
+                'comments': [],
+                'reposts': []
+            }
+            
+            response_data = {
+                'success': True,
+                'message': 'Donation request created successfully',
+                'donation': donation_info
+            }
+            
+            logger.info(f"Successfully created donation request {donation.donation_id} for user {request.user.user_id}")
+            return JsonResponse(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error creating donation request: {e}")
+            return JsonResponse({'success': False, 'message': 'Failed to create donation request'}, status=500)
+
+
+@api_view(['POST', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_like_view(request, donation_id):
+    """Handle donation like/unlike"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'POST':
+            # Like the donation
+            like, created = Like.objects.get_or_create(
+                donation_request=donation,
+                user=request.user,
+                defaults={
+                    'post': None,
+                    'forum': None,
+                    'repost': None
+                }
+            )
+            
+            if created:
+                # Award engagement points for liking
+                award_engagement_points(request.user, 'like')
+                
+                # Create notification for donation owner
+                if request.user.user_id != donation.user.user_id:
+                    notification = Notification.objects.create(
+                        user=donation.user,
+                        notif_type='like',
+                        subject='New Like',
+                        notifi_content=f"{request.user.full_name} liked your donation post<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                        notif_date=timezone.now()
+                    )
+                    # Broadcast donation like notification in real-time
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting donation like notification: {e}")
+                return JsonResponse({'success': True, 'message': 'Donation liked'})
+            else:
+                return JsonResponse({'success': False, 'message': 'Already liked'})
+        
+        elif request.method == 'DELETE':
+            # Unlike the donation
+            try:
+                like = Like.objects.get(donation_request=donation, user=request.user)
+                like.delete()
+                # Deduct engagement points for unliking
+                deduct_engagement_points(request.user, 'like')
+                return JsonResponse({'success': True, 'message': 'Donation unliked'})
+            except Like.DoesNotExist:
+                return JsonResponse({'success': False, 'message': 'Not liked'})
+                
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation like: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle like'}, status=500)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comments_view(request, donation_id):
+    """Handle donation comments"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'GET':
+            # Get all comments for this donation
+            comments = Comment.objects.filter(donation_request=donation).select_related('user')
+            
+            comments_data = []
+            for comment in comments:
+                # Get reply count for this comment
+                reply_count = Reply.objects.filter(comment=comment).count()
+                comments_data.append({
+                    'comment_id': comment.comment_id,
+                    'comment_content': comment.comment_content,
+                    'date_created': comment.date_created.isoformat(),
+                    'replies_count': reply_count,
+                    'user': {
+                        'user_id': comment.user.user_id,
+                        'f_name': comment.user.f_name,
+                        'm_name': comment.user.m_name,
+                        'l_name': comment.user.l_name,
+                        'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                    }
+                })
+            
+            return JsonResponse({
+                'success': True,
+                'comments': comments_data
+            })
+        
+        elif request.method == 'POST':
+            # Create a new comment
+            data = request.data
+            comment_content = data.get('comment_content', '').strip()
+            
+            if not comment_content:
+                return JsonResponse({'success': False, 'message': 'Comment content is required'}, status=400)
+            
+            comment = Comment.objects.create(
+                donation_request=donation,
+                user=request.user,
+                comment_content=comment_content,
+                date_created=timezone.now()
+            )
+            
+            # Create mention notifications
+            create_mention_notifications(
+                comment_content,
+                request.user,
+                comment_id=comment.comment_id,
+                donation_id=donation.donation_id
+            )
+            
+            # Create notification for donation owner
+            if request.user.user_id != donation.user.user_id:
+                notification = Notification.objects.create(
+                    user=donation.user,
+                    notif_type='comment',
+                    subject='New Comment',
+                    notifi_content=f"{request.user.full_name} commented on your donation post<!--DONATION_ID:{donation.donation_id}--><!--COMMENT_ID:{comment.comment_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                    notif_date=timezone.now()
+                )
+                # Broadcast donation comment notification in real-time
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_notification
+                    broadcast_notification(notification)
+                except Exception as e:
+                    logger.error(f"Error broadcasting donation comment notification: {e}")
+            
+            # Return the full comment data
+            comment_data = {
+                'comment_id': comment.comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat(),
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'm_name': comment.user.m_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': comment.user.profile.profile_pic.url if hasattr(comment.user, 'profile') and comment.user.profile.profile_pic else None
+                }
+            }
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Comment added successfully',
+                'comment': comment_data
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comments: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
+
+
+@api_view(['PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_comment_edit_view(request, donation_id, comment_id):
+    """Handle donation comment edit/delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        comment = Comment.objects.get(comment_id=comment_id, donation_request=donation)
+        
+        # Allow comment owner OR donation owner to delete/edit comment
+        comment_owner = comment.user.user_id == request.user.user_id
+        donation_owner = donation.user.user_id == request.user.user_id
+        
+        if not (comment_owner or donation_owner):
+            return JsonResponse({'error': 'Unauthorized'}, status=403)
+            
+        if request.method == 'PUT':
+            # Only comment owner can edit
+            if not comment_owner:
+                return JsonResponse({'error': 'Only comment owner can edit'}, status=403)
+            data = request.data
+            content = data.get('comment_content')
+            if content is None:
+                return JsonResponse({'error': 'No content provided'}, status=400)
+            comment.comment_content = content
+            comment.save()
+            return JsonResponse({'success': True})
+        else:
+            # Both comment owner and donation owner can delete
+            # Deduct engagement points for deleting comment
+            deduct_engagement_points(comment.user, 'comment')
+            comment.delete()
+            return JsonResponse({'success': True})
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'error': 'Donation request not found'}, status=404)
+    except Comment.DoesNotExist:
+        return JsonResponse({'error': 'Comment not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error handling donation comment edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to handle comment operation'}, status=500)
+
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_repost_view(request, donation_id):
+    """Handle donation reposting"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        # Get caption from request data
+        caption = request.data.get('caption', '')
+        if caption:
+            caption = caption.strip() or None
+        
+        # Create a repost of the donation
+        repost = Repost.objects.create(
+            donation_request=donation,
+            user=request.user,
+            caption=caption,
+            repost_date=timezone.now()
+        )
+        
+        # Create mention notifications for users mentioned in the repost caption
+        if caption:
+            create_mention_notifications(
+                caption,
+                request.user,
+                donation_id=donation.donation_id,
+                repost_id=repost.repost_id
+            )
+        
+        # Award engagement points (+5 for share/repost)
+        award_engagement_points(request.user, 'share')
+        
+        # Create notification for donation owner (only if the reposter is not the donation owner)
+        if request.user.user_id != donation.user.user_id:
+            notification = Notification.objects.create(
+                user=donation.user,
+                notif_type='repost',
+                subject='Your Donation Request Was Reposted',
+                notifi_content=f"{request.user.full_name} reposted your donation request<!--DONATION_ID:{donation.donation_id}--><!--ACTOR_ID:{request.user.user_id}-->",
+                notif_date=timezone.now()
+            )
+            # Broadcast donation repost notification in real-time
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting donation repost notification: {e}")
+        
+                return JsonResponse({
+            'success': True,
+            'message': 'Donation reposted successfully',
+            'repost_id': repost.repost_id
+        })
+        
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error reposting donation: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def donation_detail_edit_view(request, donation_id):
+    """Handle donation detail view, edit, and delete"""
+    try:
+        donation = DonationRequest.objects.get(donation_id=donation_id)
+        
+        if request.method == 'GET':
+            # Get likes, comments, and reposts for this donation
+            likes = Like.objects.filter(donation_request=donation).select_related('user')
+            comments = Comment.objects.filter(donation_request=donation).select_related('user').order_by('-date_created')
+            reposts = Repost.objects.filter(donation_request=donation).select_related('user')
+            is_liked = Like.objects.filter(donation_request=donation, user=request.user).exists()
+            
+            # Return donation details with full interaction data
+            donation_info = {
+                'donation_id': donation.donation_id,
+                'post_id': donation.donation_id,  # Add for compatibility with frontend
+                'user': {
+                    'user_id': donation.user.user_id,
+                    'f_name': donation.user.f_name or '',
+                    'm_name': donation.user.m_name or '',
+                    'l_name': donation.user.l_name or '',
+                    'profile_pic': build_profile_pic_url(donation.user),
+                    'year_graduated': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'batch': donation.user.academic_info.year_graduated if hasattr(donation.user, 'academic_info') and donation.user.academic_info.year_graduated else None,
+                    'name': f"{donation.user.f_name or ''} {donation.user.m_name or ''} {donation.user.l_name or ''}".strip()
+                },
+                'description': donation.description,
+                'status': donation.status,
+                'created_at': donation.created_at.isoformat(),
+                'updated_at': donation.updated_at.isoformat(),
+                'images': get_content_images_safe(donation.donation_id, 'donation'),
+                'likes_count': likes.count(),
+                'comments_count': comments.count(),
+                'reposts_count': reposts.count(),
+                'liked_by_user': is_liked,
+                'likes': [{
+                    'user_id': l.user.user_id,
+                    'f_name': l.user.f_name,
+                    'l_name': l.user.l_name,
+                    'profile_pic': build_profile_pic_url(l.user),
+                    'initials': None if build_profile_pic_url(l.user) else (
+                        ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                        if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                    ),
+                } for l in likes],
+                'comments': [{
+                    'comment_id': c.comment_id,
+                    'comment_content': c.comment_content,
+                    'date_created': c.date_created.isoformat() if c.date_created else None,
+                    'user': {
+                        'user_id': c.user.user_id,
+                        'f_name': c.user.f_name,
+                        'l_name': c.user.l_name,
+                        'profile_pic': build_profile_pic_url(c.user),
+                    }
+                } for c in comments],
+                'reposts': [{
+                    'repost_id': r.repost_id,
+                    'repost_date': r.repost_date.isoformat() if r.repost_date else None,
+                    'repost_caption': r.caption,
+                    'likes_count': Like.objects.filter(repost=r).count(),
+                    'comments_count': Comment.objects.filter(repost=r).count(),
+                    'likes': [{
+                        'user_id': l.user.user_id,
+                        'f_name': l.user.f_name,
+                        'm_name': l.user.m_name,
+                        'l_name': l.user.l_name,
+                        'profile_pic': build_profile_pic_url(l.user),
+                        'initials': None if build_profile_pic_url(l.user) else (
+                            ((l.user.f_name or '').strip()[:1].upper() + (l.user.l_name or '').strip()[:1].upper()) 
+                            if ((l.user.f_name or '').strip() or (l.user.l_name or '').strip()) else None
+                        ),
+                    } for l in Like.objects.filter(repost=r).select_related('user')],
+                    'comments': [{
+                        'comment_id': c.comment_id,
+                        'comment_content': c.comment_content,
+                        'date_created': c.date_created.isoformat() if c.date_created else None,
+                        'user': {
+                            'user_id': c.user.user_id,
+                            'f_name': c.user.f_name,
+                            'm_name': c.user.m_name,
+                            'l_name': c.user.l_name,
+                            'profile_pic': build_profile_pic_url(c.user),
+                        }
+                    } for c in Comment.objects.filter(repost=r).select_related('user').order_by('-date_created')],
+                    'user': {
+                        'user_id': r.user.user_id,
+                        'f_name': r.user.f_name,
+                        'l_name': r.user.l_name,
+                        'profile_pic': build_profile_pic_url(r.user),
+                    },
+                    'original_donation': {
+                        'donation_id': donation.donation_id,
+                        'description': donation.description,
+                        'created_at': donation.created_at.isoformat(),
+                        'user': {
+                            'user_id': donation.user.user_id,
+                            'f_name': donation.user.f_name,
+                            'l_name': donation.user.l_name,
+                            'profile_pic': build_profile_pic_url(donation.user),
+                        }
+                    }
+                } for r in reposts]
+            }
+            
+            return JsonResponse(donation_info)
+            
+        elif request.method == 'PUT':
+            # Update donation
+            data = request.data
+            
+            if 'description' in data:
+                donation.description = data['description']
+            
+            if 'status' in data:
+                donation.status = data['status']
+            
+            donation.updated_at = timezone.now()
+            donation.save()
+
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation updated successfully',
+                'donation_id': donation.donation_id
+            })
+
+        elif request.method == 'DELETE':
+            # Delete donation
+            donation.delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Donation deleted successfully'
+            })
+            
+    except DonationRequest.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error in donation detail/edit/delete: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
 
 @api_view(['GET', 'POST', 'DELETE'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def recent_searches_view(request):
     """Manage per-user recent searches.
@@ -10293,6 +9943,7 @@ def recent_searches_view(request):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def set_send_date_view(request):
     """Set send date for OJT students"""
@@ -10431,6 +10082,7 @@ def set_send_date_view(request):
         }, status=500)
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def check_all_sent_status_view(request):
     """Check if all completed OJT students are already sent to admin for a specific batch"""
@@ -10482,6 +10134,7 @@ def check_all_sent_status_view(request):
 
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
@@ -10530,6 +10183,7 @@ def get_send_dates_view(request):
 
 
 @api_view(['DELETE'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def delete_send_date_view(request):
     """Delete/remove a scheduled send date (idempotent operation)"""
@@ -10582,6 +10236,7 @@ def delete_send_date_view(request):
 
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_leaderboard_view(request):
     """
@@ -10647,6 +10302,7 @@ def engagement_leaderboard_view(request):
 
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_tasks_view(request):
     """
@@ -10681,6 +10337,7 @@ def engagement_tasks_view(request):
 
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def points_tasks_view(request):
     """
@@ -10859,10 +10516,429 @@ def points_tasks_view(request):
 
 
 # ============================
+# User Management API Endpoints (Admin only)
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def fetch_all_users_view(request):
+    """
+    Fetch all users (Admin only).
+    Returns a list of all users with their basic information.
+    """
+    try:
+        # Check if user is admin
+        user = get_current_user_from_request(request)
+        if not user or not getattr(user.account_type, 'admin', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        # Fetch all users with related data
+        users = User.objects.select_related('account_type', 'profile').all().order_by('-user_id')
+        
+        users_data = []
+        for u in users:
+            profile = getattr(u, 'profile', None)
+            # Get phone number from profile
+            phone_number = None
+            if profile:
+                phone_number = getattr(profile, 'phone_num', None) or None
+                # Clean up phone number - remove empty strings
+                if phone_number and isinstance(phone_number, str) and phone_number.strip() == '':
+                    phone_number = None
+            
+            # Get address fields from profile
+            address = None
+            home_address = None
+            if profile:
+                address = getattr(profile, 'address', None) or None
+                home_address = getattr(profile, 'home_address', None) or None
+                # Clean up address - remove empty strings
+                if address and isinstance(address, str) and address.strip() == '':
+                    address = None
+                if home_address and isinstance(home_address, str) and home_address.strip() == '':
+                    home_address = None
+            
+            users_data.append({
+                'id': u.user_id,
+                'user_id': u.user_id,
+                'ctu_id': u.acc_username,
+                'username': u.acc_username,
+                'full_name': u.full_name,
+                'first_name': u.f_name,  # Map f_name to first_name for frontend compatibility
+                'last_name': u.l_name,   # Map l_name to last_name for frontend compatibility
+                'f_name': u.f_name,
+                'm_name': u.m_name,
+                'l_name': u.l_name,
+                'email': getattr(profile, 'email', None) if profile else None,
+                'phone_number': phone_number,
+                'address': address,
+                'home_address': home_address,
+                'account_type': {
+                    'admin': getattr(u.account_type, 'admin', False),
+                    'user': getattr(u.account_type, 'user', False),
+                    'ojt': getattr(u.account_type, 'ojt', False),
+                    'coordinator': getattr(u.account_type, 'coordinator', False),
+                    'peso': getattr(u.account_type, 'peso', False),
+                },
+                'user_status': u.user_status,
+                'created_at': u.created_at.isoformat() if u.created_at else None,
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'users': users_data,
+            'total': len(users_data)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in fetch_all_users_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def create_user_view(request):
+    """
+    Create a new user (Admin only).
+    
+    Expected payload:
+    {
+        "ctu_id": str,
+        "f_name": str,
+        "m_name": str (optional),
+        "l_name": str,
+        "password": str,
+        "account_type": str,  # "admin", "user", "ojt", "coordinator", "peso"
+        "email": str (optional),
+        "phone_num": str (optional),
+        ...
+    }
+    """
+    try:
+        # Check if user is admin
+        user = get_current_user_from_request(request)
+        if not user or not getattr(user.account_type, 'admin', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        data = json.loads(request.body)
+        ctu_id = data.get('ctu_id', '').strip()
+        f_name = data.get('f_name', '').strip()
+        m_name = data.get('m_name', '').strip()
+        l_name = data.get('l_name', '').strip()
+        password = data.get('password', '').strip()
+        account_type_name = data.get('account_type', '').strip().lower()
+        program = (data.get('course') or data.get('program') or '').strip()
+        
+        # Validate required fields
+        if not all([ctu_id, f_name, l_name, password, account_type_name]):
+            return JsonResponse({
+                'success': False,
+                'message': 'CTU ID, first name, last name, password, and account type are required'
+            }, status=400)
+        
+        # Check if user already exists
+        if User.objects.filter(acc_username=ctu_id).exists():
+            return JsonResponse({
+                'success': False,
+                'message': f'User with CTU ID {ctu_id} already exists'
+            }, status=400)
+        
+        # Get account type
+        account_type_map = {
+            'admin': {'admin': True},
+            'user': {'user': True},
+            'ojt': {'ojt': True},
+            'coordinator': {'coordinator': True},
+            'peso': {'peso': True},
+        }
+        
+        if account_type_name not in account_type_map:
+            return JsonResponse({
+                'success': False,
+                'message': f'Invalid account type: {account_type_name}. Must be one of: {", ".join(account_type_map.keys())}'
+            }, status=400)
+        
+        account_type = AccountType.objects.filter(**account_type_map[account_type_name]).first()
+        if not account_type:
+            # Auto-create basic account type if missing
+            account_type = AccountType.objects.create(
+                admin=account_type_name == 'admin',
+                user=account_type_name == 'user',
+                ojt=account_type_name == 'ojt',
+                coordinator=account_type_name == 'coordinator',
+                peso=account_type_name == 'peso'
+            )
+
+        if account_type_name == 'coordinator' and not program:
+            return JsonResponse({
+                'success': False,
+                'message': 'Program is required for coordinator accounts'
+            }, status=400)
+        
+        if account_type_name == 'coordinator':
+            existing_coordinator = AcademicInfo.objects.filter(
+                program__iexact=program,
+                user__account_type__coordinator=True
+            ).exists()
+            
+            if existing_coordinator:
+                return JsonResponse({
+                    'success': False,
+                    'message': f'A coordinator is already assigned to {program}. Only one coordinator per program is allowed.'
+                }, status=400)
+        elif account_type_name == 'peso':
+            existing_peso = User.objects.filter(account_type__peso=True).exists()
+            if existing_peso:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Only one PESO account is allowed.'
+                }, status=400)
+        
+        # Create user
+        new_user = User.objects.create(
+            acc_username=ctu_id,
+            f_name=f_name,
+            m_name=m_name or '',
+            l_name=l_name,
+            user_status='active',
+            account_type=account_type,
+        )
+        new_user.set_password(password)
+        new_user.save()
+        
+        # Create profile if email or phone provided
+        email = data.get('email', '').strip()
+        phone_num = data.get('phone_num', '').strip()
+        if email or phone_num:
+            UserProfile.objects.create(
+                user=new_user,
+                email=email or None,
+                phone_num=phone_num or None,
+            )
+        
+        # Store initial password if needed
+        ensure_initial_password_active(new_user, raw_password=password, allow_create=True)
+
+        if program:
+            AcademicInfo.objects.update_or_create(
+                user=new_user,
+                defaults={'program': program}
+            )
+        
+        logger.info(f"Admin {user.acc_username} created new user {ctu_id}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'User created successfully',
+            'user_id': new_user.user_id
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON payload'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error in create_user_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def update_user_password_view(request, user_id):
+    """
+    Update a user's password (Admin only).
+    
+    Expected payload:
+    {
+        "new_password": str
+    }
+    """
+    try:
+        # Check if user is admin
+        admin_user = get_current_user_from_request(request)
+        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+        
+        data = json.loads(request.body)
+        new_password = data.get('new_password', '').strip()
+        
+        if not new_password:
+            return JsonResponse({
+                'success': False,
+                'message': 'New password is required'
+            }, status=400)
+        
+        # Validate password strength
+        try:
+            from django.contrib.auth.password_validation import validate_password
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            validate_password(new_password)
+        except DjangoValidationError as e:
+            message = '; '.join([str(m) for m in (e.messages if hasattr(e, 'messages') else [str(e)])])
+            return JsonResponse({
+                'success': False,
+                'message': message
+            }, status=400)
+        
+        # Get target user
+        try:
+            target_user = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'User not found'
+            }, status=404)
+        
+        # Update password
+        target_user.set_password(new_password)
+        target_user.save(update_fields=['acc_password', 'updated_at'])
+        
+        # Deactivate initial password record if present
+        try:
+            initial = getattr(target_user, 'initial_password', None)
+            if initial:
+                initial.is_active = False
+                initial.save(update_fields=['is_active'])
+        except Exception as e:
+            logger.warning(f"Failed to deactivate initial password for user {target_user.acc_username}: {e}")
+        
+        logger.info(f"Admin {admin_user.acc_username} updated password for user {target_user.acc_username}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Password updated successfully'
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON payload'
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error in update_user_password_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def update_user_status_view(request, user_id):
+    try:
+        admin_user = get_current_user_from_request(request)
+        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+
+        try:
+            data = json.loads(request.body or '{}')
+        except json.JSONDecodeError:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid JSON payload'
+            }, status=400)
+
+        target_status = (data.get('status') or '').strip().lower()
+        if target_status not in ['active', 'inactive']:
+            return JsonResponse({
+                'success': False,
+                'message': 'Status must be either "active" or "inactive"'
+            }, status=400)
+
+        try:
+            target_user = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'User not found'
+            }, status=404)
+
+        target_user.user_status = target_status
+        target_user.save(update_fields=['user_status', 'updated_at'])
+
+        return JsonResponse({
+            'success': True,
+            'message': f'User status updated to {target_status}'
+        })
+
+    except Exception as e:
+        logger.error(f"Error in update_user_status_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def verify_admin_password_view(request):
+    """
+    Require admins to re-enter their password before accessing sensitive actions.
+    """
+    try:
+        admin_user = get_current_user_from_request(request)
+        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+            return JsonResponse({
+                'success': False,
+                'message': 'Admin access required'
+            }, status=403)
+
+        try:
+            data = json.loads(request.body or '{}')
+        except json.JSONDecodeError:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid JSON payload'
+            }, status=400)
+
+        password = (data.get('password') or '').strip()
+        if not password:
+            return JsonResponse({
+                'success': False,
+                'message': 'Password is required'
+            }, status=400)
+
+        if not admin_user.check_password(password):
+            return JsonResponse({
+                'success': False,
+                'message': 'Incorrect password'
+            }, status=401)
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Verification successful'
+        })
+
+    except Exception as e:
+        logger.error(f"Error in verify_admin_password_view: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }, status=500)
+
 # Engagement Points Settings API Endpoints
 # ============================
 
 @api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_points_settings_view(request):
     """
@@ -10976,6 +11052,7 @@ def engagement_points_settings_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def milestone_tasks_points_view(request):
     """
@@ -11127,6 +11204,7 @@ def milestone_tasks_points_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_requests_list_view(request):
     """
@@ -11246,6 +11324,7 @@ def reward_requests_list_view(request):
 
 
 @api_view(['GET', 'POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_items_view(request):
     """
@@ -11253,16 +11332,27 @@ def inventory_items_view(request):
     POST: Create a new inventory item (admin only).
     """
     try:
-        user = request.user
+        user = get_current_user_from_request(request)
+        if not user:
+            return JsonResponse(
+                {'success': False, 'message': 'Authentication required'},
+                status=401
+            )
         is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
 
         if request.method == 'GET':
-            items_qs = RewardInventoryItem.objects.all().order_by('-updated_at')
-
-            items_data = [
-                serialize_inventory_item(item, include_admin_fields=is_admin)
-                for item in items_qs
-            ]
+            items = RewardInventoryItem.objects.all().order_by('-updated_at')
+            items_data = []
+            for item in items:
+                items_data.append({
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat() if item.created_at else None,
+                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+                })
 
             return JsonResponse({
                 'success': True,
@@ -11283,23 +11373,40 @@ def inventory_items_view(request):
         quantity = data.get('quantity')
         value = (data.get('value') or '').strip()
 
-        if not name or not item_type or value == '':
+        # Validate required fields
+        if not name:
             return JsonResponse(
-                {'success': False, 'message': 'Name, type, and value are required'},
+                {'success': False, 'message': 'Name is required'},
+                status=400
+            )
+        if not item_type:
+            return JsonResponse(
+                {'success': False, 'message': 'Type is required'},
+                status=400
+            )
+        if not value or value == '':
+            return JsonResponse(
+                {'success': False, 'message': 'Value is required'},
+                status=400
+            )
+        if quantity is None:
+            return JsonResponse(
+                {'success': False, 'message': 'Quantity is required'},
                 status=400
             )
 
+        # Validate and convert quantity
         try:
             quantity = int(quantity)
         except (TypeError, ValueError):
             return JsonResponse(
-                {'success': False, 'message': 'Quantity must be an integer'},
+                {'success': False, 'message': 'Quantity must be a valid integer'},
                 status=400
             )
 
-        if quantity < 0:
+        if quantity < 1:
             return JsonResponse(
-                {'success': False, 'message': 'Quantity cannot be negative'},
+                {'success': False, 'message': 'Quantity must be at least 1'},
                 status=400
             )
 
@@ -11315,7 +11422,15 @@ def inventory_items_view(request):
         return JsonResponse({
             'success': True,
             'message': 'Inventory item created successfully',
-            'item': serialize_inventory_item(item, include_admin_fields=True),
+            'item': {
+                'id': item.item_id,
+                'name': item.name,
+                'type': item.type,
+                'quantity': item.quantity,
+                'value': item.value,
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+            }
         }, status=201)
 
     except Exception as e:
@@ -11325,103 +11440,130 @@ def inventory_items_view(request):
             status=500
         )
 
-
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_analytics_view(request):
-    """Provide redemption trends and simple stock forecasts for admins."""
+    """
+    GET: Get inventory analytics (admin only).
+    Returns statistics about inventory items, redemption trends, top movers, etc.
+    """
     try:
-        user = request.user
+        user = get_current_user_from_request(request)
+        if not user:
+            return JsonResponse(
+                {'success': False, 'message': 'Authentication required'},
+                status=401
+            )
         is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+
         if not is_admin:
             return JsonResponse(
                 {'success': False, 'message': 'Admin access required'},
                 status=403
             )
 
-        now_ts = timezone.now()
-        lookback_start = now_ts - timedelta(days=INVENTORY_ANALYTICS_LOOKBACK_DAYS)
+        from datetime import timedelta
+        lookback_days = 30
+        cutoff_date = timezone.now() - timedelta(days=lookback_days)
 
-        items_with_stats = (
-            RewardInventoryItem.objects
-            .annotate(
-                total_claims=Count('requests', filter=Q(requests__status='claimed')),
-                claims_lookback=Count(
-                    'requests',
-                    filter=Q(requests__status='claimed', requests__requested_at__gte=lookback_start)
-                ),
-                last_claimed_at=Max(
-                    'requests__requested_at',
-                    filter=Q(requests__status='claimed')
-                ),
-            )
-            .order_by('name')
+        # Get basic inventory statistics
+        total_items = RewardInventoryItem.objects.count()
+        total_stock = RewardInventoryItem.objects.aggregate(
+            total=Sum('quantity')
+        )['total'] or 0
+        
+        # Get reward claims in the last 30 days
+        recent_claims = RewardHistory.objects.filter(
+            given_at__gte=cutoff_date
         )
-
+        total_claims_30d = recent_claims.count()
+        avg_daily_redemption = total_claims_30d / lookback_days if lookback_days > 0 else 0
+        
+        # Get all inventory items with their claim statistics
+        all_items = RewardInventoryItem.objects.all()
         items_data = []
-        total_stock = 0
-        total_claims_lookback = 0
-
-        for item in items_with_stats:
-            quantity = max(getattr(item, 'quantity', 0), 0)
-            claims_30d = getattr(item, 'claims_lookback', 0) or 0
-            total_claims = getattr(item, 'total_claims', 0) or 0
-            total_stock += quantity
-            total_claims_lookback += claims_30d
-
-            avg_daily = claims_30d / INVENTORY_ANALYTICS_LOOKBACK_DAYS if claims_30d else 0
-            projected_run_out = round(quantity / avg_daily, 1) if avg_daily and quantity > 0 else None
-
-            if claims_30d >= 10:
+        
+        for item in all_items:
+            # Count claims for this item in last 30 days (match by name and type)
+            item_claims_30d = RewardHistory.objects.filter(
+                reward_name=item.name,
+                reward_type=item.type,
+                given_at__gte=cutoff_date
+            ).count()
+            
+            # Get last claimed date
+            last_claimed = RewardHistory.objects.filter(
+                reward_name=item.name,
+                reward_type=item.type
+            ).order_by('-given_at').first()
+            
+            # Calculate average daily redemption for this item
+            avg_daily = item_claims_30d / lookback_days if lookback_days > 0 else 0
+            
+            # Calculate projected run out days (if quantity > 0 and avg_daily > 0)
+            projected_run_out = None
+            if item.quantity > 0 and avg_daily > 0:
+                projected_run_out = int(item.quantity / avg_daily)
+            
+            # Determine demand level
+            if item_claims_30d >= 10:
                 demand_level = 'high'
-            elif claims_30d >= 3:
+            elif item_claims_30d >= 3:
                 demand_level = 'medium'
             else:
                 demand_level = 'low'
-
+            
+            # Stockout risk (low stock or high demand)
+            stockout_risk = item.quantity <= 5 or (demand_level == 'high' and item.quantity <= 20)
+            
             items_data.append({
                 'id': item.item_id,
                 'name': item.name,
                 'type': item.type,
-                'quantity': quantity,
+                'quantity': item.quantity,
                 'value': item.value,
-                'total_claims': total_claims,
-                'claims_last_30_days': claims_30d,
+                'total_claims': RewardHistory.objects.filter(
+                    reward_name=item.name,
+                    reward_type=item.type
+                ).count(),
+                'claims_last_30_days': item_claims_30d,
                 'avg_daily_redemption': round(avg_daily, 2),
                 'projected_run_out_days': projected_run_out,
                 'demand_level': demand_level,
-                'last_claimed_at': item.last_claimed_at.isoformat() if item.last_claimed_at else None,
-                'stockout_risk': projected_run_out is not None and projected_run_out <= 14,
+                'last_claimed_at': last_claimed.given_at.isoformat() if last_claimed else None,
+                'stockout_risk': stockout_risk,
             })
+        
+        # Sort items by claims in last 30 days (descending)
+        sorted_items = sorted(items_data, key=lambda x: x['claims_last_30_days'], reverse=True)
+        
+        # Top movers (top 5 most claimed items)
+        top_movers = sorted_items[:5] if len(sorted_items) > 0 else []
+        
+        # Slow movers (items with 0 claims in last 30 days)
+        slow_movers = [item for item in items_data if item['claims_last_30_days'] == 0]
 
-        avg_daily_overall = (
-            round(total_claims_lookback / INVENTORY_ANALYTICS_LOOKBACK_DAYS, 2)
-            if total_claims_lookback else 0
-        )
-
-        top_movers = sorted(
-            items_data,
-            key=lambda x: (x['claims_last_30_days'], x['total_claims']),
-            reverse=True
-        )[:5]
-        slow_movers = [item for item in items_data if item['claims_last_30_days'] == 0][:5]
-
-        response_payload = {
+        response_data = {
             'success': True,
-            'generated_at': now_ts.isoformat(),
-            'lookback_days': INVENTORY_ANALYTICS_LOOKBACK_DAYS,
+            'generated_at': timezone.now().isoformat(),
+            'lookback_days': lookback_days,
             'summary': {
-                'total_items': len(items_data),
+                'total_items': total_items,
                 'total_stock': total_stock,
-                'total_claims_30d': total_claims_lookback,
-                'avg_daily_redemption': avg_daily_overall,
+                'total_claims_30d': total_claims_30d,
+                'avg_daily_redemption': round(avg_daily_redemption, 2),
             },
             'items': items_data,
             'top_movers': top_movers,
             'slow_movers': slow_movers,
         }
-        return JsonResponse(response_payload)
+        
+        logger.info(f"Inventory analytics generated: {total_items} items, {total_claims_30d} claims in last {lookback_days} days")
+        logger.info(f"Response structure - has summary: {'summary' in response_data}, has items: {'items' in response_data}")
+        
+        return JsonResponse(response_data, json_dumps_params={'ensure_ascii': False})
+
     except Exception as e:
         logger.error(f"inventory_analytics_view error: {e}")
         return JsonResponse(
@@ -11429,8 +11571,8 @@ def inventory_analytics_view(request):
             status=500
         )
 
-
 @api_view(['GET', 'PUT', 'DELETE'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_item_detail_view(request, item_id):
     """
@@ -11453,7 +11595,15 @@ def inventory_item_detail_view(request, item_id):
         if request.method == 'GET':
             return JsonResponse({
                 'success': True,
-                'item': serialize_inventory_item(item, include_admin_fields=is_admin),
+                'item': {
+                    'id': item.item_id,
+                    'name': item.name,
+                    'type': item.type,
+                    'quantity': item.quantity,
+                    'value': item.value,
+                    'created_at': item.created_at.isoformat() if item.created_at else None,
+                    'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+                }
             })
 
         if not is_admin:
@@ -11463,42 +11613,11 @@ def inventory_item_detail_view(request, item_id):
             )
 
         if request.method == 'DELETE':
-            with transaction.atomic():
-                active_requests = list(
-                    RewardRequest.objects.select_related('user').filter(
-                        reward_item=item,
-                        status__in=['pending', 'approved', 'ready_for_pickup']
-                    )
-                )
-
-                for req in active_requests:
-                    req.status = 'rejected'
-                    note = 'Item removed from inventory'
-                    if req.notes:
-                        req.notes = f"{req.notes}\n{note}"
-                    else:
-                        req.notes = note
-                    req.save(update_fields=['status', 'notes'])
-
-                    Notification.objects.create(
-                        user=req.user,
-                        notif_type='Reward Request',
-                        subject='Reward Request Cancelled',
-                        notifi_content=f'Your request for "{item.name}" was cancelled because the reward was removed from inventory.',
-                        notif_date=timezone.now(),
-                        is_read=False
-                    )
-
-                logger.info(
-                    f"Inventory item deleted by {user.full_name}: {item}. "
-                    f"Cancelled {len(active_requests)} active requests."
-                )
-                item.delete()
-
+            logger.info(f"Inventory item deleted by {user.full_name}: {item}")
+            item.delete()
             return JsonResponse({
                 'success': True,
-                'message': 'Inventory item deleted successfully',
-                'requests_cancelled': len(active_requests)
+                'message': 'Inventory item deleted successfully'
             })
 
         # PUT - update item
@@ -11551,7 +11670,15 @@ def inventory_item_detail_view(request, item_id):
         return JsonResponse({
             'success': True,
             'message': 'Inventory item updated successfully',
-            'item': serialize_inventory_item(item, include_admin_fields=is_admin),
+            'item': {
+                'id': item.item_id,
+                'name': item.name,
+                'type': item.type,
+                'quantity': item.quantity,
+                'value': item.value,
+                'created_at': item.created_at.isoformat() if item.created_at else None,
+                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+            }
         })
 
     except Exception as e:
@@ -11563,6 +11690,7 @@ def inventory_item_detail_view(request, item_id):
 
 
 @api_view(['GET'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_history_view(request):
     """
@@ -11630,6 +11758,7 @@ def reward_history_view(request):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def give_reward_view(request):
     """
@@ -11760,6 +11889,7 @@ def give_reward_view(request):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def request_reward_view(request):
     """
@@ -11804,13 +11934,13 @@ def request_reward_view(request):
                     status=400
                 )
 
-            # Enforce one request per month
+            # Enforce one request per month (exclude rejected and cancelled requests)
             now = timezone.now()
             start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             monthly_requests = RewardRequest.objects.filter(
                 user=user,
                 requested_at__gte=start_of_month
-            ).exclude(status='rejected')
+            ).exclude(status__in=['rejected', 'cancelled'])
 
             if monthly_requests.exists():
                 return JsonResponse(
@@ -11894,93 +12024,6 @@ def request_reward_view(request):
         )
 
 
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication])
-@permission_classes([IsAuthenticated])
-def cancel_reward_request_view(request, request_id):
-    """Allow a user to cancel their own pending reward request."""
-    try:
-        user = request.user
-        try:
-            reward_request = RewardRequest.objects.select_related('reward_item', 'user').get(request_id=request_id)
-        except RewardRequest.DoesNotExist:
-            return JsonResponse(
-                {'success': False, 'message': 'Reward request not found'},
-                status=404
-            )
-
-        if reward_request.user_id != user.user_id:
-            return JsonResponse(
-                {'success': False, 'message': 'You can only cancel your own requests'},
-                status=403
-            )
-
-        if reward_request.status not in ['pending', 'approved', 'ready_for_pickup']:
-            return JsonResponse(
-                {'success': False, 'message': f'Cannot cancel a {reward_request.status} request'},
-                status=400
-            )
-
-        # Check if user has already cancelled a request today (limit: 1 per day)
-        now = timezone.now()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        
-        today_cancellations = RewardRequest.objects.filter(
-            user=user,
-            status='cancelled',
-            updated_at__gte=start_of_day,
-            updated_at__lte=end_of_day
-        ).exclude(request_id=request_id).count()  # Exclude current request
-        
-        if today_cancellations >= 1:
-            return JsonResponse(
-                {
-                    'success': False,
-                    'message': 'You can only cancel 1 reward request per day. Please try again tomorrow.'
-                },
-                status=400
-            )
-
-        reward_request.status = 'cancelled'
-        cancellation_note = 'Request cancelled by user'
-        if reward_request.notes:
-            reward_request.notes = f"{reward_request.notes}\n{cancellation_note}"
-        else:
-            reward_request.notes = cancellation_note
-        reward_request.save(update_fields=['status', 'notes'])
-
-        notification = Notification.objects.create(
-            user=reward_request.user,
-            notif_type='Reward Request',
-            subject='Reward Request Cancelled',
-            notifi_content=f'You cancelled your request for "{reward_request.reward_item.name}".',
-            notif_date=timezone.now(),
-            is_read=False
-        )
-        try:
-            from apps.messaging.notification_broadcaster import broadcast_notification
-            broadcast_notification(notification)
-        except Exception as e:
-            logger.warning(f"Failed to broadcast cancellation notification: {e}")
-
-        return JsonResponse({
-            'success': True,
-            'message': 'Reward request cancelled successfully',
-            'request': {
-                'request_id': reward_request.request_id,
-                'status': reward_request.status,
-                'notes': reward_request.notes,
-            }
-        })
-    except Exception as e:
-        logger.error(f"cancel_reward_request_view error: {e}")
-        return JsonResponse(
-            {'success': False, 'message': f'Error: {str(e)}'},
-            status=500
-        )
-
-
 def get_business_days_after(start_date, days):
     """
     Calculate expiration date excluding weekends and holidays.
@@ -12041,6 +12084,7 @@ def get_business_days_after(start_date, days):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_reward_request_view(request, request_id):
     """
@@ -12165,6 +12209,7 @@ def approve_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def claim_reward_request_view(request, request_id):
     """
@@ -12317,6 +12362,87 @@ def claim_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def cancel_reward_request_view(request, request_id):
+    """
+    Cancel a reward request (user can cancel their own pending requests).
+    """
+    try:
+        user = request.user
+        
+        # Get reward request
+        try:
+            reward_request = RewardRequest.objects.get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Reward request not found'
+            }, status=404)
+        
+        # Verify this request belongs to the user
+        if reward_request.user.user_id != user.user_id:
+            return JsonResponse({
+                'success': False,
+                'message': 'Unauthorized access'
+            }, status=403)
+        
+        # Only allow cancellation of pending requests
+        if reward_request.status != 'pending':
+            return JsonResponse({
+                'success': False,
+                'message': f'Cannot cancel request with status: {reward_request.status}. Only pending requests can be cancelled.'
+            }, status=400)
+        
+        # Check if user has already cancelled a request today (limit: 1 cancellation per day)
+        now = timezone.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_cancellations = RewardRequest.objects.filter(
+            user=user,
+            status='cancelled',
+            cancelled_at__gte=start_of_day
+        ).count()
+        
+        if today_cancellations >= 1:
+            # Calculate time until next day (midnight)
+            next_day = start_of_day + timedelta(days=1)
+            hours_until_midnight = (next_day - now).total_seconds() / 3600
+            hours = int(hours_until_midnight)
+            minutes = int((hours_until_midnight - hours) * 60)
+            
+            if hours > 0:
+                time_message = f"{hours} hour{'s' if hours != 1 else ''} and {minutes} minute{'s' if minutes != 1 else ''}"
+            else:
+                time_message = f"{minutes} minute{'s' if minutes != 1 else ''}"
+            
+            return JsonResponse({
+                'success': False,
+                'message': f'You can only cancel 1 request per day. Please try again in {time_message}.'
+            }, status=400)
+        
+        # Update request status to cancelled and set cancellation timestamp
+        # Store the stage before cancellation (currently only pending can be cancelled)
+        reward_request.cancellation_stage = reward_request.status  # Store current stage before changing
+        reward_request.status = 'cancelled'
+        reward_request.cancelled_at = timezone.now()
+        reward_request.save()
+        
+        logger.info(f"User {user.full_name} cancelled reward request {request_id}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Reward request cancelled successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"cancel_reward_request_view error: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error: {str(e)}'
+        }, status=500)
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def upload_voucher_file_view(request, request_id):
     """
@@ -12361,55 +12487,6 @@ def upload_voucher_file_view(request, request_id):
     
     except Exception as e:
         logger.error(f"upload_voucher_file_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
-# Globe Labs OAuth Callback
-@csrf_exempt
-@api_view(['GET', 'POST'])
-def globe_callback_view(request):
-    """
-    Globe Labs OAuth callback - receives access token when user subscribes
-    
-    When user texts INFO to 21665316 and replies YES,
-    Globe sends: access_token and subscriber_number to this endpoint
-    """
-    try:
-        # Globe sends data as GET parameters
-        access_token = request.GET.get('access_token') or request.POST.get('access_token')
-        subscriber_number = request.GET.get('subscriber_number') or request.POST.get('subscriber_number')
-        
-        logger.info(f'Globe callback received: token={access_token[:20] if access_token else None}..., number={subscriber_number}')
-        
-        if not access_token or not subscriber_number:
-            return JsonResponse({
-                'success': False,
-                'message': 'Missing access_token or subscriber_number'
-            }, status=400)
-        
-        # Store or update the access token
-        from apps.shared.models import GlobeAccessToken
-        
-        token_obj, created = GlobeAccessToken.objects.update_or_create(
-            subscriber_number=subscriber_number,
-            defaults={
-                'access_token': access_token,
-                'is_active': True
-            }
-        )
-        
-        action = 'created' if created else 'updated'
-        logger.info(f'Globe access token {action} for {subscriber_number}')
-        
-        return JsonResponse({
-            'success': True,
-            'message': f'Access token {action} successfully',
-            'subscriber_number': subscriber_number
-        })
-        
-    except Exception as e:
-        logger.error(f'Error in globe_callback_view: {str(e)}')
         return JsonResponse({
             'success': False,
             'message': f'Error: {str(e)}'
