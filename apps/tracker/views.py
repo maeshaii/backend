@@ -425,13 +425,22 @@ def save_tracker_draft_view(request):
         
         # SANITIZE: Remove empty objects, null, undefined, and other invalid values
         # that React can't render as text in input fields
+        # IMPORTANT: Preserve file upload markers ({ type: 'file', uploaded: true, ... })
         sanitized_answers = {}
         for key, value in answers.items():
             # Skip empty objects, empty dicts, null, None
             if value is None:
                 continue
-            if isinstance(value, dict) and len(value) == 0:
-                continue
+            # PRESERVE file markers (indicate files were uploaded but lost after refresh)
+            if isinstance(value, dict):
+                # Check if it's a file marker (has 'type' and 'uploaded' keys)
+                if 'type' in value and 'uploaded' in value and value.get('type') == 'file' and value.get('uploaded') is True:
+                    # This is a file marker - PRESERVE IT
+                    sanitized_answers[key] = value
+                    continue
+                # Skip empty dicts (but file markers are not empty)
+                if len(value) == 0:
+                    continue
             # Skip empty strings only if explicitly empty (keep spaces, keep "0")
             if isinstance(value, str) and value.strip() == '':
                 continue
@@ -509,13 +518,22 @@ def load_tracker_draft_view(request):
         if draft:
             # SANITIZE: Remove empty objects and invalid values from loaded data
             # This protects against corrupted data that's already in the database
+            # IMPORTANT: Preserve file upload markers ({ type: 'file', uploaded: true, ... })
             sanitized_answers = {}
             for key, value in draft.answers.items():
                 # Skip empty objects, empty dicts, null, None
                 if value is None:
                     continue
-                if isinstance(value, dict) and len(value) == 0:
-                    continue
+                # PRESERVE file markers (indicate files were uploaded but lost after refresh)
+                if isinstance(value, dict):
+                    # Check if it's a file marker (has 'type' and 'uploaded' keys)
+                    if 'type' in value and 'uploaded' in value and value.get('type') == 'file' and value.get('uploaded') is True:
+                        # This is a file marker - PRESERVE IT
+                        sanitized_answers[key] = value
+                        continue
+                    # Skip empty dicts (but file markers are not empty)
+                    if len(value) == 0:
+                        continue
                 # Skip empty strings
                 if isinstance(value, str) and value.strip() == '':
                     continue
