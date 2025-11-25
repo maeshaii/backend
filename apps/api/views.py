@@ -4100,40 +4100,33 @@ def send_completed_to_admin_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def coordinator_requests_count_view(request):
+    """
+    Return the actual number of students that were already sent to admin
+    by coordinators but are still waiting for approval (not alumni yet).
+    This keeps sidebar/dashboard badges perfectly aligned with the Requests page.
+    """
     try:
         year = request.GET.get('year')
-        # Count distinct batches requested by coordinators
-        from apps.shared.models import OJTImport
-        qs = OJTImport.objects.filter(status='Requested')
+        year_int = None
         if year is not None and str(year).strip() != '':
             try:
                 import re
                 match = re.search(r"(20\d{2})", str(year))
                 year_int = int(match.group(1)) if match else int(str(year).strip())
-                qs = qs.filter(batch_year=year_int)
             except Exception:
-                pass
-        requested_years = set(qs.values_list('batch_year', flat=True).distinct())
+                year_int = None
 
-        # Fallback: also include any batches that currently have at least one Completed student (exclude alumni)
-        try:
-            users_qs = User.objects.filter(
-                ojt_info__ojtstatus='Completed',
-                ojt_info__is_sent_to_admin=True  # Only count students sent to admin
-            ).exclude(
-                account_type__user=True  # Exclude alumni (already approved)
-            ).select_related('academic_info')
-            if year is not None and str(year).strip() != '':
-                try:
-                    users_qs = users_qs.filter(academic_info__year_graduated=year_int)
-                except Exception:
-                    pass
-            completed_years = set(users_qs.values_list('academic_info__year_graduated', flat=True).distinct())
-            requested_years = requested_years.union({y for y in completed_years if y is not None})
-        except Exception:
-            pass
+        pending_users = User.objects.filter(
+            ojt_info__ojtstatus='Completed',
+            ojt_info__is_sent_to_admin=True  # Only those that coordinators already submitted
+        ).exclude(
+            account_type__user=True  # Exclude alumni since they were already approved
+        )
 
-        count_val = len({y for y in requested_years if y is not None})
+        if year_int is not None:
+            pending_users = pending_users.filter(academic_info__year_graduated=year_int)
+
+        count_val = pending_users.count()
         return JsonResponse({'success': True, 'count': count_val})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
