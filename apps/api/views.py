@@ -613,6 +613,12 @@ def login_view(request):
         if not user.check_password(acc_password):
             logger.warning(f"Login failed: invalid password for user {acc_username}.")
             return JsonResponse({'success': False, 'message': 'Invalid credentials'}, status=401)
+        
+        # Check if account is active
+        if not user.is_active:
+            logger.warning(f"Login failed: account deactivated for user {acc_username}.")
+            return JsonResponse({'success': False, 'message': 'Your account has been deactivated. Please contact an administrator.'}, status=403)
+        
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
         return JsonResponse({
@@ -669,6 +675,11 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         # Hashed password only
         if not user.check_password(acc_password):
             raise serializers.ValidationError('Invalid credentials')
+        
+        # Check if account is active
+        if not user.is_active:
+            raise serializers.ValidationError('Your account has been deactivated. Please contact an administrator.')
+        
         refresh = RefreshToken.for_user(user)
         # Determine if the user must change password on first login
         # Coordinator and Peso accounts are exempt from first-time login password change
