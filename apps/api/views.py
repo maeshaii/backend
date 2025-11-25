@@ -2165,8 +2165,7 @@ def import_ojt_view(request):
             return JsonResponse({
                 'success': False,
                 'message': (
-                    'Second-import template detected, but none of the listed students exist yet. '
-                    'Please run the first import to create the students before importing updates.'
+                    'Students not found. Add students first.'
                 )
             }, status=400)
 
@@ -10649,11 +10648,26 @@ def create_user_view(request):
         program = (data.get('course') or data.get('program') or '').strip()
         
         # Validate required fields
-        if not all([ctu_id, f_name, l_name, password, account_type_name]):
+        # Password is required for coordinator and peso, optional for alumni/ojt (will be auto-generated)
+        if not all([ctu_id, f_name, l_name, account_type_name]):
             return JsonResponse({
                 'success': False,
-                'message': 'CTU ID, first name, last name, password, and account type are required'
+                'message': 'CTU ID, first name, last name, and account type are required'
             }, status=400)
+        
+        # Password is required for coordinator and peso accounts
+        if account_type_name in ['coordinator', 'peso']:
+            if not password:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Password is required for coordinator and peso accounts'
+                }, status=400)
+        
+        # Auto-generate password for alumni/ojt if not provided
+        if account_type_name in ['user', 'ojt'] and not password:
+            import string
+            alphabet = string.ascii_letters + string.digits
+            password = ''.join(secrets.choice(alphabet) for _ in range(12))
         
         # Check if user already exists
         if User.objects.filter(acc_username=ctu_id).exists():
@@ -10688,23 +10702,42 @@ def create_user_view(request):
                 peso=account_type_name == 'peso'
             )
 
-        if account_type_name == 'coordinator' and not program:
-            return JsonResponse({
-                'success': False,
-                'message': 'Program is required for coordinator accounts'
-            }, status=400)
-        
         if account_type_name == 'coordinator':
-            existing_coordinator = AcademicInfo.objects.filter(
-                program__iexact=program,
-                user__account_type__coordinator=True
-            ).exists()
+            # Normalize program name for comparison (trim and uppercase)
+            program_normalized = program.strip().upper() if program else ''
             
-            if existing_coordinator:
+            if not program_normalized:
                 return JsonResponse({
                     'success': False,
-                    'message': f'A coordinator is already assigned to {program}. Only one coordinator per program is allowed.'
+                    'message': 'Program is required for coordinator accounts'
                 }, status=400)
+            
+            # Check if there's already a coordinator for this specific program
+            # Use case-insensitive comparison and handle whitespace
+            # Get all active coordinators and check their programs
+            from django.db.models import Q
+            existing_coordinators = AcademicInfo.objects.filter(
+                user__account_type__coordinator=True,
+                user__user_status='active',
+                program__isnull=False
+            ).exclude(program='').select_related('user')
+            
+            # Debug logging
+            logger.info(f"Creating coordinator for program: '{program}' (normalized: '{program_normalized}')")
+            logger.info(f"Found {existing_coordinators.count()} existing active coordinators")
+            
+            # Check if any existing coordinator has the same normalized program
+            for coord_info in existing_coordinators:
+                existing_program_normalized = coord_info.program.strip().upper() if coord_info.program else ''
+                logger.info(f"Comparing: '{program_normalized}' vs existing: '{existing_program_normalized}' (from '{coord_info.program}')")
+                if existing_program_normalized == program_normalized:
+                    logger.warning(f"Blocking coordinator creation: Program '{coord_info.program}' already has coordinator")
+                    return JsonResponse({
+                        'success': False,
+                        'message': f'A coordinator is already assigned to {coord_info.program}. Only one coordinator per program is allowed.'
+                    }, status=400)
+            
+            logger.info(f"Program '{program_normalized}' is available for new coordinator")
         elif account_type_name == 'peso':
             existing_peso = User.objects.filter(account_type__peso=True).exists()
             if existing_peso:
@@ -10728,29 +10761,45 @@ def create_user_view(request):
         # Create profile if email or phone provided
         email = data.get('email', '').strip()
         phone_num = data.get('phone_num', '').strip()
-        if email or phone_num:
-            UserProfile.objects.create(
-                user=new_user,
-                email=email or None,
-                phone_num=phone_num or None,
-            )
+        address = data.get('address', '').strip()
+        home_address = data.get('home_address', '').strip()
+        profile_payload = {}
+        if email:
+            profile_payload['email'] = email
+        if phone_num:
+            profile_payload['phone_num'] = phone_num
+        if address:
+            profile_payload['address'] = address
+        if home_address:
+            profile_payload['home_address'] = home_address
+        if profile_payload:
+            UserProfile.objects.create(user=new_user, **profile_payload)
         
         # Store initial password if needed
         ensure_initial_password_active(new_user, raw_password=password, allow_create=True)
 
         if program:
+            # Normalize program name (trim and uppercase) for consistency
+            program_normalized = program.strip().upper() if program else ''
             AcademicInfo.objects.update_or_create(
                 user=new_user,
-                defaults={'program': program}
+                defaults={'program': program_normalized}
             )
         
         logger.info(f"Admin {user.acc_username} created new user {ctu_id}")
         
-        return JsonResponse({
+        # Return the generated password for alumni/ojt accounts (so admin can see it)
+        response_data = {
             'success': True,
             'message': 'User created successfully',
             'user_id': new_user.user_id
-        })
+        }
+        
+        # Include password in response only if it was auto-generated (for alumni/ojt)
+        if account_type_name in ['user', 'ojt'] and not data.get('password'):
+            response_data['password'] = password
+        
+        return JsonResponse(response_data)
         
     except json.JSONDecodeError:
         return JsonResponse({
@@ -11395,6 +11444,15 @@ def inventory_items_view(request):
                 {'success': False, 'message': 'Type is required'},
                 status=400
             )
+        
+        # Validate type
+        valid_types = ['voucher', 'merchandise']
+        if item_type not in valid_types:
+            return JsonResponse(
+                {'success': False, 'message': f'Invalid type. Must be one of: {", ".join(valid_types)}'},
+                status=400
+            )
+        
         if not value or value == '':
             return JsonResponse(
                 {'success': False, 'message': 'Value is required'},
@@ -11433,7 +11491,7 @@ def inventory_items_view(request):
         return JsonResponse({
             'success': True,
             'message': 'Inventory item created successfully',
-            'item': {
+                'item': {
                 'id': item.item_id,
                 'name': item.name,
                 'type': item.type,
@@ -11642,7 +11700,14 @@ def inventory_item_detail_view(request, item_id):
             save_fields.add('name')
 
         if 'type' in data and data['type'] is not None:
-            item.type = str(data['type']).strip()
+            item_type = str(data['type']).strip()
+            valid_types = ['voucher', 'merchandise']
+            if item_type not in valid_types:
+                return JsonResponse(
+                    {'success': False, 'message': f'Invalid type. Must be one of: {", ".join(valid_types)}'},
+                    status=400
+                )
+            item.type = item_type
             updated_fields.append('type')
             save_fields.add('type')
 
