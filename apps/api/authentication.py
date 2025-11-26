@@ -37,7 +37,7 @@ class CustomJWTAuthentication(JWTAuthentication):
             
             # Check if account is active - prevent inactive users from using existing tokens
             if not user.is_active:
-                raise AuthenticationFailed('Your account has been deactivated. Please contact an administrator.', code='user_inactive')
+                raise AuthenticationFailed('This account is deactivated. Please contact the admin.', code='user_inactive')
             
             return user
             

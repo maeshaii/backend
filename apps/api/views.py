@@ -617,7 +617,7 @@ def login_view(request):
         # Check if account is active
         if not user.is_active:
             logger.warning(f"Login failed: account deactivated for user {acc_username}.")
-            return JsonResponse({'success': False, 'message': 'Your account has been deactivated. Please contact an administrator.'}, status=403)
+            return JsonResponse({'success': False, 'message': 'This account is deactivated. Please contact the admin.'}, status=403)
         
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
@@ -678,7 +678,7 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
         
         # Check if account is active
         if not user.is_active:
-            raise serializers.ValidationError('Your account has been deactivated. Please contact an administrator.')
+            raise serializers.ValidationError('This account is deactivated. Please contact the admin.')
         
         refresh = RefreshToken.for_user(user)
         # Determine if the user must change password on first login
@@ -1924,6 +1924,8 @@ def import_ojt_view(request):
         if not coordinator_username:
             return JsonResponse({'success': False, 'message': 'Missing coordinator username'}, status=400)
         
+        coordinator_username_lower = coordinator_username.lower()
+        
         # batch_year is now optional - will be auto-detected for second imports
 
         # Read Excel file
@@ -2122,6 +2124,65 @@ def import_ojt_view(request):
             User.objects.filter(acc_username__in=all_ctu_ids).values_list('acc_username', flat=True)
         )
         new_ctu_ids = all_ctu_ids - existing_ctu_ids
+
+        ctu_conflict_messages = {}
+        if existing_ctu_ids:
+            existing_users_with_relations = (
+                User.objects
+                .filter(acc_username__in=existing_ctu_ids)
+                .select_related('academic_info', 'ojt_company_profile', 'account_type')
+            )
+            batch_import_cache = {}
+            for owner_user in existing_users_with_relations:
+                ctu_value = owner_user.acc_username
+                conflict_message = None
+
+                ojt_profile = getattr(owner_user, 'ojt_company_profile', None)
+                assigned_coordinator = getattr(ojt_profile, 'coordinator', None)
+                if assigned_coordinator and assigned_coordinator.lower() != coordinator_username_lower:
+                    conflict_message = (
+                        f"CTU_ID {ctu_value} belongs to coordinator {assigned_coordinator}. "
+                        "Duplicate imports are not allowed."
+                    )
+
+                academic_info = getattr(owner_user, 'academic_info', None)
+                user_year = getattr(academic_info, 'year_graduated', None)
+                user_section = (getattr(academic_info, 'section', '') or '').strip()
+
+                if conflict_message is None and user_year:
+                    cache_key = (user_year, user_section.lower())
+                    if cache_key not in batch_import_cache:
+                        imports_qs = OJTImport.objects.filter(batch_year=user_year)
+                        if user_section:
+                            imports_with_section = imports_qs.filter(section__iexact=user_section)
+                            if imports_with_section.exists():
+                                imports_qs = imports_with_section
+                        batch_import_cache[cache_key] = set(
+                            imports_qs.values_list('coordinator', flat=True)
+                        )
+                    other_coordinators = {
+                        c for c in batch_import_cache[cache_key]
+                        if c and c.lower() != coordinator_username_lower
+                    }
+                    if other_coordinators:
+                        original_coordinator = sorted(other_coordinators)[0]
+                        display_section = user_section or 'N/A'
+                        conflict_message = (
+                            f"CTU_ID {ctu_value} was already imported by {original_coordinator} "
+                            f"(batch {user_year}, section {display_section}). "
+                            f"Cannot import to {coordinator_username}."
+                        )
+
+                if (conflict_message is None 
+                        and owner_user.account_type 
+                        and owner_user.account_type.ojt):
+                    conflict_message = (
+                        f"CTU_ID {ctu_value} already exists as an OJT student and cannot be reassigned "
+                        "without administrator review."
+                    )
+
+                if conflict_message:
+                    ctu_conflict_messages[ctu_value] = conflict_message
 
         # (Cooldown logic moved below once we confirm the file is a second-import template.)
 
@@ -2468,6 +2529,14 @@ def import_ojt_view(request):
                 existing_user_check = User.objects.filter(acc_username=ctu_id).first()
                 
                 print(f"Row {index+2} - CTU_ID: {ctu_id}, User exists: {existing_user_check is not None}")
+
+                conflict_message = ctu_conflict_messages.get(ctu_id)
+                if conflict_message and existing_user_check:
+                    error_msg = f"Row {index + 2}: {conflict_message}"
+                    print(f"❌ BLOCKED: {error_msg}")
+                    errors.append(error_msg)
+                    skipped_count += 1
+                    continue
                 
                 # IMPORTANT: Check if this CTU_ID was imported by a different coordinator
                 if existing_user_check:
@@ -10350,6 +10419,11 @@ def points_tasks_view(request):
         from apps.shared.models import PointsTask, UserTaskCompletion, UserProfile, EngagementPointsSettings
         user = request.user
         
+        # Check if user is admin or peso - exclude them from milestone tasks
+        is_admin = hasattr(user, 'account_type') and getattr(user.account_type, 'admin', False)
+        is_peso = hasattr(user, 'account_type') and getattr(user.account_type, 'peso', False)
+        exclude_milestones = is_admin or is_peso
+        
         # Check if milestone tasks are enabled
         settings = EngagementPointsSettings.get_settings()
         milestone_tasks_enabled = getattr(settings, 'milestone_tasks_enabled', True)
@@ -10357,8 +10431,8 @@ def points_tasks_view(request):
         # Get all active points tasks
         tasks = PointsTask.objects.filter(is_active=True).order_by('order', 'task_id')
         
-        # Filter out milestone tasks if the feature is disabled
-        if not milestone_tasks_enabled:
+        # Filter out milestone tasks if the feature is disabled OR if user is admin/peso
+        if not milestone_tasks_enabled or exclude_milestones:
             tasks = tasks.exclude(task_type__startswith='milestone_')
         
         # Get user's completed tasks
