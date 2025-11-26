@@ -9738,12 +9738,12 @@ def donation_repost_view(request, donation_id):
     """Handle donation reposting"""
     try:
         donation = DonationRequest.objects.get(donation_id=donation_id)
-        
+
         # Get caption from request data
         caption = request.data.get('caption', '')
         if caption:
             caption = caption.strip() or None
-        
+
         # Create a repost of the donation
         repost = Repost.objects.create(
             donation_request=donation,
@@ -9751,7 +9751,7 @@ def donation_repost_view(request, donation_id):
             caption=caption,
             repost_date=timezone.now()
         )
-        
+
         # Create mention notifications for users mentioned in the repost caption
         if caption:
             create_mention_notifications(
@@ -9760,10 +9760,10 @@ def donation_repost_view(request, donation_id):
                 donation_id=donation.donation_id,
                 repost_id=repost.repost_id
             )
-        
+
         # Award engagement points (+5 for share/repost)
         award_engagement_points(request.user, 'share')
-        
+
         # Create notification for donation owner (only if the reposter is not the donation owner)
         if request.user.user_id != donation.user.user_id:
             notification = Notification.objects.create(
@@ -9779,13 +9779,14 @@ def donation_repost_view(request, donation_id):
                 broadcast_notification(notification)
             except Exception as e:
                 logger.error(f"Error broadcasting donation repost notification: {e}")
-        
-                return JsonResponse({
+
+        # Always return a success response if we reached this point
+        return JsonResponse({
             'success': True,
             'message': 'Donation reposted successfully',
             'repost_id': repost.repost_id
         })
-        
+
     except DonationRequest.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'Donation request not found'}, status=404)
     except Exception as e:

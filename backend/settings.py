@@ -137,7 +137,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://10.0.2.2:8000",
     "http://192.168.2.112:8000",
     "http://192.168.101.70:8000",
-    "https://carlos-unripening-henley.ngrok-free.dev",
+    "https://footed-reese-prognosticatively.ngrok-free.dev",
     "http://172.16.59.112:8000",
     "https://nxlclfy-akmia-8081.exp.direct",
 
