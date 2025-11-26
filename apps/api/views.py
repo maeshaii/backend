@@ -8908,16 +8908,31 @@ def online_users_view(request):
         mutual_follow_ids = following_ids.intersection(follower_ids)
         
         if not mutual_follow_ids:
+            logger.debug('No mutual follows found for the current user.')
+
+        # Include connected admin/PESO participants so staff also surface as online
+        special_accounts_qs = User.objects.filter(
+            conversations__participants=current_user
+        ).filter(
+            Q(account_type__admin=True) | Q(account_type__peso=True)
+        ).exclude(user_id=current_user.user_id).distinct()
+        special_account_ids = set(special_accounts_qs.values_list('user_id', flat=True))
+        if special_account_ids:
+            logger.info(f"Including {len(special_account_ids)} admin/PESO participants for online status: {list(special_account_ids)}")
+
+        candidate_ids = set(mutual_follow_ids) | special_account_ids
+
+        if not candidate_ids:
             return JsonResponse({
                 'success': True,
                 'online_users': [],
                 'count': 0
             })
-        
-        # Get online status for mutual follows
+
+        # Get online status for mutual follows & admins/PESO participants
         online_users = []
-        logger.info(f"Checking online status for {len(mutual_follow_ids)} mutual follows: {list(mutual_follow_ids)}")
-        for user_id in mutual_follow_ids:
+        logger.info(f"Checking online status for {len(candidate_ids)} targets: {list(candidate_ids)}")
+        for user_id in candidate_ids:
             # Check if user is online (has active connections)
             # A user is considered online if they have ANY WebSocket connection:
             # - Notification WebSocket (conversation_id=0)

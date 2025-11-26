@@ -361,9 +361,13 @@ def tracker_form_view(request, tracker_form_id):
 @permission_classes([IsAuthenticated])
 def check_user_tracker_status_view(request):
     from apps.shared.models import User, TrackerResponse
+    import logging
+    
+    logger = logging.getLogger(__name__)
     
     user_id = request.GET.get('user_id')
     if not user_id:
+        logger.warning(f'check_user_tracker_status: Missing user_id parameter')
         return JsonResponse({'success': False, 'message': 'user_id is required'}, status=400)
     
     try:
@@ -371,14 +375,22 @@ def check_user_tracker_status_view(request):
         # Only check for FINAL submissions, not drafts
         existing_response = TrackerResponse.objects.filter(user=user, is_draft=False).first()
         
+        has_submitted = existing_response is not None
+        submitted_at = existing_response.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if existing_response else None
+        
+        logger.info(f'check_user_tracker_status: User {user_id} - has_submitted={has_submitted}, submitted_at={submitted_at}')
+        
+        # CRITICAL: Always return has_submitted as boolean to ensure consistent response structure
         return JsonResponse({
             'success': True, 
-            'has_submitted': existing_response is not None,
-            'submitted_at': existing_response.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if existing_response else None
+            'has_submitted': bool(has_submitted),  # Explicitly cast to boolean
+            'submitted_at': submitted_at
         })
     except User.DoesNotExist:
+        logger.error(f'check_user_tracker_status: User {user_id} not found')
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     except Exception as e:
+        logger.error(f'check_user_tracker_status: Error for user {user_id}: {str(e)}', exc_info=True)
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 
