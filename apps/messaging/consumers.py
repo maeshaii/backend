@@ -832,7 +832,7 @@ class UserManagementConsumer(AsyncWebsocketConsumer):
 
 	async def connect(self):
 		self.user = self.scope.get('user')
-		if not self._has_admin_access():
+		if not await self._has_admin_access():
 			await self.accept()
 			await self.send(text_data=json.dumps({
 				'type': 'connection_denied',
@@ -888,17 +888,40 @@ class UserManagementConsumer(AsyncWebsocketConsumer):
 			'payload': event.get('payload')
 		}))
 
-	def _has_admin_access(self):
-		if not self.user or not hasattr(self.user, 'user_id'):
+	@database_sync_to_async
+	def _check_admin_access(self):
+		"""Check admin access in sync context to avoid async database issues"""
+		if not self.user:
 			return False
-		account_type = getattr(self.user, 'account_type', None)
-		return bool(
-			getattr(self.user, 'is_staff', False)
-			or getattr(self.user, 'is_superuser', False)
-			or getattr(account_type, 'admin', False)
-			or getattr(account_type, 'peso', False)
-			or getattr(account_type, 'coordinator', False)
-		)
+		try:
+			# Check if user has user_id attribute (avoid hasattr to prevent DB queries)
+			user_id = getattr(self.user, 'user_id', None)
+			if not user_id:
+				return False
+			
+			# Check staff and superuser flags
+			is_staff = getattr(self.user, 'is_staff', False)
+			is_superuser = getattr(self.user, 'is_superuser', False)
+			
+			# Get account_type (this may trigger a DB query, but we're in sync context)
+			account_type = None
+			try:
+				account_type = self.user.account_type
+			except Exception:
+				pass
+			
+			# Check account type permissions
+			has_admin = account_type and getattr(account_type, 'admin', False)
+			has_peso = account_type and getattr(account_type, 'peso', False)
+			has_coordinator = account_type and getattr(account_type, 'coordinator', False)
+			
+			return bool(is_staff or is_superuser or has_admin or has_peso or has_coordinator)
+		except Exception:
+			return False
+
+	async def _has_admin_access(self):
+		"""Async wrapper for admin access check"""
+		return await self._check_admin_access()
 
 
 class RecentSearchConsumer(AsyncWebsocketConsumer):

@@ -68,6 +68,14 @@ def evaluate_and_award_milestones(user_points: UserPoints) -> List[dict]:
         return []  # Milestone tasks are disabled, don't award any
     
     user = user_points.user
+    
+    # Exclude admin and peso accounts from milestone tasks
+    if hasattr(user, 'account_type'):
+        is_admin = getattr(user.account_type, 'admin', False)
+        is_peso = getattr(user.account_type, 'peso', False)
+        if is_admin or is_peso:
+            return []  # Admin and peso accounts are excluded from milestone tasks
+    
     tasks = ensure_milestone_tasks()
 
     existing_completions = {
@@ -176,6 +184,15 @@ def get_milestone_status(user_points: UserPoints) -> List[dict]:
     settings = EngagementPointsSettings.get_settings()
     if not getattr(settings, 'milestone_tasks_enabled', True):
         return []  # Milestone tasks are disabled, return empty list
+    
+    user = user_points.user
+    
+    # Exclude admin and peso accounts from milestone tasks
+    if hasattr(user, 'account_type'):
+        is_admin = getattr(user.account_type, 'admin', False)
+        is_peso = getattr(user.account_type, 'peso', False)
+        if is_admin or is_peso:
+            return []  # Admin and peso accounts are excluded from milestone tasks
     
     tasks = ensure_milestone_tasks()
 
