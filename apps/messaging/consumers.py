@@ -672,19 +672,26 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 		"""Handle WebSocket connection for notifications"""
 		self.user = self.scope['user']
 		
-		# Log connection attempt
-		logger.info(f"Notification WebSocket connection attempt from user {getattr(self.user, 'user_id', None)}")
+		# Log connection attempt with detailed info
+		user_id = getattr(self.user, 'user_id', None)
+		logger.info(f"Notification WebSocket connection attempt from user {user_id}")
 		logger.info(f"User object: {self.user}")
 		logger.info(f"User type: {type(self.user)}")
+		logger.info(f"User is authenticated: {self.user.is_authenticated if hasattr(self.user, 'is_authenticated') else 'N/A'}")
+		logger.info(f"User has user_id attribute: {hasattr(self.user, 'user_id')}")
 		
 		# Check if user is authenticated
-		if not self.user or not hasattr(self.user, 'user_id'):
-			logger.warning(f"Invalid user for notification WebSocket: {self.user}")
+		if not self.user or not hasattr(self.user, 'user_id') or not user_id:
+			logger.warning(f"Invalid user for notification WebSocket: {self.user}, type: {type(self.user)}")
+			# Check if it's an AnonymousUser
+			from django.contrib.auth.models import AnonymousUser
+			if isinstance(self.user, AnonymousUser):
+				logger.warning("User is AnonymousUser - authentication failed or token invalid/expired")
 			await self.accept()
 			await self.send(text_data=json.dumps({
 				'type': 'connection_denied',
 				'reason': 'invalid_user',
-				'message': 'Invalid user session'
+				'message': 'Invalid user session. Please log in again.'
 			}))
 			await self.close()
 			return
@@ -815,6 +822,15 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'points': event['points']
 		}))
 		logger.info(f"NotificationConsumer: Sent points update to WebSocket client")
+	
+	async def message_request_count_update(self, event):
+		"""Handle message request count update from group"""
+		logger.info(f"NotificationConsumer: Received message_request_count_update event: {event}")
+		await self.send(text_data=json.dumps({
+			'type': 'message_request_count',
+			'count': event['count']
+		}))
+		logger.info(f"NotificationConsumer: Sent message request count {event['count']} to WebSocket client")
 
 	async def recent_search_update(self, event):
 		"""Handle recent search updates from group"""

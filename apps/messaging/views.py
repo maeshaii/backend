@@ -252,11 +252,36 @@ class MessageListView(generics.ListCreateAPIView):
                         conversation.request_initiator = None
                         conversation.save(update_fields=['is_message_request', 'request_initiator', 'updated_at'])
                         logger.info(f"Converted message request {conversation_id} to regular conversation by non-initiator reply")
+                        
+                        # Broadcast updated message request count to the recipient
+                        try:
+                            from apps.messaging.notification_broadcaster import broadcast_message_request_count
+                            # Count remaining pending message requests for the current user (who accepted)
+                            pending_count = Conversation.objects.filter(
+                                participants=request.user,
+                                is_message_request=True
+                            ).exclude(request_initiator=request.user).count()
+                            
+                            broadcast_message_request_count(request.user.user_id, pending_count)
+                            logger.info(f"Broadcasted updated message request count {pending_count} to user {request.user.user_id} after accepting request")
+                        except Exception as broadcast_error:
+                            logger.error(f"Error broadcasting message request count after accepting: {broadcast_error}")
                 except Exception:
                     # Fallback: keep previous behavior if field missing
                     conversation.is_message_request = False
                     conversation.save(update_fields=['is_message_request', 'updated_at'])
                     logger.info(f"Converted message request {conversation_id} to regular conversation (fallback)")
+                    
+                    # Broadcast updated count even in fallback
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_message_request_count
+                        pending_count = Conversation.objects.filter(
+                            participants=request.user,
+                            is_message_request=True
+                        ).exclude(request_initiator=request.user).count()
+                        broadcast_message_request_count(request.user.user_id, pending_count)
+                    except Exception:
+                        pass
             
             # Ensure legacy DB columns are populated (e.g., date_send)
             message = serializer.save(

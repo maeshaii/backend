@@ -542,6 +542,21 @@ class CreateConversationSerializer(serializers.ModelSerializer):
             )
             conversation.participants.set([current_user, other_user])
             
+            # Broadcast message request count update if this is a message request
+            if not is_mutual_follow:
+                try:
+                    from apps.messaging.notification_broadcaster import broadcast_message_request_count
+                    # Count pending message requests for the recipient (other_user)
+                    pending_count = Conversation.objects.filter(
+                        participants=other_user,
+                        is_message_request=True
+                    ).exclude(request_initiator=other_user).count()
+                    
+                    broadcast_message_request_count(other_user.user_id, pending_count)
+                    logger.info(f"Broadcasted message request count {pending_count} to user {other_user.user_id}")
+                except Exception as e:
+                    logger.error(f"Error broadcasting message request count: {e}")
+            
             return conversation
         else:
             # For group conversations, create normally
