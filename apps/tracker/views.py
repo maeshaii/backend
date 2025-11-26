@@ -6,6 +6,7 @@ If this module grows further, consider splitting into submodules (e.g., question
 import logging
 from django.shortcuts import render
 from django.http import JsonResponse
+from django.db import models
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 import json
@@ -23,26 +24,31 @@ def tracker_questions_view(request):
     """Return all tracker categories with their questions."""
     try:
         categories = []
-        for cat in QuestionCategory.objects.prefetch_related('questions').order_by('order'):
+        for cat in QuestionCategory.objects.order_by('order'):
+            questions_list = []
+            # Get questions using values() to select only columns that exist
+            # Exclude 'required' from the SELECT to avoid database errors
+            questions_data = Question.objects.filter(category=cat).values('id', 'text', 'type', 'options', 'order').order_by('order')
+            
+            for q_data in questions_data:
+                questions_list.append({
+                    "id": q_data['id'],
+                    "text": q_data['text'],
+                    "type": q_data['type'],
+                    "options": q_data['options'] or [],
+                    "required": False,  # Default to False since column doesn't exist in database
+                    "order": q_data['order']
+                })
+            
             categories.append({
                 "id": cat.id,
                 "title": cat.title,
-                "description": cat.description,
-                "questions": [
-                    {
-                        "id": q.id,
-                        "text": q.text,
-                        "type": q.type,
-                        "options": q.options or [],
-                        "required": q.required,
-                        "order": q.order
-                    }
-                    for q in cat.questions.all().order_by('order')
-                ]
+                "description": getattr(cat, 'description', ''),
+                "questions": questions_list
             })
         return JsonResponse({"success": True, "categories": categories})
     except Exception as e:
-        logger.error(f"Error in tracker_questions_view: {e}")
+        logger.error(f"Error in tracker_questions_view: {e}", exc_info=True)
         return JsonResponse({"success": False, "message": "Failed to load questions"}, status=500)
 
 @api_view(["GET"]) 
@@ -195,6 +201,57 @@ def tracker_responses_by_user_view(request, user_id):
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+@api_view(["GET"]) 
+@permission_classes([IsAuthenticated])
+def employment_history_respondents_view(request):
+    """List users who have filled out their employment history."""
+    from apps.shared.models import User, EmploymentHistory, TrackerResponse, TrackerData
+    try:
+        responses = []
+        processed_user_ids = set()
+        
+        tracker_submissions = (
+            TrackerResponse.objects
+            .filter(is_draft=False, user__account_type__user=True)
+            .select_related('user', 'user__academic_info', 'user__employment')
+        )
+        
+        for submission in tracker_submissions:
+            user = submission.user
+            if user.user_id in processed_user_ids:
+                continue
+
+            employment = getattr(user, 'employment', None)
+            has_employment_data = False
+            if employment:
+                has_employment_data = any([
+                    employment.company_name_current,
+                    employment.position_current,
+                    employment.sector_current,
+                    employment.date_started
+                ])
+
+            submitted_at = submission.submitted_at.isoformat() if submission.submitted_at else None
+            if not submitted_at:
+                tracker_data = TrackerData.objects.filter(user=user).first()
+                if tracker_data and tracker_data.tracker_submitted_at:
+                    submitted_at = tracker_data.tracker_submitted_at.isoformat()
+
+            responses.append({
+                'user_id': user.user_id,
+                'name': f'{user.f_name} {user.l_name}'.strip() or user.acc_username,
+                'program': user.academic_info.program if hasattr(user, 'academic_info') and user.academic_info else None,
+                'year_graduated': str(user.academic_info.year_graduated) if hasattr(user, 'academic_info') and user.academic_info and user.academic_info.year_graduated else None,
+                'submitted_at': submitted_at,
+                'has_employment_data': has_employment_data
+            })
+            processed_user_ids.add(user.user_id)
+        
+        return JsonResponse({'success': True, 'responses': responses})
+    except Exception as e:
+        logger.error(f"Error in employment_history_respondents_view: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'message': f'Failed to load employment history respondents: {str(e)}'}, status=500)
 
 @api_view(["POST"]) 
 @permission_classes([IsAdmin])  # 🔒 SECURITY FIX: Changed from IsAuthenticated - Admin only

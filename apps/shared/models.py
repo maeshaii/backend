@@ -1880,9 +1880,14 @@ class TrackerFileUpload(models.Model):
 
 class RewardInventoryItem(models.Model):
     """Reward inventory items that can be redeemed with engagement points"""
+    TYPE_CHOICES = [
+        ('voucher', 'Voucher'),
+        ('merchandise', 'Merchandise'),
+    ]
+    
     item_id = models.AutoField(primary_key=True)
     name = models.CharField(max_length=255)
-    type = models.CharField(max_length=100)  # Gift Card, Certificate, Voucher, Merchandise, etc.
+    type = models.CharField(max_length=100, choices=TYPE_CHOICES)
     quantity = models.IntegerField(default=0)
     value = models.CharField(max_length=100)  # e.g., "$25", "100 pts"
     created_at = models.DateTimeField(auto_now_add=True)

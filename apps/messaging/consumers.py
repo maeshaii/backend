@@ -827,6 +827,80 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 		logger.info("NotificationConsumer: Sent recent search update to WebSocket client")
 
 
+class UserManagementConsumer(AsyncWebsocketConsumer):
+	"""WebSocket consumer that streams admin user management updates."""
+
+	async def connect(self):
+		self.user = self.scope.get('user')
+		if not self._has_admin_access():
+			await self.accept()
+			await self.send(text_data=json.dumps({
+				'type': 'connection_denied',
+				'reason': 'access_denied',
+				'message': 'Admin privileges required'
+			}))
+			await self.close()
+			return
+
+		await self.accept()
+		self.group_name = 'user_management_updates'
+		await self.channel_layer.group_add(self.group_name, self.channel_name)
+
+		await self.send(text_data=json.dumps({
+			'type': 'connection_established',
+			'user_id': getattr(self.user, 'user_id', None),
+			'timestamp': timezone.now().isoformat()
+		}))
+		logger.info(
+			"UserManagementConsumer connected for user %s (channel=%s)",
+			getattr(self.user, 'user_id', None),
+			self.channel_name
+		)
+
+	async def disconnect(self, close_code):
+		if hasattr(self, 'group_name'):
+			await self.channel_layer.group_discard(self.group_name, self.channel_name)
+			logger.info(
+				"UserManagementConsumer disconnected for user %s",
+				getattr(self.user, 'user_id', None)
+			)
+
+	async def receive(self, text_data):
+		try:
+			data = json.loads(text_data)
+		except json.JSONDecodeError:
+			data = {}
+
+		if data.get('type') == 'ping':
+			await self.send(text_data=json.dumps({
+				'type': 'pong',
+				'timestamp': timezone.now().isoformat()
+			}))
+		else:
+			await self.send(text_data=json.dumps({
+				'type': 'error',
+				'message': 'Unsupported message type'
+			}))
+
+	async def user_management_update(self, event):
+		await self.send(text_data=json.dumps({
+			'type': 'user_management_update',
+			'payload': event.get('payload')
+		}))
+
+	def _has_admin_access(self):
+		if not self.user or not hasattr(self.user, 'user_id'):
+			return False
+		account_type = getattr(self.user, 'account_type', None)
+		return bool(
+			getattr(self.user, 'is_staff', False)
+			or getattr(self.user, 'is_superuser', False)
+			or getattr(account_type, 'admin', False)
+			or getattr(account_type, 'peso', False)
+			or getattr(account_type, 'coordinator', False)
+		)
+
+
 class RecentSearchConsumer(AsyncWebsocketConsumer):
 	"""Standalone WebSocket consumer for recent search updates."""
 

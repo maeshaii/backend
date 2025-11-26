@@ -47,8 +47,8 @@ def create_peso_account():
             account_type=peso_account_type,
             acc_username=username,
             user_status='active',
-            f_name='Peso',
-            l_name='User',
+            f_name='CTU',
+            l_name='PESO',
             gender='N/A'  # keep within max_length=10
         )
         peso_user.set_password(peso_password)

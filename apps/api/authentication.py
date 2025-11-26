@@ -35,10 +35,9 @@ class CustomJWTAuthentication(JWTAuthentication):
             except User.DoesNotExist:
                 raise AuthenticationFailed('User not found', code='user_not_found')
             
-            # ✅ FIXED: Don't check is_active for authentication
-            # The is_active property checks user_status, which may have various values
-            # Allow all users who exist in the database to authenticate
-            # Authorization (what they can do) is handled by permissions, not authentication
+            # Check if account is active - prevent inactive users from using existing tokens
+            if not user.is_active:
+                raise AuthenticationFailed('Your account has been deactivated. Please contact an administrator.', code='user_inactive')
             
             return user
             

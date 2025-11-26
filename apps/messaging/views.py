@@ -84,50 +84,84 @@ class ConversationListView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         
-        with PerformanceTracker('conversation_list_query', {'user_id': user.user_id}):
-            # Try to get from cache first
-            cached_conversations = message_cache.get_user_conversations(user.user_id)
-            if cached_conversations:
-                logger.debug(f"Retrieved {len(cached_conversations)} conversations from cache for user {user.user_id}")
-            
-            # Optimize queryset with select_related and prefetch_related
-            # FIX: Removed empty select_related() and optimized prefetch for participants with nested data
-            queryset = Conversation.objects.filter(
-                participants=user
-            ).prefetch_related(
-                'participants__profile',  # Prefetch participant profiles
-                'participants__academic_info',  # Prefetch academic info
-                'messages__sender',
-                'messages__attachments'
-            ).distinct().order_by('-updated_at')
-            
-            # Cache the results for next time
-            # FIX: Use prefetched data instead of calling .all()
-            conversations_data = []
-            for conv in queryset:
-                conv_data = {
-                    'conversation_id': conv.conversation_id,
-                    'created_at': conv.created_at.isoformat(),
-                    'updated_at': conv.updated_at.isoformat(),
-                    'participants': [p.user_id for p in conv.participants.all()],
-                }
-                conversations_data.append(conv_data)
-            
-            message_cache.cache_user_conversations(user.user_id, conversations_data)
-            
-            # Track business metric
-            messaging_monitor.track_business_metric(
-                'conversations_accessed',
-                1,
-                {'user_id': str(user.user_id)}
-            )
-            
-            return queryset
+        try:
+            with PerformanceTracker('conversation_list_query', {'user_id': user.user_id}):
+                # Try to get from cache first
+                cached_conversations = message_cache.get_user_conversations(user.user_id)
+                if cached_conversations:
+                    logger.debug(f"Retrieved {len(cached_conversations)} conversations from cache for user {user.user_id}")
+                
+                # Optimize queryset with select_related and prefetch_related
+                # FIX: Removed empty select_related() and optimized prefetch for participants with nested data
+                queryset = Conversation.objects.filter(
+                    participants=user
+                ).prefetch_related(
+                    'participants__profile',  # Prefetch participant profiles
+                    'participants__academic_info',  # Prefetch academic info
+                    'messages__sender',
+                    'messages__attachments'
+                ).distinct().order_by('-updated_at')
+                
+                # Cache the results for next time
+                # FIX: Use prefetched data - .all() will use prefetched data if available
+                conversations_data = []
+                for conv in queryset:
+                    try:
+                        # .all() will use prefetched participants if available, otherwise queries
+                        conv_data = {
+                            'conversation_id': conv.conversation_id,
+                            'created_at': conv.created_at.isoformat(),
+                            'updated_at': conv.updated_at.isoformat(),
+                            'participants': [p.user_id for p in conv.participants.all()],
+                        }
+                        conversations_data.append(conv_data)
+                    except Exception as e:
+                        logger.warning(f"Error caching conversation {conv.conversation_id}: {str(e)}")
+                        # Continue with other conversations even if one fails
+                
+                try:
+                    message_cache.cache_user_conversations(user.user_id, conversations_data)
+                except Exception as e:
+                    logger.warning(f"Error caching conversations for user {user.user_id}: {str(e)}")
+                
+                # Track business metric
+                try:
+                    messaging_monitor.track_business_metric(
+                        'conversations_accessed',
+                        1,
+                        {'user_id': str(user.user_id)}
+                    )
+                except Exception as e:
+                    logger.warning(f"Error tracking business metric: {str(e)}")
+                
+                return queryset
+        except Exception as e:
+            logger.exception(f"Error in get_queryset for user {user.user_id}: {str(e)}")
+            # Return empty queryset instead of raising to prevent 500 error
+            return Conversation.objects.none()
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
             return CreateConversationSerializer
         return ConversationSerializer
+
+    def list(self, request, *args, **kwargs):
+        """Override list method to add error handling"""
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.exception(f"Error in ConversationListView.list for user {request.user.user_id}: {str(e)}")
+            return Response(
+                {'error': 'Failed to fetch conversations', 'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

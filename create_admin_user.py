@@ -9,8 +9,8 @@ from apps.shared.models import User, AccountType
 
 USERNAME = 'admin'
 PASSWORD = 'wherenayou2025'
-FIRST_NAME = 'Admin'
-LAST_NAME = 'User'
+FIRST_NAME = 'CCICT'
+LAST_NAME = ' '
 GENDER = 'Other'
 USER_STATUS = 'active'
 

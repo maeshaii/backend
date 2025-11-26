@@ -2,12 +2,15 @@
 Serializers for shared app models: user, profile, academic info, employment, tracker, OJT, and related entities.
 Consider splitting into multiple files if the number of serializers grows.
 """
+import logging
 from rest_framework import serializers
 from .models import (
     User, UserProfile, AcademicInfo, EmploymentHistory, 
     TrackerData, OJTInfo, AccountType, Conversation, Message, MessageAttachment
 )
 from .security import ContentSanitizer
+
+logger = logging.getLogger(__name__)
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -347,45 +350,57 @@ class ConversationSerializer(serializers.ModelSerializer):
     
     def get_last_message(self, obj):
         # FIX: Use prefetched data if available
-        last_msg = obj.get_last_message()
-        if last_msg:
-            # Safely access sender data (should be prefetched from view)
-            sender_name = getattr(last_msg.sender, 'full_name', 'Unknown') if last_msg.sender else 'Unknown'
-            sender_id = getattr(last_msg.sender, 'user_id', None) if last_msg.sender else None
-            return {
-                'message_id': last_msg.message_id,
-                'content': last_msg.content,
-                'sender_name': sender_name,
-                'sender_id': sender_id,
-                'created_at': last_msg.created_at,
-                'is_read': last_msg.is_read,
-                'message_type': last_msg.message_type,
-            }
-        return None
+        try:
+            last_msg = obj.get_last_message()
+            if last_msg:
+                # Safely access sender data (should be prefetched from view)
+                sender_name = getattr(last_msg.sender, 'full_name', 'Unknown') if last_msg.sender else 'Unknown'
+                sender_id = getattr(last_msg.sender, 'user_id', None) if last_msg.sender else None
+                return {
+                    'message_id': last_msg.message_id,
+                    'content': last_msg.content,
+                    'sender_name': sender_name,
+                    'sender_id': sender_id,
+                    'created_at': last_msg.created_at,
+                    'is_read': last_msg.is_read,
+                    'message_type': last_msg.message_type,
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error getting last message for conversation {obj.conversation_id}: {str(e)}", exc_info=True)
+            return None
     
     def get_unread_count(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.get_unread_count(request.user)
-        return 0
+        try:
+            request = self.context.get('request')
+            if request and request.user.is_authenticated:
+                return obj.get_unread_count(request.user)
+            return 0
+        except Exception as e:
+            logger.error(f"Error getting unread count for conversation {obj.conversation_id}: {str(e)}", exc_info=True)
+            return 0
     
     def get_other_participant(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            # FIX: Use prefetched participants to avoid extra queries
-            other_user = obj.get_other_participant(request.user)
-            if other_user:
-                from apps.api.views import build_profile_pic_url
-                avatar_url = build_profile_pic_url(other_user, request)
-                return {
-                    'user_id': other_user.user_id,
-                    'name': other_user.full_name,
-                    'f_name': other_user.f_name,
-                    'l_name': other_user.l_name,
-                    'acc_username': other_user.acc_username,
-                    'avatar_url': avatar_url if avatar_url else None,
-                }
-        return None
+        try:
+            request = self.context.get('request')
+            if request and request.user.is_authenticated:
+                # FIX: Use prefetched participants to avoid extra queries
+                other_user = obj.get_other_participant(request.user)
+                if other_user:
+                    from apps.api.views import build_profile_pic_url
+                    avatar_url = build_profile_pic_url(other_user, request)
+                    return {
+                        'user_id': other_user.user_id,
+                        'name': other_user.full_name,
+                        'f_name': other_user.f_name,
+                        'l_name': other_user.l_name,
+                        'acc_username': other_user.acc_username,
+                        'avatar_url': avatar_url if avatar_url else None,
+                    }
+            return None
+        except Exception as e:
+            logger.error(f"Error getting other participant for conversation {obj.conversation_id}: {str(e)}", exc_info=True)
+            return None
 
 class CreateConversationSerializer(serializers.ModelSerializer):
     participant_ids = serializers.ListField(
