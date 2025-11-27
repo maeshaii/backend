@@ -139,6 +139,34 @@ class NotificationBroadcaster:
         except Exception as e:
             logger.error(f"Error broadcasting points update to user {user_id}: {e}")
     
+    def broadcast_message_request_count(self, user_id, count):
+        """
+        Broadcast message request count update to user for real-time badge updates.
+        
+        Args:
+            user_id: User ID to broadcast to
+            count: Number of pending message requests
+        """
+        try:
+            if not self.channel_layer:
+                logger.warning("Channel layer not available for message request count broadcasting")
+                return
+            
+            # Broadcast message request count update
+            async_to_sync(self.channel_layer.group_send)(
+                f"notifications_{user_id}",
+                {
+                    'type': 'message_request_count_update',
+                    'count': count
+                }
+            )
+            
+            logger.info(f"Broadcasted message request count {count} to user {user_id}")
+            print(f"📬 BROADCASTING MESSAGE REQUEST COUNT: {count} to user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error broadcasting message request count to user {user_id}: {e}")
+    
     def broadcast_recent_searches(self, user_id, recent_searches, legacy_recent):
         """
         Broadcast recent search updates to a user.
@@ -233,3 +261,14 @@ def broadcast_recent_search_update(user_id, recent_searches, legacy_recent):
         legacy_recent: Flattened payload
     """
     notification_broadcaster.broadcast_recent_searches(user_id, recent_searches, legacy_recent)
+
+
+def broadcast_message_request_count(user_id, count):
+    """
+    Convenience function to broadcast message request count.
+    
+    Args:
+        user_id: User ID
+        count: Number of pending message requests
+    """
+    notification_broadcaster.broadcast_message_request_count(user_id, count)

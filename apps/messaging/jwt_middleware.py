@@ -44,17 +44,21 @@ class JWTAuthMiddleware:
         
         if token:
             user = await self._authenticate_token(token)
-            logger.info(f"JWT Middleware: JWT authentication result: {user is not None}")
-            if user is not None:
+            if user is not None and hasattr(user, 'user_id'):
                 logger.info(f"JWT Middleware: Authenticated user: {user.user_id}")
                 scope['user'] = user
+            else:
+                logger.warning(f"JWT Middleware: Token authentication failed or user missing user_id")
+                # Don't set user - let it remain AnonymousUser so consumer can reject properly
         else:
             # Fallback to session-based authentication
             user = await self._authenticate_session(scope)
-            logger.info(f"JWT Middleware: Session authentication result: {user is not None}")
-            if user is not None:
-                logger.info(f"JWT Middleware: Authenticated user: {user.user_id}")
+            if user is not None and hasattr(user, 'user_id'):
+                logger.info(f"JWT Middleware: Authenticated user via session: {user.user_id}")
                 scope['user'] = user
+            else:
+                logger.info(f"JWT Middleware: Session authentication failed or no session")
+                # Don't set user - let it remain AnonymousUser so consumer can reject properly
 
         return await self.inner(scope, receive, send)
 
@@ -92,8 +96,14 @@ class JWTAuthMiddleware:
         try:
             validated = self.jwt_auth.get_validated_token(token)
             user = self.jwt_auth.get_user(validated)
-            return user
-        except Exception:
+            if user and hasattr(user, 'user_id'):
+                logger.info(f"JWT Middleware: Successfully authenticated user {user.user_id}")
+                return user
+            else:
+                logger.warning(f"JWT Middleware: User object missing user_id attribute: {type(user)}")
+                return None
+        except Exception as e:
+            logger.warning(f"JWT Middleware: Token authentication failed: {str(e)}")
             return None
 
     @database_sync_to_async

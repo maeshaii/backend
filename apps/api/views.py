@@ -47,7 +47,7 @@ from apps.shared.models import Question
 from django.core.mail import send_mail
 from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
-from rest_framework_simplejwt.authentication import JWTAuthentication
+from apps.api.authentication import CustomJWTAuthentication
 from rest_framework.parsers import MultiPartParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import status
@@ -93,7 +93,9 @@ def ensure_initial_password_active(user, raw_password: Optional[str] = None, all
     """
 
     try:
-        initial = getattr(user, 'initial_password', None)
+        # CRITICAL: Directly query database instead of using getattr to avoid caching issues
+        from apps.shared.models import UserInitialPassword
+        initial = UserInitialPassword.objects.filter(user=user).first()
         updated_fields = []
 
         if initial:
@@ -105,6 +107,7 @@ def ensure_initial_password_active(user, raw_password: Optional[str] = None, all
                 updated_fields.append('is_active')
             if updated_fields:
                 initial.save(update_fields=updated_fields)
+                logger.info(f"✅ Updated initial_password for user {user.acc_username} (user_id: {user.user_id}) - is_active={initial.is_active}")
             return True
 
         if allow_create and raw_password:
@@ -112,6 +115,7 @@ def ensure_initial_password_active(user, raw_password: Optional[str] = None, all
             initial.set_plaintext(raw_password)
             initial.is_active = True
             initial.save(update_fields=['password_encrypted', 'is_active'])
+            logger.info(f"✅ Created initial_password for user {user.acc_username} (user_id: {user.user_id}) - is_active=True")
             return True
 
         if not initial and not allow_create:
@@ -126,6 +130,8 @@ def ensure_initial_password_active(user, raw_password: Optional[str] = None, all
             getattr(user, 'acc_username', user.user_id),
             exc,
         )
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
 def award_engagement_points(user, action_type):
@@ -384,27 +390,68 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
     from apps.shared.models import Notification
     
     # Find all @mentions in the content
-    mention_pattern = r'@([^@\s]+)'
+    mention_pattern = r'@([A-Za-z0-9_.]+(?:\s+[A-Za-z0-9_.]+)*)'
     mentions = re.findall(mention_pattern, content)
+    
+    logger.info(f"create_mention_notifications: Found {len(mentions)} mention(s) in content: {mentions}")
     
     for mention in mentions:
         try:
-            # Try to find the user by name
-            # Split the mention into parts (could be "John Doe" or "John")
-            mention_parts = mention.split()
+            # Clean the mention - remove any trailing text that shouldn't be part of the name
+            mention = mention.strip()
             
-            if len(mention_parts) == 1:
-                # Single name - search by first name or last name
-                user = User.objects.filter(
-                    Q(f_name__icontains=mention_parts[0]) | Q(l_name__icontains=mention_parts[0])
-                ).first()
-            else:
-                # Multiple names - search by first and last name
-                user = User.objects.filter(
-                    Q(f_name__icontains=mention_parts[0]) & Q(l_name__icontains=mention_parts[-1])
-                ).first()
+            # Normalize spacing/punctuation
+            import re as re_module
+            sanitized = re_module.sub(r'[^\w\s.-]', ' ', mention)
+            sanitized = re_module.sub(r'\s+', ' ', sanitized).strip()
+            mention_parts = sanitized.split()
             
-            if user and user.user_id != commenter_user.user_id:
+            # Support camelCase like @JaneDoe by splitting on capital letters
+            if len(mention_parts) <= 1:
+                camel_case_parts = re_module.findall(r'[A-Z][a-z]*', mention)
+                if len(camel_case_parts) >= 2:
+                    mention_parts = camel_case_parts
+            
+            # Require at least first and last name (prevents accidental partial mentions)
+            if len(mention_parts) < 2:
+                logger.debug(f"create_mention_notifications: Skipping mention '{mention}' - not enough name parts to uniquely identify a user")
+                continue
+            
+            # Handle suffixes like Jr., Sr., III
+            suffixes = {'jr', 'sr', 'iii', 'iv', 'v'}
+            last_token = mention_parts[-1].lower().rstrip('.')
+            if last_token in suffixes and len(mention_parts) >= 3:
+                mention_parts = mention_parts[:-1]
+            
+            first_name = mention_parts[0]
+            last_name = mention_parts[-1]
+            middle_name = ' '.join(mention_parts[1:-1]) if len(mention_parts) > 2 else None
+            
+            user_query = User.objects.filter(
+                Q(f_name__iexact=first_name),
+                Q(l_name__iexact=last_name)
+            )
+            
+            if middle_name:
+                user_query = user_query.filter(
+                    Q(m_name__iexact=middle_name) |
+                    Q(m_name__icontains=middle_name) |
+                    Q(m_name__isnull=True) |
+                    Q(m_name__exact='')
+                )
+            
+            user = user_query.first()
+            
+            if not user:
+                logger.debug(f"create_mention_notifications: No exact match for '{mention}'. Skipping notification.")
+                continue
+            
+            if user:
+                logger.info(f"create_mention_notifications: Found user {user.user_id} ({user.full_name}) for mention '{mention}'")
+                if user.user_id == commenter_user.user_id:
+                    logger.debug(f"create_mention_notifications: Skipping self-mention for user {user.user_id}")
+                    continue
+                
                 # Create notification for the mentioned user with context-aware message
                 # Determine the context based on what IDs are present
                 if reply_id:
@@ -451,14 +498,20 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                     notifi_content=notification_content,
                     notif_date=timezone.now()
                 )
+                logger.info(f"create_mention_notifications: Created notification {notification.notif_id} for user {user.user_id}")
+                
                 # Broadcast mention notification in real-time
                 try:
                     from apps.messaging.notification_broadcaster import broadcast_notification
                     broadcast_notification(notification)
+                    logger.debug(f"create_mention_notifications: Broadcasted notification {notification.notif_id}")
                 except Exception as e:
                     logger.error(f"Error broadcasting mention notification: {e}")
+            else:
+                logger.warning(f"create_mention_notifications: User not found for mention '{mention}'")
         except Exception as e:
             # Skip if user not found or other error
+            logger.error(f"create_mention_notifications: Error processing mention '{mention}': {str(e)}", exc_info=True)
             continue
 
 def build_profile_pic_url(user, request=None):
@@ -690,10 +743,30 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
             is_peso = user.account_type and user.account_type.peso
             
             if not (is_coordinator or is_peso):
-                initial = getattr(user, 'initial_password', None)
-                if initial and getattr(initial, 'is_active', False):
-                    must_change_password = True
-        except Exception:
+                # Check if user has an active initial password (first-time login)
+                # CRITICAL: Directly query the database to ensure we get the latest state
+                # select_related might cache None if the relationship doesn't exist
+                from apps.shared.models import UserInitialPassword
+                try:
+                    initial = UserInitialPassword.objects.filter(user=user).first()
+                    if initial and initial.is_active:
+                        must_change_password = True
+                        logger.info(f"✅ First-time login detected for user {user.acc_username} (user_id: {user.user_id}) - must_change_password=True")
+                    else:
+                        if initial:
+                            logger.debug(f"Initial password exists but is_active=False for user {user.acc_username}")
+                        else:
+                            logger.debug(f"No initial password record for user {user.acc_username} - already changed password")
+                        must_change_password = False
+                except Exception as e:
+                    logger.error(f"❌ Error checking initial_password for user {user.acc_username}: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    must_change_password = False
+        except Exception as e:
+            logger.error(f"❌ Error determining must_change_password for user {user.acc_username}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             must_change_password = False
         academic = getattr(user, 'academic_info', None)
         profile = getattr(user, 'profile', None)
@@ -818,7 +891,7 @@ def change_password_view(request):
 
     return JsonResponse({'success': True, 'message': 'Password changed successfully.'})
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 @csrf_exempt
 def import_alumni_view(request):
@@ -1830,6 +1903,7 @@ def admin_peso_users_view(request):
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
 @api_view(["GET"])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def users_list_view(request):
     user = request.user
@@ -1847,14 +1921,26 @@ def users_list_view(request):
         except (TypeError, ValueError):
             current_user_id_int = None
 
-        # Exclude admin users and the current logged-in user, randomize and limit
+        # Exclude admin, peso, coordinator, and ojt users from "People you may know"
+        # Only show alumni (user=True) - this is a social feature for alumni to connect
+        # Coordinators, peso, admin, and ojt are system accounts, not social accounts
         users_qs = (
             User.objects
             .filter(account_type__admin=False)
-            .select_related('profile', 'academic_info')
+            .filter(account_type__peso=False)
+            .filter(account_type__coordinator=False)
+            .filter(account_type__ojt=False)
+            .filter(account_type__user=True)  # Only show alumni
+            .filter(user_status='active')  # Only show active users
+            .select_related('profile', 'academic_info', 'account_type')
         )
         if current_user_id_int is not None:
             users_qs = users_qs.exclude(user_id=current_user_id_int)
+        
+        # Log for debugging
+        total_count = users_qs.count()
+        logger.info(f"users_list_view: Found {total_count} alumni users (excluding admin, peso, coordinator, ojt, current_user)")
+        
         users = users_qs.order_by('?')[:10]
         users_data = []
         for u in users:
@@ -1872,8 +1958,11 @@ def users_list_view(request):
                         'ojt': u.account_type.ojt,
                     },
                 })
-            except Exception:
+            except Exception as e:
+                logger.warning(f"users_list_view: Error processing user {u.user_id}: {str(e)}")
                 continue
+        
+        logger.info(f"users_list_view: Returning {len(users_data)} users")
         return JsonResponse({'success': True, 'users': users_data})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
@@ -1926,14 +2015,68 @@ def import_ojt_view(request):
         
         coordinator_username_lower = coordinator_username.lower()
         
-        # batch_year is now optional - will be auto-detected for second imports
-
-        # Read Excel file
+        # Read Excel file first to check content
         try:
             df = pd.read_excel(file)
             print('OJT IMPORT - HEADERS:', list(df.columns))
         except Exception as e:
             return JsonResponse({'success': False, 'message': f'Error reading Excel file: {str(e)}'}, status=400)
+        
+        # ===== SMART DUPLICATE FILE IMPORT PREVENTION =====
+        # Check if this file has already been imported, but allow updates with NEW information
+        import hashlib
+        file.seek(0)  # Reset file pointer to beginning
+        file_content = file.read()
+        file.seek(0)  # Reset again for later reading
+        
+        # Compute file hash for duplicate detection
+        file_hash = hashlib.md5(file_content).hexdigest()
+        
+        # Check if same file (by name) was already imported
+        existing_imports = OJTImport.objects.filter(file_name=file.name)
+        
+        if existing_imports.exists():
+            # File name exists, but check if this is a legitimate UPDATE with new OJT info
+            # Check if file has OJT company columns (indicates second import with new data)
+            has_company_info = any(col.lower() in ['company', 'company name', 'company_name', 'companyname', 
+                                                    'company_address', 'companyaddress', 'company address',
+                                                    'company_email', 'companyemail', 'company email',
+                                                    'company_contact', 'companycontact', 'company contact',
+                                                    'contact_person', 'contactperson', 'contact person',
+                                                    'position', 'contact_person_position', 'contact person position']
+                                   for col in df.columns)
+            
+            # Check if students already exist (second import)
+            if df.shape[0] > 0 and 'CTU_ID' in df.columns:
+                first_ctu_id = str(df.iloc[0].get('CTU_ID', '')).strip()
+                if first_ctu_id:
+                    existing_user = User.objects.filter(acc_username=first_ctu_id).first()
+                    is_update = existing_user is not None
+                    
+                    if is_update and has_company_info:
+                        # This is a SECOND IMPORT with OJT company details - ALLOW IT
+                        print(f"✅ Second import detected with OJT company info - allowing UPDATE for file: {file.name}")
+                        print(f"   Student {first_ctu_id} exists, file contains company columns")
+                    else:
+                        # This is a true duplicate (same file, same basic data)
+                        first_import = existing_imports.first()
+                        import_coordinator = first_import.coordinator
+                        import_date = first_import.import_date.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        if import_coordinator.lower() == coordinator_username_lower:
+                            return JsonResponse({
+                                'success': False,
+                                'message': f'All students in this file have already been imported by you. This appears to be a duplicate file. Each file can only be imported once to prevent duplicate students.'
+                            }, status=400)
+                        else:
+                            return JsonResponse({
+                                'success': False,
+                                'message': f'This file "{file.name}" has already been imported by coordinator "{import_coordinator}" on {import_date}.'
+                            }, status=400)
+        
+        print(f"✅ File validation passed: {file.name} (hash: {file_hash[:8]}...)")
+        
+        # batch_year is now optional - will be auto-detected for second imports
 
         # Auto-detect batch year: from existing user, Excel column, or current year + 1
         from datetime import datetime
@@ -2125,6 +2268,68 @@ def import_ojt_view(request):
         )
         new_ctu_ids = all_ctu_ids - existing_ctu_ids
 
+        # ===== ADDITIONAL DUPLICATE FILE CHECK =====
+        # Check if ALL students in this file were already imported (by any coordinator)
+        # This prevents importing the same file even if it's renamed
+        # UNLESS it's a second import with new OJT company information
+        if existing_ctu_ids and len(existing_ctu_ids) == len(all_ctu_ids):
+            # All CTU_IDs in file already exist - check if this is a legitimate UPDATE
+            
+            # First, check if file has OJT company columns (indicates second import with new data)
+            has_company_info = any(col.lower() in ['company', 'company name', 'company_name', 'companyname', 
+                                                    'company_address', 'companyaddress', 'company address',
+                                                    'company_email', 'companyemail', 'company email',
+                                                    'company_contact', 'companycontact', 'company contact',
+                                                    'contact_person', 'contactperson', 'contact person',
+                                                    'position', 'contact_person_position', 'contact person position']
+                                   for col in df.columns)
+            
+            if has_company_info:
+                # This file contains OJT company information - likely a second import UPDATE
+                print(f"✅ Second import with OJT company info detected - allowing UPDATE for all students")
+                print(f"   File contains {len(existing_ctu_ids)} existing students with company data columns")
+            else:
+                # No company info - this might be a true duplicate
+                # Check if they were imported together before
+                existing_users = User.objects.filter(
+                    acc_username__in=existing_ctu_ids,
+                    account_type__ojt=True
+                ).select_related('academic_info')
+                
+                # Check import records for these students
+                coordinator_imports = set()
+                same_coordinator_imports = False
+                for user in existing_users:
+                    if hasattr(user, 'academic_info') and user.academic_info:
+                        year = user.academic_info.year_graduated
+                        section = (user.academic_info.section or '').strip()
+                        if year:
+                            imports = OJTImport.objects.filter(batch_year=year)
+                            if section:
+                                imports = imports.filter(section__iexact=section)
+                            coordinators = set(imports.values_list('coordinator', flat=True))
+                            if coordinators:
+                                coordinator_imports.update(coordinators)
+                                # Check if same coordinator already imported this batch
+                                if any(c and c.lower() == coordinator_username_lower for c in coordinators):
+                                    same_coordinator_imports = True
+                
+                if coordinator_imports:
+                    # Check if it's the same coordinator or different coordinator
+                    other_coordinators = {c for c in coordinator_imports if c and c.lower() != coordinator_username_lower}
+                    
+                    if same_coordinator_imports:
+                        return JsonResponse({
+                            'success': False,
+                            'message': f'All students in this file have already been imported by you. This appears to be a duplicate file. Each file can only be imported once to prevent duplicate students.'
+                        }, status=400)
+                    elif other_coordinators:
+                        other_coord = sorted(other_coordinators)[0]
+                        return JsonResponse({
+                            'success': False,
+                            'message': f'All students in this file have already been imported by coordinator "{other_coord}". This appears to be a duplicate file. Each file can only be imported once to prevent duplicate students.'
+                        }, status=400)
+
         ctu_conflict_messages = {}
         if existing_ctu_ids:
             existing_users_with_relations = (
@@ -2137,19 +2342,12 @@ def import_ojt_view(request):
                 ctu_value = owner_user.acc_username
                 conflict_message = None
 
-                ojt_profile = getattr(owner_user, 'ojt_company_profile', None)
-                assigned_coordinator = getattr(ojt_profile, 'coordinator', None)
-                if assigned_coordinator and assigned_coordinator.lower() != coordinator_username_lower:
-                    conflict_message = (
-                        f"CTU_ID {ctu_value} belongs to coordinator {assigned_coordinator}. "
-                        "Duplicate imports are not allowed."
-                    )
-
+                # PRIMARY CHECK: Use OJTImport records as source of truth
                 academic_info = getattr(owner_user, 'academic_info', None)
                 user_year = getattr(academic_info, 'year_graduated', None)
                 user_section = (getattr(academic_info, 'section', '') or '').strip()
 
-                if conflict_message is None and user_year:
+                if user_year:
                     cache_key = (user_year, user_section.lower())
                     if cache_key not in batch_import_cache:
                         imports_qs = OJTImport.objects.filter(batch_year=user_year)
@@ -2160,10 +2358,13 @@ def import_ojt_view(request):
                         batch_import_cache[cache_key] = set(
                             imports_qs.values_list('coordinator', flat=True)
                         )
+                    coordinators_for_batch = batch_import_cache[cache_key]
                     other_coordinators = {
-                        c for c in batch_import_cache[cache_key]
+                        c for c in coordinators_for_batch
                         if c and c.lower() != coordinator_username_lower
                     }
+                    # Only block if OTHER coordinators imported this batch
+                    # If same coordinator or no coordinator, allow (for second imports)
                     if other_coordinators:
                         original_coordinator = sorted(other_coordinators)[0]
                         display_section = user_section or 'N/A'
@@ -2173,9 +2374,21 @@ def import_ojt_view(request):
                             f"Cannot import to {coordinator_username}."
                         )
 
+                # FALLBACK CHECK: If no import record, check ojt_company_profile
+                if conflict_message is None:
+                    ojt_profile = getattr(owner_user, 'ojt_company_profile', None)
+                    assigned_coordinator = getattr(ojt_profile, 'coordinator', None)
+                    if assigned_coordinator and assigned_coordinator.lower() != coordinator_username_lower:
+                        conflict_message = (
+                            f"CTU_ID {ctu_value} belongs to coordinator {assigned_coordinator}. "
+                            "Duplicate imports are not allowed."
+                        )
+
+                # FINAL CHECK: Only block orphaned OJT users (no import record, no coordinator)
                 if (conflict_message is None 
                         and owner_user.account_type 
-                        and owner_user.account_type.ojt):
+                        and owner_user.account_type.ojt
+                        and not user_year):  # Only block if we can't determine ownership
                     conflict_message = (
                         f"CTU_ID {ctu_value} already exists as an OJT student and cannot be reassigned "
                         "without administrator review."
@@ -2454,13 +2667,20 @@ def import_ojt_view(request):
                     print(f"Row {index+2} - Using default section: '{user_section}'")
 
                 # --- Password Handling (no birthdate login) ---
+                # Only generate/process passwords for FIRST imports (new students)
+                # SECOND imports (company data updates) don't need password changes
                 password_raw = str(row.get('Password', '')).strip()
-                if not password_raw:
-                    alphabet = string.ascii_letters + string.digits
-                    password_raw = ''.join(secrets.choice(alphabet) for _ in range(12))
-                    print(f"Row {index+2} - Generated password: {password_raw}")
+                if import_mode == 'FIRST':
+                    if not password_raw:
+                        alphabet = string.ascii_letters + string.digits
+                        password_raw = ''.join(secrets.choice(alphabet) for _ in range(12))
+                        print(f"Row {index+2} - Generated password: {password_raw}")
+                    else:
+                        print(f"Row {index+2} - Using provided password: {password_raw}")
                 else:
-                    print(f"Row {index+2} - Using provided password: {password_raw}")
+                    # Second import - don't generate or change passwords
+                    password_raw = None
+                    print(f"Row {index+2} - SECOND IMPORT: Password unchanged")
 
                 # --- Age not derived from password; keep None unless separately provided
                 age = None
@@ -2539,30 +2759,19 @@ def import_ojt_view(request):
                     continue
                 
                 # IMPORTANT: Check if this CTU_ID was imported by a different coordinator
+                # Use OJTImport records as PRIMARY source of truth (more reliable than ojt_company_profile)
                 if existing_user_check:
-                    assigned_coordinator = None
-                    try:
-                        ojt_company_profile = getattr(existing_user_check, 'ojt_company_profile', None)
-                        if ojt_company_profile and ojt_company_profile.coordinator:
-                            assigned_coordinator = ojt_company_profile.coordinator
-                    except Exception:
-                        assigned_coordinator = None
-                    
-                    if assigned_coordinator and assigned_coordinator.lower() != coordinator_username.lower():
-                        error_msg = (
-                            f"Row {index + 2}: CTU_ID {ctu_id} belongs to coordinator "
-                            f"{assigned_coordinator}. Duplicate imports are not allowed."
-                        )
-                        print(f"❌ BLOCKED: {error_msg}")
-                        errors.append(error_msg)
-                        skipped_count += 1
-                        continue
-                    
                     # Check if user has academic_info (OJT students should have this)
+                    user_year = None
+                    user_section = ''
                     if hasattr(existing_user_check, 'academic_info') and existing_user_check.academic_info:
                         user_year = existing_user_check.academic_info.year_graduated
                         user_section = getattr(existing_user_check.academic_info, 'section', None) or ''
                         
+                    # PRIMARY CHECK: Use OJTImport records to determine coordinator ownership
+                    coordinator_from_imports = None
+                    assigned_coordinator = None
+                    if user_year:
                         # Find which coordinator(s) imported this user's year+section
                         filter_kwargs = {'batch_year': user_year}
                         if user_section:
@@ -2588,12 +2797,43 @@ def import_ojt_view(request):
                                 errors.append(error_msg)
                                 skipped_count += 1
                                 continue
-                            else:
+                            elif coordinator_username in coordinators_for_this_batch:
+                                # Same coordinator - allow update (second import)
+                                coordinator_from_imports = coordinator_username
                                 print(f"✅ CTU_ID {ctu_id} was imported by same coordinator ({coordinator_username}) - allowing update")
-                        else:
-                            # User exists but no import record - might be from old system
-                            # Check if user is OJT type - if yes, block it to prevent conflicts
-                            if existing_user_check.account_type and existing_user_check.account_type.ojt:
+                    
+                    # FALLBACK CHECK: If no import record, check ojt_company_profile.coordinator
+                    # This handles edge cases where import record might be missing
+                    if not coordinator_from_imports:
+                        assigned_coordinator = None
+                        try:
+                            ojt_company_profile = getattr(existing_user_check, 'ojt_company_profile', None)
+                            if ojt_company_profile and ojt_company_profile.coordinator:
+                                assigned_coordinator = ojt_company_profile.coordinator
+                        except Exception:
+                            assigned_coordinator = None
+                        
+                        if assigned_coordinator and assigned_coordinator.lower() != coordinator_username.lower():
+                            error_msg = (
+                                f"Row {index + 2}: CTU_ID {ctu_id} belongs to coordinator "
+                                f"{assigned_coordinator}. Duplicate imports are not allowed."
+                            )
+                            print(f"❌ BLOCKED: {error_msg}")
+                            errors.append(error_msg)
+                            skipped_count += 1
+                            continue
+                        elif assigned_coordinator and assigned_coordinator.lower() == coordinator_username.lower():
+                            # Same coordinator from company profile - allow update
+                            print(f"✅ CTU_ID {ctu_id} belongs to same coordinator ({coordinator_username}) - allowing update")
+                    
+                    # FINAL CHECK: If user is OJT but has no import record and no coordinator assignment
+                    # This prevents conflicts with orphaned OJT users
+                    if (not coordinator_from_imports and 
+                        not assigned_coordinator and 
+                        existing_user_check.account_type and 
+                        existing_user_check.account_type.ojt and
+                        user_year):
+                        # Only block if we have year info - otherwise might be from old system
                                 error_msg = f"Row {index + 2}: CTU_ID {ctu_id} already exists as OJT student (batch {user_year}, section {user_section}) but has no import record. Cannot import to prevent conflicts."
                                 print(f"❌ BLOCKED: {error_msg}")
                                 errors.append(error_msg)
@@ -2749,13 +2989,18 @@ def import_ojt_view(request):
                         from apps.shared.models import UserInitialPassword
                         has_initial_password = UserInitialPassword.objects.filter(user=existing_user).exists()
                         
-                        # Ensure a first-login record exists and is active for coordinator-managed accounts
-                        ensure_initial_password_active(
-                            existing_user,
-                            raw_password=password_raw if password_raw else None,
-                            allow_create=bool(password_raw),
-                        )
-                        print(f"Row {index+2} - Initial password record ensured/activated for {ctu_id}")
+                        # Only update password for FIRST imports or new users
+                        # For SECOND imports (company data only), keep existing passwords unchanged
+                        if import_mode == 'FIRST' or not has_initial_password:
+                            # Ensure a first-login record exists and is active for coordinator-managed accounts
+                            ensure_initial_password_active(
+                                existing_user,
+                                raw_password=password_raw if password_raw else None,
+                                allow_create=bool(password_raw),
+                            )
+                            print(f"Row {index+2} - Initial password record ensured/activated for {ctu_id}")
+                        else:
+                            print(f"Row {index+2} - SECOND IMPORT: Keeping existing password unchanged (no reset)")
 
                         # Update names to match latest import where present (only if provided in Excel)
                         updated = False
@@ -4900,27 +5145,32 @@ def alumni_employment_view(request, user_id):
                     is_employed = employment_status in ['yes', 'employed', 'y', '1', 'true']
                     is_unemployed = employment_status in ['no', 'n', '0', 'false', 'unemployed']
                     
-                    # Check if any Part III fields are filled
-                    has_part_iii_fields = bool(
-                        tracker_data.q_employment_type or
-                        tracker_data.q_company_name or
-                        tracker_data.q_current_position or
-                        tracker_data.q_sector_current or
-                        tracker_data.q_scope_current or
-                        tracker_data.q_employment_duration or
-                        tracker_data.q_salary_range or
-                        tracker_data.q_employment_permanent
+                    # Check if any Part III fields are filled with actual data
+                    # Filter out empty strings, None, 'N/A', 'na', 'n/a', 'NA', 'pending', etc.
+                    def has_real_value(field_value):
+                        """Check if a field has actual data (not empty/N/A/pending)"""
+                        if not field_value:
+                            return False
+                        field_str = str(field_value).strip().lower()
+                        # Exclude common placeholder values
+                        invalid_values = ['', 'n/a', 'na', 'none', 'null', 'pending', 'untracked']
+                        return field_str not in invalid_values
+                    
+                    has_part_iii_fields = (
+                        has_real_value(tracker_data.q_employment_type) or
+                        has_real_value(tracker_data.q_company_name) or
+                        has_real_value(tracker_data.q_current_position) or
+                        has_real_value(tracker_data.q_sector_current) or
+                        has_real_value(tracker_data.q_scope_current) or
+                        has_real_value(tracker_data.q_employment_duration) or
+                        has_real_value(tracker_data.q_salary_range) or
+                        has_real_value(tracker_data.q_employment_permanent)
                     )
                     
-                    # Part III data exists if:
-                    # 1. Any Part III fields are filled, OR
-                    # 2. Tracker was submitted AND user is marked as employed
-                    # 3. Tracker was submitted AND employment status is not "no" (show it even if incomplete)
-                    has_part_iii_data = (
-                        has_part_iii_fields or
-                        (tracker_submitted and is_employed) or
-                        (tracker_submitted and not is_unemployed and employment_status != '')
-                    )
+                    # Part III data exists ONLY if actual Part III fields are filled
+                    # This ensures we don't show an empty employment details page
+                    # User must have answered the tracker form with actual employment data
+                    has_part_iii_data = has_part_iii_fields
                 
                 response_data = {
                     'account_type': 'alumni',
@@ -4938,6 +5188,24 @@ def alumni_employment_view(request, user_id):
                         'q_current_position': tracker_data.q_current_position if tracker_data else None,
                     }
                 }
+                
+                # Log what we're about to return with detailed field values
+                print(f"🔍 BACKEND: Returning employment data for user {user_id}")
+                print(f"   - has_tracker_data: {has_tracker_data}")
+                print(f"   - has_part_iii_data: {has_part_iii_data}")
+                print(f"   - tracker_submitted: {tracker_submitted}")
+                print(f"   - is_employed: {is_employed}")
+                print(f"   - has_part_iii_fields: {has_part_iii_fields}")
+                if tracker_data:
+                    print(f"   📋 Field Values:")
+                    print(f"      - q_employment_type: [{tracker_data.q_employment_type}]")
+                    print(f"      - q_company_name: [{tracker_data.q_company_name}]")
+                    print(f"      - q_current_position: [{tracker_data.q_current_position}]")
+                    print(f"      - q_sector_current: [{tracker_data.q_sector_current}]")
+                    print(f"      - q_scope_current: [{tracker_data.q_scope_current}]")
+                    print(f"      - q_employment_duration: [{tracker_data.q_employment_duration}]")
+                    print(f"      - q_salary_range: [{tracker_data.q_salary_range}]")
+                    print(f"      - q_employment_permanent: [{tracker_data.q_employment_permanent}]")
                 
                 # If Part III data exists, include all the fields
                 if has_part_iii_data and tracker_data:
@@ -5183,8 +5451,10 @@ def alumni_employment_view(request, user_id):
 def get_following_for_mentions(request):
     """Get list of users that current user follows for @mentions"""
     try:
-        current_user = get_current_user_from_request(request)
-        if not current_user:
+        # Use request.user which is set by DRF authentication
+        current_user = request.user
+        if not current_user or not current_user.is_authenticated:
+            logger.warning(f"get_following_for_mentions: User not authenticated. request.user: {current_user}")
             return JsonResponse({'error': 'Authentication required'}, status=401)
         
         from apps.shared.models import Follow
@@ -5819,6 +6089,7 @@ def repost_comments_view(request, repost_id):
                 'comment_id': comment.comment_id,
                 'comment_content': comment.comment_content,
                 'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                'replies_count': Reply.objects.filter(comment=comment).count(),
                 'user': {
                     'user_id': comment.user.user_id,
                     'f_name': comment.user.f_name,
@@ -9260,7 +9531,7 @@ def reset_password_view(request):
 
 # Donation API Views
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 @parser_classes([JSONParser, MultiPartParser])
 def donation_requests_view(request):
@@ -9528,7 +9799,7 @@ def donation_requests_view(request):
 
 
 @api_view(['POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_like_view(request, donation_id):
     """Handle donation like/unlike"""
@@ -9589,7 +9860,7 @@ def donation_like_view(request, donation_id):
 
 
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_comments_view(request, donation_id):
     """Handle donation comments"""
@@ -9690,7 +9961,7 @@ def donation_comments_view(request, donation_id):
 
 
 @api_view(['PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_comment_edit_view(request, donation_id, comment_id):
     """Handle donation comment edit/delete"""
@@ -9732,7 +10003,7 @@ def donation_comment_edit_view(request, donation_id, comment_id):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_repost_view(request, donation_id):
     """Handle donation reposting"""
@@ -9779,8 +10050,8 @@ def donation_repost_view(request, donation_id):
                 broadcast_notification(notification)
             except Exception as e:
                 logger.error(f"Error broadcasting donation repost notification: {e}")
-
         # Always return a success response if we reached this point
+        
         return JsonResponse({
             'success': True,
             'message': 'Donation reposted successfully',
@@ -9794,7 +10065,7 @@ def donation_repost_view(request, donation_id):
         return JsonResponse({'success': False, 'message': 'Failed to repost donation'}, status=500)
 
 @api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def donation_detail_edit_view(request, donation_id):
     """Handle donation detail view, edit, and delete"""
@@ -9938,7 +10209,7 @@ def donation_detail_edit_view(request, donation_id):
         return JsonResponse({'success': False, 'message': 'Failed to process request'}, status=500)
 
 @api_view(['GET', 'POST', 'DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def recent_searches_view(request):
     """Manage per-user recent searches.
@@ -10049,7 +10320,7 @@ def recent_searches_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def set_send_date_view(request):
     """Set send date for OJT students"""
@@ -10188,7 +10459,7 @@ def set_send_date_view(request):
         }, status=500)
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def check_all_sent_status_view(request):
     """Check if all completed OJT students are already sent to admin for a specific batch"""
@@ -10240,7 +10511,7 @@ def check_all_sent_status_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def get_send_dates_view(request):
     """Get scheduled send dates for a coordinator"""
@@ -10289,7 +10560,7 @@ def get_send_dates_view(request):
 
 
 @api_view(['DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def delete_send_date_view(request):
     """Delete/remove a scheduled send date (idempotent operation)"""
@@ -10342,7 +10613,7 @@ def delete_send_date_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_leaderboard_view(request):
     """
@@ -10408,7 +10679,7 @@ def engagement_leaderboard_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_tasks_view(request):
     """
@@ -10443,7 +10714,7 @@ def engagement_tasks_view(request):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def points_tasks_view(request):
     """
@@ -10542,22 +10813,27 @@ def points_tasks_view(request):
             elif task.task_type in milestone_specs:
                 spec = milestone_specs[task.task_type]
                 required_progress = task.required_count if task.required_count else spec.threshold
-                current_progress = _metric_value(spec.metric)
-                is_completed = (current_progress >= required_progress) or (task.task_type in completed_task_types)
+                actual_progress = _metric_value(spec.metric)
+                is_completed = (actual_progress >= required_progress) or (task.task_type in completed_task_types)
+                # Cap display at required_progress when completed to show "1/1" instead of "3/1" (or similar)
+                current_progress = min(actual_progress, required_progress) if is_completed else actual_progress
             elif task.task_type == 'post_with_image':
                 # Check if user has posted with an image
                 if user_points:
-                    current_progress = user_points.post_with_photo_count or 0
+                    actual_count = user_points.post_with_photo_count or 0
                     required_progress = 1
-                    is_completed = (current_progress >= 1) or (task.task_type in completed_task_types)
+                    is_completed = (actual_count >= 1) or (task.task_type in completed_task_types)
+                    # Cap display at required_progress when completed to show "1/1" instead of "3/1"
+                    current_progress = min(actual_count, required_progress) if is_completed else actual_count
                 else:
                     post_with_image_count = ContentImage.objects.filter(
                         content_type='post',
                         content_id__in=Post.objects.filter(user=user).values_list('post_id', flat=True)
                     ).count()
-                    current_progress = 1 if post_with_image_count > 0 else 0
                     required_progress = 1
                     is_completed = (post_with_image_count > 0) or (task.task_type in completed_task_types)
+                    # Cap display at required_progress when completed
+                    current_progress = min(post_with_image_count, required_progress) if is_completed else post_with_image_count
             else:
                 is_completed = task.task_type in completed_task_types
             
@@ -10629,7 +10905,7 @@ def points_tasks_view(request):
 # ============================
 # User Management API Endpoints (Admin only)
 @api_view(["GET"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def fetch_all_users_view(request):
     """
@@ -10637,9 +10913,17 @@ def fetch_all_users_view(request):
     Returns a list of all users with their basic information.
     """
     try:
-        # Check if user is admin
-        user = get_current_user_from_request(request)
-        if not user or not getattr(user.account_type, 'admin', False):
+        # Use request.user which is set by DRF authentication
+        user = request.user
+        if not user or not user.is_authenticated:
+            logger.warning(f"fetch_all_users_view: User not authenticated. request.user: {user}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required'
+            }, status=401)
+        
+        if not hasattr(user, 'account_type') or not getattr(user.account_type, 'admin', False):
+            logger.warning(f"fetch_all_users_view: User {user.user_id if hasattr(user, 'user_id') else 'unknown'} is not an admin")
             return JsonResponse({
                 'success': False,
                 'message': 'Admin access required'
@@ -10711,7 +10995,7 @@ def fetch_all_users_view(request):
         }, status=500)
 
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def create_user_view(request):
     """
@@ -10731,9 +11015,17 @@ def create_user_view(request):
     }
     """
     try:
-        # Check if user is admin
-        user = get_current_user_from_request(request)
-        if not user or not getattr(user.account_type, 'admin', False):
+        # Use request.user which is set by DRF authentication
+        user = request.user
+        if not user or not user.is_authenticated:
+            logger.warning(f"create_user_view: User not authenticated. request.user: {user}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required'
+            }, status=401)
+        
+        if not hasattr(user, 'account_type') or not getattr(user.account_type, 'admin', False):
+            logger.warning(f"create_user_view: User {user.user_id if hasattr(user, 'user_id') else 'unknown'} is not an admin")
             return JsonResponse({
                 'success': False,
                 'message': 'Admin access required'
@@ -10813,29 +11105,46 @@ def create_user_view(request):
                     'message': 'Program is required for coordinator accounts'
                 }, status=400)
             
-            # Check if there's already a coordinator for this specific program
-            # Use case-insensitive comparison and handle whitespace
-            # Get all active coordinators and check their programs
+            # CRITICAL: Check if there's already a coordinator for this specific program
+            # Check BOTH User.f_name AND AcademicInfo.program to catch all cases
+            # This prevents duplicates even if AcademicInfo wasn't created properly
+            
             from django.db.models import Q
-            existing_coordinators = AcademicInfo.objects.filter(
-                user__account_type__coordinator=True,
-                user__user_status='active',
-                program__isnull=False
-            ).exclude(program='').select_related('user')
             
-            # Debug logging
+            # Get all active coordinators (regardless of AcademicInfo existence)
+            existing_coordinator_users = User.objects.filter(
+                account_type__coordinator=True,
+                user_status='active'
+            ).select_related('account_type', 'academic_info')
+            
             logger.info(f"Creating coordinator for program: '{program}' (normalized: '{program_normalized}')")
-            logger.info(f"Found {existing_coordinators.count()} existing active coordinators")
+            logger.info(f"Found {existing_coordinator_users.count()} existing active coordinators")
             
-            # Check if any existing coordinator has the same normalized program
-            for coord_info in existing_coordinators:
-                existing_program_normalized = coord_info.program.strip().upper() if coord_info.program else ''
-                logger.info(f"Comparing: '{program_normalized}' vs existing: '{existing_program_normalized}' (from '{coord_info.program}')")
-                if existing_program_normalized == program_normalized:
-                    logger.warning(f"Blocking coordinator creation: Program '{coord_info.program}' already has coordinator")
+            # Check each existing coordinator for duplicate program
+            for coord_user in existing_coordinator_users:
+                # Check User.f_name field (where program is stored for coordinators)
+                user_program_normalized = coord_user.f_name.strip().upper() if coord_user.f_name else ''
+                
+                # Also check AcademicInfo.program if it exists
+                academic_program_normalized = ''
+                if hasattr(coord_user, 'academic_info') and coord_user.academic_info:
+                    academic_program_normalized = coord_user.academic_info.program.strip().upper() if coord_user.academic_info.program else ''
+                
+                # Normalize program name - remove common suffixes like " N/A" or " Coordinator"
+                user_program_clean = user_program_normalized.replace(' N/A', '').replace(' COORDINATOR', '').strip()
+                academic_program_clean = academic_program_normalized.replace(' N/A', '').replace(' COORDINATOR', '').strip()
+                program_normalized_clean = program_normalized.replace(' N/A', '').replace(' COORDINATOR', '').strip()
+                
+                # Compare normalized program names
+                matches_user = user_program_clean == program_normalized_clean and user_program_clean != ''
+                matches_academic = academic_program_clean == program_normalized_clean and academic_program_clean != ''
+                
+                if matches_user or matches_academic:
+                    existing_program_display = coord_user.f_name or (coord_user.academic_info.program if hasattr(coord_user, 'academic_info') and coord_user.academic_info else 'Unknown')
+                    logger.warning(f"Blocking coordinator creation: Program '{program}' already has coordinator (existing: '{existing_program_display}')")
                     return JsonResponse({
                         'success': False,
-                        'message': f'A coordinator is already assigned to {coord_info.program}. Only one coordinator per program is allowed.'
+                        'message': f'A coordinator is already assigned to {existing_program_display}. Only one coordinator per program is allowed.'
                     }, status=400)
             
             logger.info(f"Program '{program_normalized}' is available for new coordinator")
@@ -10915,7 +11224,7 @@ def create_user_view(request):
         }, status=500)
 
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def update_user_password_view(request, user_id):
     """
@@ -10927,9 +11236,17 @@ def update_user_password_view(request, user_id):
     }
     """
     try:
-        # Check if user is admin
-        admin_user = get_current_user_from_request(request)
-        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+        # Use request.user which is set by DRF authentication
+        admin_user = request.user
+        if not admin_user or not admin_user.is_authenticated:
+            logger.warning(f"update_user_password_view: User not authenticated. request.user: {admin_user}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required'
+            }, status=401)
+        
+        if not hasattr(admin_user, 'account_type') or not getattr(admin_user.account_type, 'admin', False):
+            logger.warning(f"update_user_password_view: User {admin_user.user_id if hasattr(admin_user, 'user_id') else 'unknown'} is not an admin")
             return JsonResponse({
                 'success': False,
                 'message': 'Admin access required'
@@ -10998,12 +11315,21 @@ def update_user_password_view(request, user_id):
         }, status=500)
 
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def update_user_status_view(request, user_id):
     try:
-        admin_user = get_current_user_from_request(request)
-        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+        # Use request.user which is set by DRF authentication
+        admin_user = request.user
+        if not admin_user or not admin_user.is_authenticated:
+            logger.warning(f"update_user_status_view: User not authenticated. request.user: {admin_user}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required'
+            }, status=401)
+        
+        if not hasattr(admin_user, 'account_type') or not getattr(admin_user.account_type, 'admin', False):
+            logger.warning(f"update_user_status_view: User {admin_user.user_id if hasattr(admin_user, 'user_id') else 'unknown'} is not an admin")
             return JsonResponse({
                 'success': False,
                 'message': 'Admin access required'
@@ -11048,15 +11374,24 @@ def update_user_status_view(request, user_id):
         }, status=500)
 
 @api_view(["POST"])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def verify_admin_password_view(request):
     """
     Require admins to re-enter their password before accessing sensitive actions.
     """
     try:
-        admin_user = get_current_user_from_request(request)
-        if not admin_user or not getattr(admin_user.account_type, 'admin', False):
+        # Use request.user which is set by DRF authentication
+        admin_user = request.user
+        if not admin_user or not admin_user.is_authenticated:
+            logger.warning(f"verify_admin_password_view: User not authenticated. request.user: {admin_user}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required'
+            }, status=401)
+        
+        if not hasattr(admin_user, 'account_type') or not getattr(admin_user.account_type, 'admin', False):
+            logger.warning(f"verify_admin_password_view: User {admin_user.user_id if hasattr(admin_user, 'user_id') else 'unknown'} is not an admin")
             return JsonResponse({
                 'success': False,
                 'message': 'Admin access required'
@@ -11099,7 +11434,7 @@ def verify_admin_password_view(request):
 # ============================
 
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def engagement_points_settings_view(request):
     """
@@ -11213,7 +11548,7 @@ def engagement_points_settings_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def milestone_tasks_points_view(request):
     """
@@ -11365,7 +11700,7 @@ def milestone_tasks_points_view(request):
             'message': f'Error: {str(e)}'
         }, status=500)
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_requests_list_view(request):
     """
@@ -11412,15 +11747,51 @@ def reward_requests_list_view(request):
                     except Exception as e:
                         logger.warning(f"Error getting profile pic for request {req.request_id}: {e}")
                     
+                    # SENIOR-LEVEL FIX: Handle null reward_item (when inventory item was deleted but request is preserved)
+                    # For claimed rewards, try to get info from RewardHistory as fallback
+                    reward_id = None
+                    reward_name = 'Deleted Reward'
+                    reward_type = 'Unknown'
+                    reward_value = 'N/A'
+                    
+                    if req.reward_item:
+                        # Normal case: reward item exists
+                        reward_id = req.reward_item.item_id
+                        reward_name = req.reward_item.name
+                        reward_type = req.reward_item.type
+                        reward_value = req.reward_item.value
+                    elif req.status == 'claimed':
+                        # Fallback: reward item deleted but request is claimed - get from RewardHistory
+                        try:
+                            from apps.shared.models import RewardHistory
+                            # Find the most recent reward history entry for this user that matches
+                            # We match by points_cost and approximate timing
+                            history_entry = RewardHistory.objects.filter(
+                                user=req.user,
+                                points_deducted=req.points_cost,
+                                given_at__gte=req.requested_at
+                            ).order_by('-given_at').first()
+                            
+                            if history_entry:
+                                reward_name = history_entry.reward_name
+                                reward_type = history_entry.reward_type
+                                reward_value = history_entry.reward_value
+                                logger.info(
+                                    f"Reward request {req.request_id}: Using RewardHistory data "
+                                    f"for deleted reward item: {reward_name}"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Error fetching RewardHistory for request {req.request_id}: {e}")
+                    
                     requests_data.append({
                         'request_id': req.request_id,
                         'user_id': req.user.user_id,
                         'user_name': req.user.full_name,
                         'profile_pic': profile_pic,
-                        'reward_id': req.reward_item.item_id,
-                        'reward_name': req.reward_item.name,
-                        'reward_type': req.reward_item.type,
-                        'reward_value': req.reward_item.value,
+                        'reward_id': reward_id,
+                        'reward_name': reward_name,
+                        'reward_type': reward_type,
+                        'reward_value': reward_value,
                         'status': req.status,
                         'points_cost': req.points_cost,
                         'voucher_code': req.voucher_code,
@@ -11429,7 +11800,8 @@ def reward_requests_list_view(request):
                         'approved_at': req.approved_at.isoformat() if req.approved_at else None,
                         'approved_by': req.approved_by.full_name if req.approved_by else None,
                         'expires_at': req.expires_at.isoformat() if req.expires_at else None,
-                        'notes': req.notes
+                        'notes': req.notes,
+                        'reward_item_deleted': req.reward_item is None  # Flag to indicate item was deleted
                     })
                 except Exception as e:
                     import traceback
@@ -11454,17 +11826,46 @@ def reward_requests_list_view(request):
             requests = RewardRequest.objects.filter(user=user).select_related('reward_item', 'approved_by').order_by('-requested_at')
             requests_data = []
             for req in requests:
+                # SENIOR-LEVEL FIX: Handle null reward_item (when inventory item was deleted but request is preserved)
+                reward_id = None
+                reward_name = 'Deleted Reward'
+                reward_type = 'Unknown'
+                reward_value = 'N/A'
+                
+                if req.reward_item:
+                    reward_id = req.reward_item.item_id
+                    reward_name = req.reward_item.name
+                    reward_type = req.reward_item.type
+                    reward_value = req.reward_item.value
+                elif req.status == 'claimed':
+                    # Fallback: get from RewardHistory
+                    try:
+                        from apps.shared.models import RewardHistory
+                        history_entry = RewardHistory.objects.filter(
+                            user=req.user,
+                            points_deducted=req.points_cost,
+                            given_at__gte=req.requested_at
+                        ).order_by('-given_at').first()
+                        
+                        if history_entry:
+                            reward_name = history_entry.reward_name
+                            reward_type = history_entry.reward_type
+                            reward_value = history_entry.reward_value
+                    except Exception:
+                        pass
+                
                 requests_data.append({
                     'request_id': req.request_id,
-                    'reward_id': req.reward_item.item_id,
-                    'reward_name': req.reward_item.name,
-                    'reward_type': req.reward_item.type,
-                    'reward_value': req.reward_item.value,
+                    'reward_id': reward_id,
+                    'reward_name': reward_name,
+                    'reward_type': reward_type,
+                    'reward_value': reward_value,
                     'status': req.status,
                     'points_cost': req.points_cost,
                     'voucher_code': req.voucher_code,
                     'voucher_file': req.voucher_file.url if req.voucher_file else None,
                     'requested_at': req.requested_at.isoformat(),
+                    'reward_item_deleted': req.reward_item is None,
                     'approved_at': req.approved_at.isoformat() if req.approved_at else None,
                     'expires_at': req.expires_at.isoformat() if req.expires_at else None,
                     'notes': req.notes
@@ -11485,7 +11886,7 @@ def reward_requests_list_view(request):
 
 
 @api_view(['GET', 'POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_items_view(request):
     """
@@ -11493,8 +11894,10 @@ def inventory_items_view(request):
     POST: Create a new inventory item (admin only).
     """
     try:
-        user = get_current_user_from_request(request)
-        if not user:
+        # Use request.user which is set by DRF authentication
+        user = request.user
+        if not user or not user.is_authenticated:
+            logger.warning(f"inventory_items_view: User not authenticated. request.user: {user}")
             return JsonResponse(
                 {'success': False, 'message': 'Authentication required'},
                 status=401
@@ -11611,7 +12014,7 @@ def inventory_items_view(request):
         )
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_analytics_view(request):
     """
@@ -11619,8 +12022,10 @@ def inventory_analytics_view(request):
     Returns statistics about inventory items, redemption trends, top movers, etc.
     """
     try:
-        user = get_current_user_from_request(request)
-        if not user:
+        # Use request.user which is set by DRF authentication
+        user = request.user
+        if not user or not user.is_authenticated:
+            logger.warning(f"inventory_analytics_view: User not authenticated. request.user: {user}")
             return JsonResponse(
                 {'success': False, 'message': 'Authentication required'},
                 status=401
@@ -11742,7 +12147,7 @@ def inventory_analytics_view(request):
         )
 
 @api_view(['GET', 'PUT', 'DELETE'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def inventory_item_detail_view(request, item_id):
     """
@@ -11783,11 +12188,37 @@ def inventory_item_detail_view(request, item_id):
             )
 
         if request.method == 'DELETE':
-            logger.info(f"Inventory item deleted by {user.full_name}: {item}")
+            # SENIOR-LEVEL FIX: Preserve claimed reward requests even when inventory item is deleted
+            # This ensures users can still view their claimed rewards in notifications/history
+            from apps.shared.models import RewardRequest
+            
+            # Check for claimed requests associated with this item
+            claimed_requests = RewardRequest.objects.filter(
+                reward_item=item,
+                status='claimed'
+            )
+            
+            if claimed_requests.exists():
+                # Preserve claimed requests by setting reward_item to None
+                # This allows users to still view their claimed rewards
+                claimed_count = claimed_requests.count()
+                claimed_requests.update(reward_item=None)
+                logger.info(
+                    f"Inventory item deleted by {user.full_name}: {item}. "
+                    f"Preserved {claimed_count} claimed reward request(s) by setting reward_item to NULL."
+                )
+            
+            # Now safe to delete the inventory item
+            # Non-claimed requests will be handled by SET_NULL (they'll have reward_item=None)
+            # Claimed requests are already preserved above
             item.delete()
+            
             return JsonResponse({
                 'success': True,
-                'message': 'Inventory item deleted successfully'
+                'message': 'Inventory item deleted successfully' + (
+                    f' ({claimed_count} claimed reward request(s) preserved)' 
+                    if claimed_requests.exists() else ''
+                )
             })
 
         # PUT - update item
@@ -11867,7 +12298,7 @@ def inventory_item_detail_view(request, item_id):
 
 
 @api_view(['GET'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def reward_history_view(request):
     """
@@ -11935,7 +12366,7 @@ def reward_history_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def give_reward_view(request):
     """
@@ -12066,7 +12497,7 @@ def give_reward_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def request_reward_view(request):
     """
@@ -12261,7 +12692,7 @@ def get_business_days_after(start_date, days):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_reward_request_view(request, request_id):
     """
@@ -12293,6 +12724,13 @@ def approve_reward_request_view(request, request_id):
             return JsonResponse({
                 'success': False,
                 'message': f'Request is already {reward_request.status}'
+            }, status=400)
+        
+        # SENIOR-LEVEL FIX: Check if reward item was deleted
+        if not reward_request.reward_item:
+            return JsonResponse({
+                'success': False,
+                'message': 'Cannot approve request: The reward item has been deleted from inventory. Please contact admin.'
             }, status=400)
         
         data = json.loads(request.body) if request.body else {}
@@ -12386,7 +12824,7 @@ def approve_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def claim_reward_request_view(request, request_id):
     """
@@ -12407,6 +12845,24 @@ def claim_reward_request_view(request, request_id):
                 'success': False,
                 'message': 'Reward request not found'
             }, status=404)
+        
+        # SENIOR-LEVEL FIX: Check if reward item was deleted
+        if not reward_request.reward_item:
+            # For claimed rewards, this is acceptable (item was deleted after claim)
+            # But we can't process new claims without an item
+            if reward_request.status == 'claimed':
+                # Already claimed - return success with message
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Reward was already claimed. The inventory item has been removed, but your claim is still valid.',
+                    'already_claimed': True
+                })
+            else:
+                # Not claimed yet - cannot proceed
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Cannot claim reward: The reward item has been deleted from inventory. Please contact admin.'
+                }, status=400)
         
         # Check if user is admin releasing merchandise
         is_admin = hasattr(user, 'account_type') and user.account_type.admin
@@ -12539,7 +12995,7 @@ def claim_reward_request_view(request, request_id):
 
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def cancel_reward_request_view(request, request_id):
     """
@@ -12619,7 +13075,7 @@ def cancel_reward_request_view(request, request_id):
         }, status=500)
 
 @api_view(['POST'])
-@authentication_classes([JWTAuthentication])
+@authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def upload_voucher_file_view(request, request_id):
     """

@@ -1945,7 +1945,7 @@ class RewardRequest(models.Model):
     
     request_id = models.AutoField(primary_key=True)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='reward_requests')
-    reward_item = models.ForeignKey('RewardInventoryItem', on_delete=models.CASCADE, related_name='requests')
+    reward_item = models.ForeignKey('RewardInventoryItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='requests')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     points_cost = models.IntegerField(default=0)
     voucher_code = models.CharField(max_length=255, null=True, blank=True)  # For voucher rewards
