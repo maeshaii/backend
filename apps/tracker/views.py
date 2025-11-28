@@ -672,8 +672,24 @@ def submit_tracker_response_view(request):
         
         # Handle file uploads
         uploaded_files = []
+        from apps.shared.models import Question
+        
         for question_id, answer in answers.items():
             if isinstance(answer, dict) and answer.get('type') == 'file':
+                # Get question text to determine if it's an image-only question
+                try:
+                    question = Question.objects.get(id=int(question_id))
+                    question_text = question.text.lower() if question.text else ''
+                    is_first_employment_doc = 'first employment supporting document' in question_text
+                    is_award_supporting_docs = ('supporting documents' in question_text or 'supporting document' in question_text) and \
+                                               ('awards' in question_text or 'award' in question_text or 'recognition' in question_text)
+                    is_current_employment_doc = 'employment supporting document' in question_text and 'current' in question_text
+                    is_image_only_question = is_first_employment_doc or is_award_supporting_docs or is_current_employment_doc
+                except Question.DoesNotExist:
+                    # Fallback: check by question ID (20, 31, 32)
+                    question_id_int = int(question_id)
+                    is_image_only_question = question_id_int in [20, 31, 32]
+                
                 # Check if this is a multiple file upload (e.g., award supporting documents)
                 is_multiple = answer.get('multiple', False)
                 
@@ -692,11 +708,29 @@ def submit_tracker_response_view(request):
                             if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
                                 return JsonResponse({'success': False, 'message': f'File {uploaded_file.name} is too large. Maximum size is 10MB.'}, status=400)
                             
-                            # Validate file type
-                            allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
-                            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-                            if file_extension not in allowed_extensions:
-                                return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
+                            # Validate file type - IMAGE ONLY for question 31
+                            if is_image_only_question:
+                                allowed_image_extensions = ['.jpg', '.jpeg', '.png', '.svg', '.gif', '.webp', '.bmp', '.tiff', '.tif']
+                                allowed_image_mime_types = [
+                                    'image/jpeg', 'image/jpg', 'image/png', 'image/svg+xml', 
+                                    'image/gif', 'image/webp', 'image/bmp', 'image/tiff', 'image/x-tiff'
+                                ]
+                                file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                                file_mime_type = uploaded_file.content_type.lower() if hasattr(uploaded_file, 'content_type') else None
+                                
+                                # Validate both extension and MIME type for security
+                                if file_extension not in allowed_image_extensions:
+                                    return JsonResponse({'success': False, 'message': f'Only image files are allowed for this question. File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_image_extensions)}'}, status=400)
+                                
+                                if file_mime_type and file_mime_type not in allowed_image_mime_types:
+                                    # Double-check: sometimes MIME type might be more specific, check if it starts with 'image/'
+                                    if not file_mime_type.startswith('image/'):
+                                        return JsonResponse({'success': False, 'message': f'Only image files are allowed for this question. File MIME type {file_mime_type} is not an image type.'}, status=400)
+                            else:
+                                allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
+                                file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                                if file_extension not in allowed_extensions:
+                                    return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
                             
                             # Save the file
                             file_upload = TrackerFileUpload.objects.create(
@@ -720,11 +754,29 @@ def submit_tracker_response_view(request):
                         if uploaded_file.size > 10 * 1024 * 1024:  # 10MB
                             return JsonResponse({'success': False, 'message': f'File {uploaded_file.name} is too large. Maximum size is 10MB.'}, status=400)
                         
-                        # Validate file type
-                        allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
-                        file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-                        if file_extension not in allowed_extensions:
-                            return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
+                        # Validate file type - IMAGE ONLY for questions 20 and 32
+                        if is_image_only_question:
+                            allowed_image_extensions = ['.jpg', '.jpeg', '.png', '.svg', '.gif', '.webp', '.bmp', '.tiff', '.tif']
+                            allowed_image_mime_types = [
+                                'image/jpeg', 'image/jpg', 'image/png', 'image/svg+xml', 
+                                'image/gif', 'image/webp', 'image/bmp', 'image/tiff', 'image/x-tiff'
+                            ]
+                            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                            file_mime_type = uploaded_file.content_type.lower() if hasattr(uploaded_file, 'content_type') else None
+                            
+                            # Validate both extension and MIME type for security
+                            if file_extension not in allowed_image_extensions:
+                                return JsonResponse({'success': False, 'message': f'Only image files are allowed for this question. File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_image_extensions)}'}, status=400)
+                            
+                            if file_mime_type and file_mime_type not in allowed_image_mime_types:
+                                # Double-check: sometimes MIME type might be more specific, check if it starts with 'image/'
+                                if not file_mime_type.startswith('image/'):
+                                    return JsonResponse({'success': False, 'message': f'Only image files are allowed for this question. File MIME type {file_mime_type} is not an image type.'}, status=400)
+                        else:
+                            allowed_extensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.gif']
+                            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+                            if file_extension not in allowed_extensions:
+                                return JsonResponse({'success': False, 'message': f'File type {file_extension} is not allowed. Allowed types: {", ".join(allowed_extensions)}'}, status=400)
                         
                         # Save the file
                         file_upload = TrackerFileUpload.objects.create(
@@ -735,6 +787,32 @@ def submit_tracker_response_view(request):
                             file_size=uploaded_file.size
                         )
                         uploaded_files.append(file_upload)
+        
+        # CRITICAL: Transfer file uploads from TrackerFileUpload to TrackerData
+        # This must happen AFTER files are saved to TrackerFileUpload
+        try:
+            from apps.shared.models import TrackerData
+            tracker_data, _ = TrackerData.objects.get_or_create(user=user)
+            
+            # Get all file uploads for this response
+            for file_upload in uploaded_files:
+                if file_upload.question_id == 32:  # Awards document (Q32)
+                    # Transfer file to TrackerData.q_awards_document
+                    tracker_data.q_awards_document = file_upload.file
+                    logger.info(f"✅ Transferred awards document: {file_upload.file.name}")
+                elif file_upload.question_id == 33:  # Employment document (Q33)
+                    # Transfer file to TrackerData.q_employment_document
+                    tracker_data.q_employment_document = file_upload.file
+                    logger.info(f"✅ Transferred employment document: {file_upload.file.name}")
+            
+            # Save TrackerData with transferred files
+            tracker_data.save()
+            logger.info(f"✅ Saved TrackerData with file transfers for user {user.user_id}")
+        except Exception as file_error:
+            logger.error(f"⚠️ Error transferring file uploads: {file_error}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Don't fail the whole submission if file transfer fails
         
         # Legacy direct writes to `User` have been removed.
         # Domain updates are handled in TrackerResponse.save() via update_user_fields().

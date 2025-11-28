@@ -423,6 +423,12 @@ class Post(models.Model):
     post_content = models.TextField()
     type = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Event-related fields (optional)
+    is_event = models.BooleanField(default=False)  # Whether this post is an event
+    event_date = models.DateField(null=True, blank=True)  # Date of the event
+    event_time = models.TimeField(null=True, blank=True)  # Optional time of the event
+    
     # Used by Mobile: feed list/create/edit/delete/like/comment/repost
     # Images are handled by ContentImage model
     
@@ -443,6 +449,65 @@ class Post(models.Model):
 # PostImage model removed - replaced by ContentImage
 
 # REMOVED: Qpro model (deleted in migration 0091)
+
+class CalendarEvent(models.Model):
+    """Calendar events that appear on the admin dashboard.
+    
+    Can be standalone events or linked to posts.
+    Used to display important dates, reminders, deadlines, and activities on the dashboard calendar.
+    """
+    EVENT_TYPE_CHOICES = [
+        ('deadline', 'Deadline'),
+        ('event', 'Event'),
+        ('reminder', 'Reminder'),
+        ('holiday', 'Holiday'),
+        ('meeting', 'Meeting'),
+        ('announcement', 'Announcement'),
+    ]
+    
+    event_id = models.AutoField(primary_key=True)
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, null=True)
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPE_CHOICES, default='event')
+    event_date = models.DateField()  # The date this event occurs
+    event_time = models.TimeField(blank=True, null=True)  # Optional time
+    color = models.CharField(max_length=7, default='#3b82f6')  # Hex color for display
+    
+    # Optional link to a post (if event was created from a post)
+    post = models.ForeignKey('Post', on_delete=models.CASCADE, related_name='calendar_events', null=True, blank=True)
+    
+    # Creator and timestamps
+    created_by = models.ForeignKey('User', on_delete=models.CASCADE, related_name='created_events')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    # Visibility and status
+    is_active = models.BooleanField(default=True)
+    is_public = models.BooleanField(default=True)  # If false, only admin can see
+    
+    class Meta:
+        ordering = ['event_date', 'event_time']
+        db_table = 'shared_calendarevent'
+        indexes = [
+            models.Index(fields=['event_date', 'is_active']),
+            models.Index(fields=['created_by', 'event_date']),
+            models.Index(fields=['event_type', 'event_date']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title} - {self.event_date}"
+    
+    def get_color_for_type(self):
+        """Return default color based on event type"""
+        color_map = {
+            'deadline': '#ef4444',  # Red
+            'event': '#10b981',     # Green
+            'reminder': '#f59e0b',  # Amber
+            'holiday': '#8b5cf6',   # Purple
+            'meeting': '#3b82f6',   # Blue
+            'announcement': '#06b6d4',  # Cyan
+        }
+        return color_map.get(self.event_type, '#3b82f6')
 
 class DonationRequest(models.Model):
     """Donation requests from alumni"""
@@ -1732,10 +1797,19 @@ class TrackerResponse(models.Model):
                     if answer:
                         employment.position_current = str(answer)
                 elif question_id == 27:  # Current Sector of your Job (Public/Private)
-                    tracker.q_sector_current = str(answer) if answer else tracker.q_sector_current
-                    if answer:
-                        employment.sector_current = str(answer)
-                elif question_id == 39:  # Employment Sector (Local/International)
+                    # Normalize sector value to match dropdown options
+                    sector_value = str(answer).strip() if answer else ''
+                    if sector_value:
+                        # Normalize to match frontend dropdown options (Public/Private)
+                        sector_lower = sector_value.lower()
+                        if sector_lower in ['public', 'government']:
+                            tracker.q_sector_current = 'Public'
+                        elif sector_lower == 'private':
+                            tracker.q_sector_current = 'Private'
+                        else:
+                            tracker.q_sector_current = sector_value  # Keep original if not recognized
+                        employment.sector_current = tracker.q_sector_current
+                elif question_id == 39:  # Employment Scope (Local/International)
                     tracker.q_scope_current = str(answer) if answer else tracker.q_scope_current
                 elif question_id == 29:  # How long have you been employed?
                     tracker.q_employment_duration = str(answer) if answer else tracker.q_employment_duration
@@ -1748,7 +1822,8 @@ class TrackerResponse(models.Model):
                 elif question_id == 31:  # Have you received any awards... (was 30)
                     tracker.q_awards_received = str(answer) if answer else tracker.q_awards_received
 
-                # 32 and 33 are file uploads; skipped above
+                # 32 and 33 are file uploads; handled separately via TrackerFileUpload
+                # Files will be transferred to TrackerData after saving
 
                 # Part 4: Unemployment & Further Study
                 elif question_id == 34:  # Reason for unemployment (was 33)

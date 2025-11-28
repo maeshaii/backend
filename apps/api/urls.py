@@ -84,6 +84,7 @@ urlpatterns = [
     path('notifications/mark-read/', views.mark_notification_as_read, name='mark_notification_read'),
     path('notifications/mark-all-read/', views.mark_all_notifications_as_read, name='mark_all_notifications_read'),
     path('alumni/employment/<int:user_id>/', views.alumni_employment_view, name='alumni_employment'),
+    path('alumni/employment-reminder/<int:user_id>/', views.check_employment_update_reminder, name='check_employment_update_reminder'),
     path('alumni/profile/<int:user_id>/', views.alumni_profile_view, name='alumni_profile'),
     path('alumni/<int:user_id>/', alumni_detail_view, name='alumni_detail'),
     path('alumni/<int:user_id>/followers/', views.alumni_followers_view, name='alumni_followers'),
@@ -183,5 +184,10 @@ urlpatterns = [
     path('rewards/requests/<int:request_id>/cancel/', views.cancel_reward_request_view, name='cancel_reward_request'),
     path('rewards/requests/<int:request_id>/cancel', views.cancel_reward_request_view, name='cancel_reward_request_no_slash'),
     path('rewards/requests/<int:request_id>/upload-voucher/', views.upload_voucher_file_view, name='upload_voucher_file'),
+    
+    # Calendar Event API endpoints
+    path('calendar-events/', views.calendar_events_view, name='calendar_events'),
+    path('calendar-events/<int:event_id>/', views.calendar_event_detail_view, name='calendar_event_detail'),
+    path('calendar-events/month/<int:year>/<int:month>/', views.calendar_events_by_month_view, name='calendar_events_by_month'),
     
 ]

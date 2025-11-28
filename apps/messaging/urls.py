@@ -16,6 +16,7 @@ urlpatterns = [
     path('conversations/<int:conversation_id>/', views.conversation_detail, name='conversation-detail'),
     path('conversations/<int:conversation_id>/messages/', views.MessageListView.as_view(), name='message-list'),
     path('conversations/<int:conversation_id>/read/', views.mark_conversation_as_read, name='mark-read'),
+    path('conversations/<int:conversation_id>/delete/', views.delete_conversation, name='delete-conversation'),
     
     # Message operations (update must come before delete to handle both)
     path('conversations/<int:conversation_id>/messages/<int:message_id>/', views.update_message, name='update-message'),

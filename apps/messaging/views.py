@@ -15,7 +15,7 @@ from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import logging
 import os
-from apps.shared.models import Conversation, Message, MessageAttachment, User, MessageReaction
+from apps.shared.models import Conversation, Message, MessageAttachment, User, MessageReaction, Follow
 from apps.shared.serializers import (
 	ConversationSerializer,
 	MessageSerializer,
@@ -470,6 +470,13 @@ def search_users(request):
         return Response({'error': 'Query parameter required'}, status=status.HTTP_400_BAD_REQUEST)
     if len(query) < 2:
         return Response({'error': 'Query must be at least 2 characters'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Get list of user IDs that the current user follows
+    followed_user_ids = Follow.objects.filter(
+        follower=request.user
+    ).values_list('following__user_id', flat=True)
+    
+    # Only search among users that the current user follows
     users = User.objects.filter(
         Q(f_name__icontains=query) |
         Q(l_name__icontains=query) |
@@ -480,6 +487,7 @@ def search_users(request):
         Q(account_type__peso=True) | 
         Q(account_type__coordinator=True),
         user_status='active',
+        user_id__in=followed_user_ids
     ).exclude(user_id=request.user.user_id).distinct()[:10]
     from apps.shared.serializers import UserSerializer
     from django.conf import settings
@@ -585,6 +593,73 @@ def delete_message(request, conversation_id, message_id):
         return Response({'error': 'You can only delete your own messages'}, status=status.HTTP_403_FORBIDDEN)
     message.delete()
     return Response({'status': 'success', 'message': 'Message deleted successfully'})
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated, IsAlumniOrOJT])
+def delete_conversation(request, conversation_id):
+    """
+    Delete a conversation for the current user.
+    This removes the user from the conversation participants.
+    If no other participants remain, the conversation is completely deleted.
+    """
+    try:
+        # Get conversation with access check
+        conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
+        if error_response:
+            return error_response
+        
+        user = request.user
+        
+        # Remove user from participants
+        conversation.participants.remove(user)
+        
+        # Check if conversation has any remaining participants
+        remaining_participants = conversation.participants.count()
+        
+        if remaining_participants == 0:
+            # No participants left, delete the entire conversation
+            # This will cascade delete all messages due to ForeignKey on_delete=CASCADE
+            conversation_id_for_log = conversation.conversation_id
+            conversation.delete()
+            logger.info(f"Conversation {conversation_id_for_log} fully deleted (no remaining participants)")
+            
+            # Broadcast deletion to WebSocket if needed
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"user_{user.user_id}",
+                    {
+                        'type': 'conversation_deleted',
+                        'conversation_id': conversation_id_for_log,
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to broadcast conversation deletion: {str(e)}")
+        else:
+            # Other participants remain, just remove this user
+            logger.info(f"User {user.user_id} removed from conversation {conversation_id}")
+            conversation.save()
+        
+        # Clear message cache for this user
+        try:
+            message_cache.invalidate_user_conversations(user.user_id)
+        except Exception as e:
+            logger.warning(f"Failed to invalidate message cache: {str(e)}")
+        
+        return Response({
+            'status': 'success',
+            'message': 'Conversation deleted successfully',
+            'conversation_id': conversation_id,
+            'fully_deleted': remaining_participants == 0
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.exception(f"Error deleting conversation {conversation_id} for user {request.user.user_id}: {str(e)}")
+        return Response({
+            'error': 'Failed to delete conversation',
+            'detail': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

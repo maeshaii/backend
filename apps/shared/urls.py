@@ -13,4 +13,10 @@ urlpatterns = [
     # Report settings endpoints
     path('report-settings/', views.get_report_settings_view, name='get_report_settings'),
     path('report-settings/update/', views.update_report_settings_view, name='update_report_settings'),
+    
+    # Report preset endpoints
+    path('report-settings/presets/', views.get_report_presets_view, name='get_report_presets'),
+    path('report-settings/presets/save/', views.save_report_preset_view, name='save_report_preset'),
+    path('report-settings/presets/apply/', views.apply_report_preset_view, name='apply_report_preset'),
+    path('report-settings/presets/<str:preset_id>/delete/', views.delete_report_preset_view, name='delete_report_preset'),
 ]

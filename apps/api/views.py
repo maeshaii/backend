@@ -20,7 +20,7 @@ from django.views.decorators.http import require_POST
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from django.db.models import *
-from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile, PasswordResetToken
+from apps.shared.models import User, AccountType, OJTImport, Notification, Post, Like, Comment, Reply, ContentImage, Repost, UserProfile, AcademicInfo, EmploymentHistory, TrackerData, OJTInfo, UserInitialPassword, DonationRequest, RecentSearch, SendDate, UserPoints, RewardInventoryItem, RewardHistory, RewardRequest, OJTCompanyProfile, PasswordResetToken, CalendarEvent
 from apps.shared.models import Follow
 from apps.shared.services import UserService
 from apps.shared.points_milestones import (
@@ -5214,23 +5214,51 @@ def alumni_employment_view(request, user_id):
                     if tracker_data.q_awards_document:
                         try:
                             awards_doc_url = tracker_data.q_awards_document.url
-                        except (ValueError, AttributeError):
+                            print(f"📄 Awards document URL: {awards_doc_url}")
+                        except (ValueError, AttributeError) as e:
+                            print(f"⚠️ Error getting awards document URL: {e}")
                             awards_doc_url = ''
+                    else:
+                        print(f"ℹ️ No awards document found in TrackerData for user {user_id}")
                     
                     employment_doc_url = ''
                     if tracker_data.q_employment_document:
                         try:
                             employment_doc_url = tracker_data.q_employment_document.url
-                        except (ValueError, AttributeError):
+                            print(f"📄 Employment document URL: {employment_doc_url}")
+                        except (ValueError, AttributeError) as e:
+                            print(f"⚠️ Error getting employment document URL: {e}")
                             employment_doc_url = ''
+                    else:
+                        print(f"ℹ️ No employment document found in TrackerData for user {user_id}")
+                    
+                    # Normalize sector value to match frontend dropdown (Public/Private)
+                    sector_value = tracker_data.q_sector_current or ''
+                    if sector_value:
+                        sector_lower = sector_value.lower().strip()
+                        if sector_lower in ['public', 'government']:
+                            sector_value = 'Public'
+                        elif sector_lower == 'private':
+                            sector_value = 'Private'
+                        # Otherwise keep original value
+                    
+                    # Normalize scope value to match frontend dropdown (Local/International)
+                    scope_value = tracker_data.q_scope_current or ''
+                    if scope_value:
+                        scope_lower = scope_value.lower().strip()
+                        if scope_lower == 'local':
+                            scope_value = 'Local'
+                        elif scope_lower == 'international':
+                            scope_value = 'International'
+                        # Otherwise keep original value
                     
                     response_data.update({
                         'employment_type': tracker_data.q_employment_type or '',
                         'current_employment_status': tracker_data.q_employment_permanent or '',
                         'current_company_name': tracker_data.q_company_name or '',
                         'current_position': tracker_data.q_current_position or '',
-                        'current_sector': tracker_data.q_sector_current or '',
-                        'current_scope': tracker_data.q_scope_current or '',
+                        'current_sector': sector_value,
+                        'current_scope': scope_value,
                         'employment_duration': tracker_data.q_employment_duration or '',
                         'salary_range': tracker_data.q_salary_range or '',
                         'received_awards': tracker_data.q_awards_received or '',
@@ -5427,6 +5455,15 @@ def alumni_employment_view(request, user_id):
                 if data.get('received_awards'):
                     tracker_data.q_awards_received = data.get('received_awards')
                 
+                # Handle file uploads from Settings form (FormData)
+                if 'awards_supporting_doc' in request.FILES:
+                    tracker_data.q_awards_document = request.FILES['awards_supporting_doc']
+                    print(f"✅ Saved awards document from Settings: {tracker_data.q_awards_document.name}")
+                
+                if 'employment_supporting_doc' in request.FILES:
+                    tracker_data.q_employment_document = request.FILES['employment_supporting_doc']
+                    print(f"✅ Saved employment document from Settings: {tracker_data.q_employment_document.name}")
+                
                 if not data.get('unemployment_reason') and not data.get('q_unemployment_reason'):
                     tracker_data.q_unemployment_reason = None
                 tracker_data.save()
@@ -5445,6 +5482,89 @@ def alumni_employment_view(request, user_id):
         print(f"Error in alumni_employment_view: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_employment_update_reminder(request, user_id):
+    """Check if user should see employment update reminder (2 minutes for testing, 6 months for production)"""
+    try:
+        from apps.shared.models import User, TrackerData
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        user = User.objects.get(user_id=user_id)
+        
+        # Check if user is alumni
+        if not (hasattr(user.account_type, 'user') and user.account_type.user):
+            return JsonResponse({
+                'should_show_reminder': False,
+                'reason': 'not_alumni'
+            })
+        
+        # Get tracker data
+        try:
+            tracker_data = TrackerData.objects.get(user=user)
+        except TrackerData.DoesNotExist:
+            return JsonResponse({
+                'should_show_reminder': False,
+                'reason': 'no_tracker_data'
+            })
+        
+        # Check if tracker was submitted
+        if not tracker_data.tracker_submitted_at:
+            return JsonResponse({
+                'should_show_reminder': False,
+                'reason': 'tracker_not_submitted'
+            })
+        
+        # Check if Part III data exists (employment data)
+        has_part_iii_data = (
+            tracker_data.q_employment_type or
+            tracker_data.q_company_name or
+            tracker_data.q_current_position
+        )
+        
+        if not has_part_iii_data:
+            return JsonResponse({
+                'should_show_reminder': False,
+                'reason': 'no_employment_data'
+            })
+        
+        # Calculate time since last tracker submission
+        time_since_submission = timezone.now() - tracker_data.tracker_submitted_at
+        
+        # FOR TESTING: 2 minutes (120 seconds)
+        # FOR PRODUCTION: Change to 180 days (6 months)
+        reminder_threshold = timedelta(minutes=2)  # Change to days=180 for production
+        
+        should_show = time_since_submission >= reminder_threshold
+        
+        # Check if user dismissed reminder (check localStorage on frontend, but also check if dismissed recently)
+        # For now, we'll let frontend handle dismissal via localStorage
+        
+        return JsonResponse({
+            'should_show_reminder': should_show,
+            'time_since_submission_seconds': int(time_since_submission.total_seconds()),
+            'time_since_submission_days': time_since_submission.days,
+            'tracker_submitted_at': tracker_data.tracker_submitted_at.isoformat() if tracker_data.tracker_submitted_at else None,
+            'has_employment_data': has_part_iii_data,
+            'reason': 'time_elapsed' if should_show else 'too_soon'
+        })
+        
+    except User.DoesNotExist:
+        return JsonResponse({
+            'should_show_reminder': False,
+            'reason': 'user_not_found'
+        }, status=404)
+    except Exception as e:
+        import traceback
+        print(f"Error in check_employment_update_reminder: {str(e)}")
+        print(traceback.format_exc())
+        return JsonResponse({
+            'should_show_reminder': False,
+            'reason': 'error',
+            'error': str(e)
+        }, status=500)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -5761,8 +5881,15 @@ def post_detail_view(request, post_id):
                     'l_name': post.user.l_name,
                     'profile_pic': build_profile_pic_url(post.user),
                 },
-                'category': {
-                }
+                'category': {},
+                # Event fields
+                'is_event': getattr(post, 'is_event', False),
+                'event_date': post.event_date.isoformat() if getattr(post, 'event_date', None) else None,
+                'event_time': post.event_time.isoformat() if getattr(post, 'event_time', None) else None,
+            }
+            # Remove the extra closing brace that was causing issues
+            post_data.pop('category', None)  # Remove empty category
+            post_data['category'] = {
             }
             return JsonResponse(post_data)
         except Exception as e:
@@ -8537,13 +8664,74 @@ def posts_view(request):
             if not post_content.strip():
                 return JsonResponse({'success': False, 'message': 'post_content is required'}, status=400)
 
+            # Handle event-related fields
+            is_event = data.get('is_event', False)
+            event_date = None
+            event_time = None
+            
+            # Only admins can create events
+            if is_event:
+                if not (hasattr(request.user, 'account_type') and request.user.account_type.admin):
+                    logger.warning(f"Non-admin user {request.user.user_id} attempted to create event post")
+                    return JsonResponse({'success': False, 'message': 'Only administrators can create event posts'}, status=403)
+                
+                event_date_str = data.get('event_date')
+                event_time_str = data.get('event_time')
+                
+                if event_date_str:
+                    try:
+                        event_date = parse_date(event_date_str)
+                    except:
+                        logger.warning(f"Invalid event_date format: {event_date_str}")
+                
+                if event_time_str:
+                    try:
+                        from datetime import time as dt_time
+                        hour, minute = event_time_str.split(':')
+                        event_time = dt_time(int(hour), int(minute))
+                    except:
+                        logger.warning(f"Invalid event_time format: {event_time_str}")
+
             new_post = Post.objects.create(
                 user=request.user,
                 post_content=post_content,
                 type=post_type,
+                is_event=is_event,
+                event_date=event_date,
+                event_time=event_time,
             )
             
-            print(f"Post created successfully - ID: {new_post.post_id}, User: {new_post.user.user_id}")
+            print(f"Post created successfully - ID: {new_post.post_id}, User: {new_post.user.user_id}, Is Event: {is_event}")
+            
+            # If this is an event post, also create a calendar event
+            if is_event and event_date:
+                try:
+                    # Determine event type from post type or default to 'event'
+                    event_type = 'event'  # Default
+                    if 'deadline' in post_content.lower() or 'due' in post_content.lower():
+                        event_type = 'deadline'
+                    elif 'reminder' in post_content.lower() or 'remind' in post_content.lower():
+                        event_type = 'reminder'
+                    elif 'meeting' in post_content.lower():
+                        event_type = 'meeting'
+                    elif 'holiday' in post_content.lower() or 'celebration' in post_content.lower():
+                        event_type = 'holiday'
+                    
+                    # Create calendar event
+                    calendar_event = CalendarEvent.objects.create(
+                        title=post_content[:100],  # Use first 100 chars as title
+                        description=post_content,
+                        event_type=event_type,
+                        event_date=event_date,
+                        event_time=event_time,
+                        color=CalendarEvent().get_color_for_type(),
+                        is_public=True,
+                        created_by=request.user,
+                        post=new_post
+                    )
+                    logger.info(f"Calendar event created from post: {calendar_event.event_id}")
+                except Exception as e:
+                    logger.error(f"Failed to create calendar event from post: {e}")
             
             # Create mention notifications for users mentioned in the post
             create_mention_notifications(
@@ -8827,10 +9015,13 @@ def posts_view(request):
                         'l_name': post.user.l_name,
                         'profile_pic': build_profile_pic_url(post.user),
                     },
-                    'category': {
-                    },
+                    'category': {},
                     'item_type': 'post',  # Mark as original post
                     'sort_date': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
+                    # Event fields
+                    'is_event': getattr(post, 'is_event', False),
+                    'event_date': post.event_date.isoformat() if getattr(post, 'event_date', None) else None,
+                    'event_time': post.event_time.isoformat() if getattr(post, 'event_time', None) else None,
                 })
                 
                 # Add each repost as a separate feed item
@@ -8903,6 +9094,10 @@ def posts_view(request):
                                 'post_images': post_images,  # Multiple images (already calculated above)
                                 'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
                                 'reposts_count': Repost.objects.filter(post=post).count(),
+                                # Event fields
+                                'is_event': getattr(post, 'is_event', False),
+                                'event_date': post.event_date.isoformat() if getattr(post, 'event_date', None) else None,
+                                'event_time': post.event_time.isoformat() if getattr(post, 'event_time', None) else None,
                                 'user': {
                                     'user_id': post.user.user_id,
                                     'f_name': post.user.f_name,
@@ -9265,8 +9460,20 @@ def userprofile_email_view(request, user_id):
 @api_view(["POST"])
 def forgot_password_view(request):
     """
-    Forgot password endpoint - validates user credentials and generates temporary password.
-    Only available for alumni (user=True) and OJT (ojt=True) account types.
+    Secure forgot password endpoint - email-only, token-based reset.
+    
+    Flow:
+    1. User submits email address
+    2. System generates secure one-time token
+    3. Sends email with reset link
+    4. User clicks link to reset password
+    
+    Security Features:
+    - Email-only input (minimal data exposure)
+    - Rate limiting (prevents abuse)
+    - One-time tokens (expire after 1 hour)
+    - Generic messages (prevents user enumeration)
+    - Only available for alumni and OJT accounts
     """
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
@@ -9275,93 +9482,335 @@ def forgot_password_view(request):
         response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken"
         return response
 
+    # Get client IP for rate limiting
+    client_ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or \
+                request.META.get('REMOTE_ADDR', 'unknown')
+
     try:
         data = json.loads(request.body)
-        ctu_id = data.get('ctu_id', '').strip()
-        email = data.get('email', '').strip()
-        last_name = data.get('last_name', '').strip()
-        first_name = data.get('first_name', '').strip()
-        middle_name = data.get('middle_name', '').strip()
+        email = data.get('email', '').strip().lower()
 
-        # Validate required fields
-        if not all([ctu_id, email, last_name, first_name]):
-            return JsonResponse({
-                'success': False, 
-                'message': 'All fields are required: CTU ID, Email, Last Name, First Name'
-            }, status=400)
-
-        # Find user by CTU ID
-        try:
-            user = User.objects.select_related('profile', 'account_type').get(acc_username=ctu_id)
-        except User.DoesNotExist:
-            logger.warning(f"Forgot password failed: CTU ID {ctu_id} does not exist.")
+        # Validate email format
+        if not email:
             return JsonResponse({
                 'success': False,
-                'message': 'Invalid credentials. Please check your information and try again.'
-            }, status=404)
+                'message': 'Email address is required'
+            }, status=400)
+
+        # Basic email validation
+        import re
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, email):
+            return JsonResponse({
+                'success': False,
+                'message': 'Please enter a valid email address'
+            }, status=400)
+
+        # Rate limiting using Django cache
+        from django.core.cache import cache
+        
+        # Rate limit: Max 3 requests per hour per email
+        email_cache_key = f"password_reset_email_{email}"
+        email_attempts = cache.get(email_cache_key, 0)
+        if email_attempts >= 3:
+            logger.warning(f"Password reset rate limit exceeded for email: {email} from IP: {client_ip}")
+            # Still return generic success message (security: don't reveal rate limiting)
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
+        
+        # Rate limit: Max 5 requests per hour per IP
+        ip_cache_key = f"password_reset_ip_{client_ip}"
+        ip_attempts = cache.get(ip_cache_key, 0)
+        if ip_attempts >= 5:
+            logger.warning(f"Password reset rate limit exceeded for IP: {client_ip}")
+            return JsonResponse({
+                'success': False,
+                'message': 'Too many password reset attempts. Please try again later.'
+            }, status=429)
+
+        # Find user by email (from UserProfile)
+        try:
+            user = User.objects.select_related('profile', 'account_type').get(
+                profile__email__iexact=email
+            )
+        except User.DoesNotExist:
+            # Generic message for security (prevents user enumeration)
+            logger.info(f"Password reset requested for non-existent email: {email} from IP: {client_ip}")
+            # Increment rate limit counters even for non-existent emails
+            cache.set(email_cache_key, email_attempts + 1, 3600)  # 1 hour
+            cache.set(ip_cache_key, ip_attempts + 1, 3600)  # 1 hour
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
 
         # Check if user is alumni or OJT (not admin, peso, or coordinator)
         if not (user.account_type.user or user.account_type.ojt):
-            logger.warning(f"Forgot password denied: User {ctu_id} is not alumni or OJT.")
+            logger.warning(f"Password reset denied: User {user.acc_username} is not alumni or OJT.")
+            # Still return generic message (security)
             return JsonResponse({
-                'success': False, 
-                'message': 'Password reset is only available for alumni and OJT students.'
-            }, status=403)
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
 
-        # Validate credentials against user data
-        profile = getattr(user, 'profile', None)
-        user_email = getattr(profile, 'email', None) if profile else None
-        
-        # Case-insensitive comparison for names and email
-        # Check middle name if provided, otherwise allow empty middle name
-        middle_name_match = True
-        if middle_name:  # If middle name is provided, it must match
-            user_middle_name = user.m_name or ''
-            middle_name_match = user_middle_name.lower() == middle_name.lower()
-        
-        if (user.f_name.lower() != first_name.lower() or 
-            user.l_name.lower() != last_name.lower() or
-            not middle_name_match or
-            (user_email and user_email.lower() != email.lower())):
-            logger.warning(f"Forgot password failed: Credential mismatch for user {ctu_id}.")
+        # Check if email is configured
+        if not hasattr(settings, 'EMAIL_HOST') or not settings.EMAIL_HOST:
+            logger.error("Password reset failed: Email is not configured on the server.")
             return JsonResponse({
                 'success': False,
-                'message': 'Invalid credentials. Please check your information and try again.'
-            }, status=400)
+                'message': 'Email service is not configured. Please contact the administrator.'
+            }, status=500)
 
-        # Generate temporary password
-        alphabet = string.ascii_letters + string.digits
-        temp_password = ''.join(secrets.choice(alphabet) for _ in range(12))
+        # Get frontend URL from settings (fallback to default)
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+        if frontend_url.endswith('/'):
+            frontend_url = frontend_url[:-1]
+
+        # Generate secure token
+        token = PasswordResetToken.generate_token()
         
-        # Update user password
-        user.set_password(temp_password)
-        user.save()
+        # Calculate expiration (1 hour from now)
+        expires_at = timezone.now() + timedelta(hours=1)
         
-        # Store temporary password for tracking
+        # Invalidate any previous active tokens for this user
+        PasswordResetToken.objects.filter(
+            user=user,
+            used=False,
+            expires_at__gt=timezone.now()
+        ).update(used=True, used_at=timezone.now())
+        
+        # Create new password reset token
+        reset_token = PasswordResetToken.objects.create(
+            user=user,
+            token=token,
+            expires_at=expires_at
+        )
+
+        # Build reset link
+        reset_link = f"{frontend_url}/reset-password?token={token}"
+
+        # Get user email from profile
+        profile = getattr(user, 'profile', None)
+        user_email = getattr(profile, 'email', None) if profile else email
+        user_name = user.full_name
+
+        # Create email content
+        subject = "Reset Your Password - CTU Alumni"
+        
+        # Plain text version
+        plain_text = f"""
+Hello {user_name},
+
+You requested to reset your password for your CTU Alumni account.
+
+Click the link below to reset your password:
+{reset_link}
+
+This link will expire in 1 hour.
+
+If you did not request this password reset, please ignore this email. Your password will remain unchanged.
+
+For security reasons, please do not share this link with anyone.
+
+Best regards,
+CTU CCICT Alumni Management System
+        """.strip()
+
+        # HTML version
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f4f4f4;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 20px auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #003366 0%, #0066cc 100%);
+            color: #ffffff;
+            padding: 30px 20px;
+            text-align: center;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+        }}
+        .content {{
+            padding: 30px;
+            color: #333333;
+        }}
+        .greeting {{
+            font-size: 16px;
+            margin-bottom: 20px;
+        }}
+        .message {{
+            font-size: 14px;
+            margin-bottom: 30px;
+            color: #555555;
+        }}
+        .button-container {{
+            text-align: center;
+            margin: 30px 0;
+        }}
+        .reset-button {{
+            display: inline-block;
+            background: linear-gradient(135deg, #003366 0%, #0066cc 100%);
+            color: #ffffff !important;
+            text-decoration: none;
+            padding: 14px 32px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 16px;
+            box-shadow: 0 4px 12px rgba(0, 51, 102, 0.3);
+            transition: transform 0.2s;
+        }}
+        .reset-button:hover {{
+            transform: translateY(-2px);
+        }}
+        .link-fallback {{
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #666666;
+            word-break: break-all;
+        }}
+        .warning {{
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #856404;
+        }}
+        .footer {{
+            background-color: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            font-size: 12px;
+            color: #666666;
+            border-top: 1px solid #e9ecef;
+        }}
+        .expiry-notice {{
+            background-color: #e7f3ff;
+            border-left: 4px solid #0066cc;
+            padding: 12px;
+            margin: 20px 0;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #004085;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 Password Reset Request</h1>
+        </div>
+        <div class="content">
+            <div class="greeting">
+                Hello <strong>{user_name}</strong>,
+            </div>
+            <div class="message">
+                You requested to reset your password for your CTU Alumni account. Click the button below to create a new password.
+            </div>
+            
+            <div class="button-container">
+                <a href="{reset_link}" class="reset-button">Reset My Password</a>
+            </div>
+            
+            <div class="link-fallback">
+                <strong>Or copy and paste this link into your browser:</strong><br>
+                {reset_link}
+            </div>
+            
+            <div class="expiry-notice">
+                ⏱️ <strong>Important:</strong> This link will expire in 1 hour for security reasons.
+            </div>
+            
+            <div class="warning">
+                ⚠️ <strong>Security Notice:</strong> If you did not request this password reset, please ignore this email. Your password will remain unchanged. Never share this link with anyone.
+            </div>
+        </div>
+        <div class="footer">
+            <p style="margin: 0 0 5px 0;"><strong>CTU CCICT Alumni Management System</strong></p>
+            <p style="margin: 0;">This is an automated message. Please do not reply to this email.</p>
+            <p style="margin: 5px 0 0 0; color: #999;">© {timezone.now().year} Cebu Technological University</p>
+        </div>
+    </div>
+</body>
+</html>
+        """.strip()
+
+        # Send email
         try:
-            initial_password, created = UserInitialPassword.objects.get_or_create(user=user)
-            initial_password.set_plaintext(temp_password)
-            initial_password.is_active = True
-            initial_password.save()
+            from django.core.mail import EmailMultiAlternatives
+            
+            email_msg = EmailMultiAlternatives(
+                subject=subject,
+                body=plain_text,
+                from_email=getattr(settings, 'EMAIL_HOST_USER', 'noreply@ctu.edu.ph'),
+                to=[user_email],
+            )
+            email_msg.attach_alternative(html_message, "text/html")
+            email_msg.send(fail_silently=False)
+            
+            # Increment rate limit counters
+            cache.set(email_cache_key, email_attempts + 1, 3600)  # 1 hour
+            cache.set(ip_cache_key, ip_attempts + 1, 3600)  # 1 hour
+            
+            logger.info(
+                f"🔒 SECURITY: Password reset email sent to {user_email} "
+                f"for user {user.acc_username} ({user_name}) from IP: {client_ip}"
+            )
+            
+            # Return generic success message (security: prevents user enumeration)
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
+            
         except Exception as e:
-            logger.error(f"Failed to store initial password for user {ctu_id}: {e}")
-            # Continue anyway - password was already updated
-
-        logger.info(f"Temporary password generated for user {ctu_id} ({user.full_name})")
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'Temporary password generated successfully',
-            'temp_password': temp_password,
-            'user_name': user.full_name
-        })
+            logger.error(f"Failed to send password reset email to {user_email}: {str(e)}")
+            # Don't reveal email sending failure to user (security)
+            return JsonResponse({
+                'success': True,
+                'message': 'If an account with that email exists, a password reset link has been sent.'
+            })
 
     except json.JSONDecodeError:
         logger.error("Forgot password failed: Invalid JSON in request body.")
-        return JsonResponse({'success': False, 'message': 'Invalid request format'}, status=400)
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid request format'
+        }, status=400)
     except Exception as e:
         logger.error(f"Forgot password failed: Unexpected error: {e}")
-        return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return JsonResponse({
+            'success': False,
+            'message': 'Server error occurred. Please try again later.'
+        }, status=500)
 
 @api_view(["GET", "POST"])
 def reset_password_view(request):
@@ -11187,12 +11636,38 @@ def create_user_view(request):
         # Store initial password if needed
         ensure_initial_password_active(new_user, raw_password=password, allow_create=True)
 
+        # Handle AcademicInfo for alumni/ojt users (program and year_graduated)
+        year_graduated = data.get('year_graduated', '')
+        section = data.get('section', '').strip()
+        academic_info_defaults = {}
+        
         if program:
             # Normalize program name (trim and uppercase) for consistency
             program_normalized = program.strip().upper() if program else ''
+            academic_info_defaults['program'] = program_normalized
+        
+        # Handle year_graduated - convert to int if valid
+        if year_graduated:
+            try:
+                # Handle both string and int inputs
+                if isinstance(year_graduated, str):
+                    year_graduated_clean = year_graduated.strip()
+                    if year_graduated_clean.isdigit():
+                        academic_info_defaults['year_graduated'] = int(year_graduated_clean)
+                elif isinstance(year_graduated, (int, float)):
+                    academic_info_defaults['year_graduated'] = int(year_graduated)
+            except (ValueError, TypeError) as e:
+                # Invalid year_graduated value, skip it
+                logger.warning(f"Invalid year_graduated value: {year_graduated} for user {ctu_id}: {e}")
+        
+        if section:
+            academic_info_defaults['section'] = section
+        
+        # Create or update AcademicInfo if we have any data
+        if academic_info_defaults:
             AcademicInfo.objects.update_or_create(
                 user=new_user,
-                defaults={'program': program_normalized}
+                defaults=academic_info_defaults
             )
         
         logger.info(f"Admin {user.acc_username} created new user {ctu_id}")
@@ -13123,3 +13598,313 @@ def upload_voucher_file_view(request, request_id):
             'success': False,
             'message': f'Error: {str(e)}'
         }, status=500)
+
+# ==========================
+# Calendar Event API
+# ==========================
+
+@api_view(["GET", "POST"])
+@authentication_classes([CustomJWTAuthentication])
+@permission_classes([IsAuthenticated])
+def calendar_events_view(request):
+    """
+    GET: List calendar events (with optional date filtering)
+    POST: Create a new calendar event (Admin only)
+    """
+    try:
+        if request.method == "GET":
+            # Optional filters
+            start_date = request.GET.get('start_date')
+            end_date = request.GET.get('end_date')
+            event_type = request.GET.get('event_type')
+            is_public = request.GET.get('is_public')
+            
+            # Base query - only active events
+            events = CalendarEvent.objects.filter(is_active=True)
+            
+            # Apply filters
+            if start_date:
+                try:
+                    start_date_obj = parse_date(start_date)
+                    if start_date_obj:
+                        events = events.filter(event_date__gte=start_date_obj)
+                except:
+                    pass
+            
+            if end_date:
+                try:
+                    end_date_obj = parse_date(end_date)
+                    if end_date_obj:
+                        events = events.filter(event_date__lte=end_date_obj)
+                except:
+                    pass
+            
+            if event_type:
+                events = events.filter(event_type=event_type)
+            
+            # Non-admin users only see public events
+            if not (hasattr(request.user, 'account_type') and 
+                   (request.user.account_type.admin or request.user.account_type.ccict)):
+                events = events.filter(is_public=True)
+            elif is_public is not None:
+                # Admin can filter by public/private
+                events = events.filter(is_public=is_public.lower() == 'true')
+            
+            # Order by date
+            events = events.select_related('created_by', 'post').order_by('event_date', 'event_time')
+            
+            # Serialize events
+            events_data = []
+            for event in events:
+                event_info = {
+                    'event_id': event.event_id,
+                    'title': event.title,
+                    'description': event.description,
+                    'event_type': event.event_type,
+                    'event_date': event.event_date.isoformat(),
+                    'event_time': event.event_time.isoformat() if event.event_time else None,
+                    'color': event.color,
+                    'is_public': event.is_public,
+                    'created_by': {
+                        'user_id': event.created_by.user_id,
+                        'name': f"{event.created_by.f_name} {event.created_by.l_name}",
+                    },
+                    'created_at': event.created_at.isoformat(),
+                    'post_id': event.post.post_id if event.post else None,
+                }
+                events_data.append(event_info)
+            
+            return JsonResponse({'success': True, 'events': events_data})
+        
+        elif request.method == "POST":
+            # Only admin can create calendar events
+            if not (hasattr(request.user, 'account_type') and 
+                   (request.user.account_type.admin or request.user.account_type.ccict)):
+                return JsonResponse({'success': False, 'message': 'Admin access required'}, status=403)
+            
+            data = request.data
+            title = data.get('title', '').strip()
+            description = data.get('description', '').strip()
+            event_type = data.get('event_type', 'event')
+            event_date_str = data.get('event_date')
+            event_time_str = data.get('event_time')
+            color = data.get('color', '')
+            is_public = data.get('is_public', True)
+            post_id = data.get('post_id')
+            
+            # Validate required fields
+            if not title:
+                return JsonResponse({'success': False, 'message': 'Title is required'}, status=400)
+            
+            if not event_date_str:
+                return JsonResponse({'success': False, 'message': 'Event date is required'}, status=400)
+            
+            # Parse date
+            try:
+                event_date = parse_date(event_date_str)
+                if not event_date:
+                    return JsonResponse({'success': False, 'message': 'Invalid date format'}, status=400)
+            except:
+                return JsonResponse({'success': False, 'message': 'Invalid date format'}, status=400)
+            
+            # Parse time if provided
+            event_time = None
+            if event_time_str:
+                try:
+                    from datetime import time as dt_time
+                    hour, minute = event_time_str.split(':')
+                    event_time = dt_time(int(hour), int(minute))
+                except:
+                    pass
+            
+            # Create event
+            event = CalendarEvent.objects.create(
+                title=title,
+                description=description,
+                event_type=event_type,
+                event_date=event_date,
+                event_time=event_time,
+                color=color if color else CalendarEvent().get_color_for_type(),
+                is_public=is_public,
+                created_by=request.user,
+                post_id=post_id if post_id else None
+            )
+            
+            logger.info(f"Calendar event created: {event.event_id} by user {request.user.user_id}")
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Event created successfully',
+                'event': {
+                    'event_id': event.event_id,
+                    'title': event.title,
+                    'event_date': event.event_date.isoformat(),
+                    'event_type': event.event_type,
+                    'color': event.color
+                }
+            })
+    
+    except Exception as e:
+        logger.error(f"calendar_events_view error: {e}")
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+@authentication_classes([CustomJWTAuthentication])
+@permission_classes([IsAuthenticated])
+def calendar_event_detail_view(request, event_id):
+    """
+    GET: Get single event details
+    PUT: Update event (Admin only)
+    DELETE: Delete event (Admin only)
+    """
+    try:
+        event = get_object_or_404(CalendarEvent, event_id=event_id, is_active=True)
+        
+        # Check permissions for non-public events
+        is_admin = hasattr(request.user, 'account_type') and (
+            request.user.account_type.admin or request.user.account_type.ccict
+        )
+        
+        if not event.is_public and not is_admin:
+            return JsonResponse({'success': False, 'message': 'Event not found'}, status=404)
+        
+        if request.method == "GET":
+            event_data = {
+                'event_id': event.event_id,
+                'title': event.title,
+                'description': event.description,
+                'event_type': event.event_type,
+                'event_date': event.event_date.isoformat(),
+                'event_time': event.event_time.isoformat() if event.event_time else None,
+                'color': event.color,
+                'is_public': event.is_public,
+                'created_by': {
+                    'user_id': event.created_by.user_id,
+                    'name': f"{event.created_by.f_name} {event.created_by.l_name}",
+                },
+                'created_at': event.created_at.isoformat(),
+                'updated_at': event.updated_at.isoformat(),
+                'post_id': event.post.post_id if event.post else None,
+            }
+            return JsonResponse({'success': True, 'event': event_data})
+        
+        elif request.method == "PUT":
+            # Only admin can update
+            if not is_admin:
+                return JsonResponse({'success': False, 'message': 'Admin access required'}, status=403)
+            
+            data = request.data
+            
+            # Update fields
+            if 'title' in data:
+                event.title = data['title'].strip()
+            
+            if 'description' in data:
+                event.description = data['description'].strip()
+            
+            if 'event_type' in data:
+                event.event_type = data['event_type']
+            
+            if 'event_date' in data:
+                try:
+                    event.event_date = parse_date(data['event_date'])
+                except:
+                    pass
+            
+            if 'event_time' in data:
+                if data['event_time']:
+                    try:
+                        from datetime import time as dt_time
+                        hour, minute = data['event_time'].split(':')
+                        event.event_time = dt_time(int(hour), int(minute))
+                    except:
+                        pass
+                else:
+                    event.event_time = None
+            
+            if 'color' in data:
+                event.color = data['color']
+            
+            if 'is_public' in data:
+                event.is_public = data['is_public']
+            
+            event.save()
+            
+            logger.info(f"Calendar event updated: {event.event_id} by user {request.user.user_id}")
+            
+            return JsonResponse({'success': True, 'message': 'Event updated successfully'})
+        
+        elif request.method == "DELETE":
+            # Only admin can delete
+            if not is_admin:
+                return JsonResponse({'success': False, 'message': 'Admin access required'}, status=403)
+            
+            # Soft delete
+            event.is_active = False
+            event.save()
+            
+            logger.info(f"Calendar event deleted: {event.event_id} by user {request.user.user_id}")
+            
+            return JsonResponse({'success': True, 'message': 'Event deleted successfully'})
+    
+    except Exception as e:
+        logger.error(f"calendar_event_detail_view error: {e}")
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@api_view(["GET"])
+@authentication_classes([CustomJWTAuthentication])
+@permission_classes([IsAuthenticated])
+def calendar_events_by_month_view(request, year, month):
+    """
+    Get all events for a specific month (optimized for calendar display)
+    Returns events grouped by date
+    """
+    try:
+        from datetime import date as dt_date
+        from calendar import monthrange
+        
+        # Get first and last day of the month
+        first_day = dt_date(int(year), int(month), 1)
+        last_day_num = monthrange(int(year), int(month))[1]
+        last_day = dt_date(int(year), int(month), last_day_num)
+        
+        # Get events for this month
+        events = CalendarEvent.objects.filter(
+            is_active=True,
+            event_date__gte=first_day,
+            event_date__lte=last_day
+        )
+        
+        # Non-admin users only see public events
+        is_admin = hasattr(request.user, 'account_type') and (
+            request.user.account_type.admin or request.user.account_type.ccict
+        )
+        
+        if not is_admin:
+            events = events.filter(is_public=True)
+        
+        events = events.select_related('created_by').order_by('event_date', 'event_time')
+        
+        # Group by date
+        events_by_date = {}
+        for event in events:
+            date_key = event.event_date.isoformat()
+            if date_key not in events_by_date:
+                events_by_date[date_key] = []
+            
+            events_by_date[date_key].append({
+                'event_id': event.event_id,
+                'title': event.title,
+                'event_type': event.event_type,
+                'event_time': event.event_time.isoformat() if event.event_time else None,
+                'color': event.color,
+                'post_id': event.post.post_id if event.post else None,
+            })
+        
+        return JsonResponse({'success': True, 'events_by_date': events_by_date})
+    
+    except Exception as e:
+        logger.error(f"calendar_events_by_month_view error: {e}")
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
