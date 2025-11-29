@@ -1956,7 +1956,7 @@ class TrackerFileUpload(models.Model):
 class RewardInventoryItem(models.Model):
     """Reward inventory items that can be redeemed with engagement points"""
     TYPE_CHOICES = [
-        ('voucher', 'Voucher'),
+        ('gcash', 'Gcash'),
         ('merchandise', 'Merchandise'),
     ]
     
@@ -2023,12 +2023,15 @@ class RewardRequest(models.Model):
     reward_item = models.ForeignKey('RewardInventoryItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='requests')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     points_cost = models.IntegerField(default=0)
-    voucher_code = models.CharField(max_length=255, null=True, blank=True)  # For voucher rewards
-    voucher_file = models.FileField(upload_to='vouchers/', null=True, blank=True)  # For uploaded voucher files
+    gcash_number = models.CharField(max_length=255, null=True, blank=True)  # For gcash rewards - user's gcash number
+    gcash_name = models.CharField(max_length=255, null=True, blank=True)  # For gcash rewards - user's gcash account name
+    gcash_receipt = models.ImageField(upload_to='gcash_receipts/', null=True, blank=True)  # For gcash rewards - admin uploads receipt proof
+    voucher_code = models.CharField(max_length=255, null=True, blank=True)  # Legacy field, kept for backwards compatibility
+    voucher_file = models.FileField(upload_to='vouchers/', null=True, blank=True)  # Legacy field, kept for backwards compatibility
     requested_at = models.DateTimeField(auto_now_add=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     approved_by = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_rewards')
-    expires_at = models.DateTimeField(null=True, blank=True)  # For voucher rewards (5 days from approval)
+    expires_at = models.DateTimeField(null=True, blank=True)  # For gcash rewards (5 days from approval)
     notes = models.TextField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)  # When request was cancelled
     cancellation_stage = models.CharField(max_length=20, null=True, blank=True)  # Stage when cancelled (pending/approved/ready_for_pickup)

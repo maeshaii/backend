@@ -5064,6 +5064,7 @@ def alumni_profile_view(request, user_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 @api_view(['GET', 'PUT'])
+@parser_classes([MultiPartParser, JSONParser])
 @permission_classes([IsAuthenticated])
 def alumni_employment_view(request, user_id):
     """Get and update alumni employment data."""
@@ -5291,7 +5292,19 @@ def alumni_employment_view(request, user_id):
                 })
                 
         elif request.method == 'PUT':
-            data = json.loads(request.body)
+            # Check if request contains files (FormData) or JSON
+            if request.FILES:
+                # FormData request (with file uploads)
+                data = request.POST.dict()
+                print(f"📎 FormData request detected with files: {list(request.FILES.keys())}")
+            else:
+                # Regular JSON request
+                try:
+                    data = json.loads(request.body)
+                    print(f"📄 JSON request detected")
+                except json.JSONDecodeError as e:
+                    print(f"❌ JSON decode error: {e}")
+                    return JsonResponse({'error': 'Invalid JSON data'}, status=400)
             
             # For OJT accounts, update OJTCompanyProfile (not EmploymentHistory)
             if is_ojt:
@@ -5378,7 +5391,6 @@ def alumni_employment_view(request, user_id):
                 unemployment_reasons = data.get('unemployment_reason') or data.get('q_unemployment_reason', [])
                 # Ensure it's a list
                 if isinstance(unemployment_reasons, str):
-                    import json
                     try:
                         unemployment_reasons = json.loads(unemployment_reasons)
                     except:
@@ -5399,47 +5411,24 @@ def alumni_employment_view(request, user_id):
                 
                 return JsonResponse({'success': True, 'message': 'Unemployment information saved successfully'})
             
-            # Map frontend fields to backend model fields
-            employment_data = {
-                'company_name_current': data.get('organization_name', '') or data.get('current_company_name', ''),
-                'date_started': date_started,
-                'position_current': data.get('position', '') or data.get('current_position', ''),
-                'employment_duration_current': data.get('employment_status', '') or data.get('current_employment_status', '') or data.get('employment_duration', ''),
-                'company_address': data.get('company_address', ''),
-                'sector_current': data.get('sector', '') or data.get('current_sector', '') or data.get('employment_sector', ''),
-                'scope_current': data.get('scope_current', '') or data.get('current_scope', ''),
-                'salary_current': data.get('salary_current', '') or data.get('salary_range', ''),
-                'awards_recognition_current': data.get('awards_recognition_current', '') or data.get('received_awards', ''),
-                'supporting_document_current': data.get('supporting_document_current', '') or data.get('employment_supporting_doc', ''),
-                'supporting_document_awards_recognition': data.get('supporting_document_awards_recognition', '') or data.get('awards_supporting_doc', '')
-            }
+            # ⚠️ CRITICAL FIX: Update TrackerData FIRST before calling UserService
+            # This ensures that update_job_alignment() reads the correct new values
+            # when determining self_employed and other calculated fields
             
-            # Update employment using service
             try:
                 from apps.shared.models import AcademicInfo
-                employment = UserService.update_employment_status(user, employment_data)
                 
-                # Update Part IV: Further Study fields in AcademicInfo
-                academic_info, created = AcademicInfo.objects.get_or_create(user=user)
-                if data.get('study_start_date') or data.get('q_study_start_date'):
-                    academic_info.q_study_start_date = study_start_date or (academic_info.q_study_start_date if hasattr(academic_info, 'q_study_start_date') else None)
-                if data.get('post_graduate_degree') or data.get('q_post_graduate_degree'):
-                    academic_info.q_post_graduate_degree = data.get('post_graduate_degree') or data.get('q_post_graduate_degree', '')
-                if data.get('institution_name') or data.get('q_institution_name'):
-                    academic_info.q_institution_name = data.get('institution_name') or data.get('q_institution_name', '')
-                if data.get('units_obtained') or data.get('q_units_obtained'):
-                    academic_info.q_units_obtained = data.get('units_obtained') or data.get('q_units_obtained', '')
-                academic_info.save()
-                
-                # Update TrackerData with dropdown values from Part III
+                # STEP 1: Update TrackerData with dropdown values from Part III FIRST
                 tracker_data, created = TrackerData.objects.get_or_create(user=user)
                 tracker_data.q_employment_status = 'employed'
                 
                 # Update Part III dropdown fields in TrackerData
                 if data.get('employment_type'):
                     tracker_data.q_employment_type = data.get('employment_type')
+                    print(f"🔧 Setting q_employment_type = {data.get('employment_type')}")
                 if data.get('current_employment_status'):
                     tracker_data.q_employment_permanent = data.get('current_employment_status')
+                    print(f"🔧 Setting q_employment_permanent = {data.get('current_employment_status')}")
                 if data.get('current_company_name'):
                     tracker_data.q_company_name = data.get('current_company_name')
                 if data.get('current_position'):
@@ -5456,17 +5445,197 @@ def alumni_employment_view(request, user_id):
                     tracker_data.q_awards_received = data.get('received_awards')
                 
                 # Handle file uploads from Settings form (FormData)
+                awards_file_uploaded = False
+                employment_file_uploaded = False
+                
+                print(f"🔍 REQUEST.FILES keys: {list(request.FILES.keys())}")
+                print(f"🔍 REQUEST.POST keys: {list(request.POST.keys())}")
+                
                 if 'awards_supporting_doc' in request.FILES:
                     tracker_data.q_awards_document = request.FILES['awards_supporting_doc']
-                    print(f"✅ Saved awards document from Settings: {tracker_data.q_awards_document.name}")
+                    awards_file_uploaded = True
+                    print(f"✅ NEW awards document uploaded: {tracker_data.q_awards_document.name}")
+                else:
+                    print(f"ℹ️  No new awards document in this request")
                 
                 if 'employment_supporting_doc' in request.FILES:
                     tracker_data.q_employment_document = request.FILES['employment_supporting_doc']
-                    print(f"✅ Saved employment document from Settings: {tracker_data.q_employment_document.name}")
+                    employment_file_uploaded = True
+                    print(f"✅ NEW employment document uploaded: {tracker_data.q_employment_document.name}")
+                else:
+                    print(f"ℹ️  No new employment document in this request")
                 
                 if not data.get('unemployment_reason') and not data.get('q_unemployment_reason'):
                     tracker_data.q_unemployment_reason = None
+                
+                # Save TrackerData FIRST - Force commit to ensure files are written
                 tracker_data.save()
+                # CRITICAL: Refresh from database to ensure we have the committed file paths
+                tracker_data.refresh_from_db()
+                print(f"✅ TrackerData saved and refreshed successfully before calling UserService")
+                print(f"📁 TrackerData files after save (refreshed from DB):")
+                if tracker_data.q_awards_document:
+                    print(f"   - Awards doc: {tracker_data.q_awards_document.name} (URL: {tracker_data.q_awards_document.url})")
+                else:
+                    print(f"   - Awards doc: None/Empty")
+                if tracker_data.q_employment_document:
+                    print(f"   - Employment doc: {tracker_data.q_employment_document.name} (URL: {tracker_data.q_employment_document.url})")
+                else:
+                    print(f"   - Employment doc: None/Empty")
+                
+                # 🔧 CRITICAL FIX: Also update TrackerResponse.answers JSON
+                # Admin views display TrackerResponse data, not just TrackerData
+                from apps.shared.models import TrackerResponse
+                try:
+                    tracker_response = TrackerResponse.objects.filter(user=user, is_draft=False).order_by('-submitted_at').first()
+                    if tracker_response:
+                        print(f"📝 Found TrackerResponse for user {user.user_id}, updating answers...")
+                        # Question 23: Employment Type
+                        if data.get('employment_type'):
+                            tracker_response.answers['23'] = data.get('employment_type')
+                            print(f"🔧 Updated TrackerResponse Q23 = {data.get('employment_type')}")
+                        
+                        # Question 24: Employment Status (Permanent/Temporary)
+                        if data.get('current_employment_status'):
+                            tracker_response.answers['24'] = data.get('current_employment_status')
+                            print(f"🔧 Updated TrackerResponse Q24 = {data.get('current_employment_status')}")
+                        
+                        # Question 25: Company Name
+                        if data.get('current_company_name'):
+                            tracker_response.answers['25'] = data.get('current_company_name')
+                        
+                        # Question 26: Current Position
+                        if data.get('current_position'):
+                            tracker_response.answers['26'] = data.get('current_position')
+                        
+                        # Question 27: Employment Sector
+                        if data.get('current_sector'):
+                            tracker_response.answers['27'] = data.get('current_sector')
+                        
+                        # Question 39: Scope (Local/International) - Note: Q39, not Q28!
+                        if data.get('current_scope'):
+                            tracker_response.answers['39'] = data.get('current_scope')
+                        
+                        # Question 29: Employment Duration
+                        if data.get('employment_duration'):
+                            tracker_response.answers['29'] = data.get('employment_duration')
+                        
+                        # Question 30: Salary Range
+                        if data.get('salary_range'):
+                            tracker_response.answers['30'] = data.get('salary_range')
+                        
+                        # Question 31: Awards Received
+                        if data.get('received_awards'):
+                            tracker_response.answers['31'] = data.get('received_awards')
+                        
+                        # Question 32: Supporting Documents for awards/recognition (FILE)
+                        # ALWAYS sync from TrackerData, whether newly uploaded or existing
+                        print(f"🔍 Checking Q32 sync - tracker_data.q_awards_document exists: {bool(tracker_data.q_awards_document)}")
+                        if tracker_data.q_awards_document:
+                            try:
+                                old_q32 = tracker_response.answers.get('32', 'Not set')
+                                # Build absolute URL
+                                file_url = tracker_data.q_awards_document.url
+                                if not (file_url.startswith('http://') or file_url.startswith('https://')):
+                                    file_url = request.build_absolute_uri(file_url)
+                                
+                                # Get file size
+                                try:
+                                    file_size = tracker_data.q_awards_document.size
+                                except:
+                                    file_size = 0
+                                
+                                tracker_response.answers['32'] = {
+                                    'type': 'file',
+                                    'filename': tracker_data.q_awards_document.name.split('/')[-1],  # Get just filename
+                                    'file_url': file_url,  # Use 'file_url' not 'url' to match frontend expectation
+                                    'file_size': file_size,
+                                    'uploaded_at': tracker_data.updated_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(tracker_data, 'updated_at') else ''
+                                }
+                                print(f"🔧 Synced TrackerResponse Q32 (awards doc)")
+                                print(f"   OLD: {old_q32}")
+                                print(f"   NEW: {tracker_response.answers['32']}")
+                            except Exception as file_error:
+                                print(f"⚠️ Error syncing awards document: {file_error}")
+                                import traceback
+                                print(traceback.format_exc())
+                        else:
+                            print(f"⚠️ Skipping Q32 sync - no awards document in TrackerData")
+                        
+                        # Question 33: Employment Supporting Document (Current) (FILE)
+                        # ALWAYS sync from TrackerData, whether newly uploaded or existing
+                        print(f"🔍 Checking Q33 sync - tracker_data.q_employment_document exists: {bool(tracker_data.q_employment_document)}")
+                        if tracker_data.q_employment_document:
+                            try:
+                                old_q33 = tracker_response.answers.get('33', 'Not set')
+                                # Build absolute URL
+                                file_url = tracker_data.q_employment_document.url
+                                if not (file_url.startswith('http://') or file_url.startswith('https://')):
+                                    file_url = request.build_absolute_uri(file_url)
+                                
+                                # Get file size
+                                try:
+                                    file_size = tracker_data.q_employment_document.size
+                                except:
+                                    file_size = 0
+                                
+                                tracker_response.answers['33'] = {
+                                    'type': 'file',
+                                    'filename': tracker_data.q_employment_document.name.split('/')[-1],  # Get just filename
+                                    'file_url': file_url,  # Use 'file_url' not 'url' to match frontend expectation
+                                    'file_size': file_size,
+                                    'uploaded_at': tracker_data.updated_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(tracker_data, 'updated_at') else ''
+                                }
+                                print(f"🔧 Synced TrackerResponse Q33 (employment doc)")
+                                print(f"   OLD: {old_q33}")
+                                print(f"   NEW: {tracker_response.answers['33']}")
+                            except Exception as file_error:
+                                print(f"⚠️ Error syncing employment document: {file_error}")
+                                import traceback
+                                print(traceback.format_exc())
+                        else:
+                            print(f"⚠️ Skipping Q33 sync - no employment document in TrackerData")
+                        
+                        tracker_response.save()
+                        print(f"✅ TrackerResponse.answers updated successfully")
+                        print(f"📋 Final TrackerResponse answers Q32: {tracker_response.answers.get('32', 'Not set')}")
+                        print(f"📋 Final TrackerResponse answers Q33: {tracker_response.answers.get('33', 'Not set')}")
+                    else:
+                        print(f"⚠️ No TrackerResponse found for user {user.user_id}")
+                except Exception as tr_error:
+                    print(f"⚠️ Error updating TrackerResponse: {tr_error}")
+                
+                # STEP 2: Update Part IV: Further Study fields in AcademicInfo
+                academic_info, created = AcademicInfo.objects.get_or_create(user=user)
+                if data.get('study_start_date') or data.get('q_study_start_date'):
+                    academic_info.q_study_start_date = study_start_date or (academic_info.q_study_start_date if hasattr(academic_info, 'q_study_start_date') else None)
+                if data.get('post_graduate_degree') or data.get('q_post_graduate_degree'):
+                    academic_info.q_post_graduate_degree = data.get('post_graduate_degree') or data.get('q_post_graduate_degree', '')
+                if data.get('institution_name') or data.get('q_institution_name'):
+                    academic_info.q_institution_name = data.get('institution_name') or data.get('q_institution_name', '')
+                if data.get('units_obtained') or data.get('q_units_obtained'):
+                    academic_info.q_units_obtained = data.get('units_obtained') or data.get('q_units_obtained', '')
+                academic_info.save()
+                
+                # STEP 3: Map frontend fields to backend model fields
+                employment_data = {
+                    'company_name_current': data.get('organization_name', '') or data.get('current_company_name', ''),
+                    'date_started': date_started,
+                    'position_current': data.get('position', '') or data.get('current_position', ''),
+                    'employment_duration_current': data.get('employment_status', '') or data.get('current_employment_status', '') or data.get('employment_duration', ''),
+                    'company_address': data.get('company_address', ''),
+                    'sector_current': data.get('sector', '') or data.get('current_sector', '') or data.get('employment_sector', ''),
+                    'scope_current': data.get('scope_current', '') or data.get('current_scope', ''),
+                    'salary_current': data.get('salary_current', '') or data.get('salary_range', ''),
+                    'awards_recognition_current': data.get('awards_recognition_current', '') or data.get('received_awards', ''),
+                    'supporting_document_current': data.get('supporting_document_current', '') or data.get('employment_supporting_doc', ''),
+                    'supporting_document_awards_recognition': data.get('supporting_document_awards_recognition', '') or data.get('awards_supporting_doc', '')
+                }
+                
+                # STEP 4: NOW call UserService which will call update_job_alignment()
+                # update_job_alignment() will now read the UPDATED TrackerData values
+                employment = UserService.update_employment_status(user, employment_data)
+                print(f"✅ UserService completed, self_employed = {employment.self_employed}")
                 
                 return JsonResponse({'success': True, 'message': 'Employment details updated successfully'})
             except Exception as service_error:
@@ -7142,21 +7311,34 @@ def post_repost_view(request, post_id):
 
     try:
         # Get the post - if this post_id is actually a repost_id, we need to get the original post
-        # Check if there's a repost with this ID (edge case handling)
+        # CRITICAL FIX: Check if there's a repost with this ID first (edge case: reposting a repost)
+        # But prioritize checking for actual post_id to avoid false positives
+        post = None
+        
+        # First, try to get as a regular post (most common case)
         try:
-            repost_check = Repost.objects.select_related('post').get(repost_id=post_id)
-            # If post_id is actually a repost_id, use the original post from that repost
-            if repost_check.post:
-                post = repost_check.post
-            else:
-                # If it's a forum or donation repost, we can't repost it as a post
-                return JsonResponse({'error': 'Cannot repost forum or donation repost as a post'}, status=400)
-        except Repost.DoesNotExist:
-            # Normal case: post_id is actually a post_id
+            post = Post.objects.get(post_id=post_id)
+        except Post.DoesNotExist:
+            # If not found as a post, check if it's a repost_id (user reposting a repost)
             try:
-                post = Post.objects.get(post_id=post_id)
-            except Post.DoesNotExist:
+                repost_check = Repost.objects.select_related('post', 'post__user').get(repost_id=post_id)
+                # If post_id is actually a repost_id, use the original post from that repost
+                if repost_check.post:
+                    post = repost_check.post
+                    print(f"🔍 Repost creation: post_id {post_id} is actually a repost_id. Using original post {post.post_id}")
+                else:
+                    # If it's a forum or donation repost, we can't repost it as a post
+                    return JsonResponse({'error': 'Cannot repost forum or donation repost as a post'}, status=400)
+            except Repost.DoesNotExist:
+                # Neither a post nor a repost exists
                 return JsonResponse({'error': 'Post not found'}, status=404)
+        
+        # Defensive check: ensure we have a valid post
+        if not post:
+            return JsonResponse({'error': 'Post not found'}, status=404)
+        
+        # Log for debugging
+        print(f"🔍 Repost creation: Creating repost for post_id {post.post_id}, user {post.user.user_id if post.user else 'unknown'}")
 
         # Get user from token
         auth_header = request.headers.get('Authorization')
@@ -7172,12 +7354,9 @@ def post_repost_view(request, post_id):
         except Exception as e:
             return JsonResponse({'error': 'Invalid token'}, status=401)
 
-        # Check if user already reposted this post - update existing repost instead of creating duplicate
-        existing_repost = Repost.objects.filter(user=user, post=post).first()
-        is_new_repost = existing_repost is None
-        
         # Create repost with optional caption
         # NOTE: If reposting a repost, the original post is always reposted (handled above)
+        # Allow multiple reposts - users can repost the same post multiple times with different captions
         payload = {}
         try:
             payload = json.loads(request.body or "{}")
@@ -7188,32 +7367,24 @@ def post_repost_view(request, post_id):
         # Check if user is reposting their own post - don't count for milestones
         is_own_post = user.user_id == post.user.user_id
         
-        if existing_repost:
-            # Update existing repost
-            existing_repost.repost_date = timezone.now()
-            if caption is not None:
-                existing_repost.caption = caption
-            existing_repost.save()
-            repost = existing_repost
+        # Always create new repost - allow multiple reposts of the same post
+        repost = Repost.objects.create(
+            user=user,
+            post=post,
+            repost_date=timezone.now(),
+            caption=caption,
+        )
+        
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's post
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_post:
+            award_engagement_points(user, 'share')
         else:
-            # Create new repost
-            repost = Repost.objects.create(
-                user=user,
-                post=post,
-                repost_date=timezone.now(),
-                caption=caption,
-            )
-            
-            # Award engagement points (+5 for share/repost) - only if reposting someone else's post
-            # Milestone task requires sharing posts from OTHER users
-            if not is_own_post:
-                award_engagement_points(user, 'share')
-            else:
-                # Log that self-repost was attempted (for debugging)
-                logger.info(f"User {user.user_id} reposted their own post {post.post_id} - points not awarded")
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {user.user_id} reposted their own post {post.post_id} - points not awarded")
 
-        # Create notification for post owner (only if the reposter is not the post owner and it's a new repost)
-        if is_new_repost and user.user_id != post.user.user_id:
+        # Create notification for post owner (only if the reposter is not the post owner)
+        if user.user_id != post.user.user_id:
             repost_notification = Notification.objects.create(
                 user=post.user,
                 notif_type='repost',
@@ -8093,11 +8264,8 @@ def forum_repost_view(request, forum_id):
         if current_user_batch != forum_user_batch:
             return JsonResponse({'error': 'Access denied - different batch'}, status=403)
         
-        # Check if user already reposted this forum - update existing repost instead of creating duplicate
-        existing_repost = Repost.objects.filter(user=request.user, forum=forum).first()
-        is_new_repost = existing_repost is None
-        
         # Create repost with optional caption
+        # Allow multiple reposts - users can repost the same forum post multiple times with different captions
         payload = {}
         try:
             payload = json.loads(request.body or "{}")
@@ -8108,32 +8276,24 @@ def forum_repost_view(request, forum_id):
         # Check if user is reposting their own forum post - don't count for milestones
         is_own_forum = request.user.user_id == forum.user.user_id
         
-        if existing_repost:
-            # Update existing repost
-            existing_repost.repost_date = timezone.now()
-            if caption is not None:
-                existing_repost.caption = caption
-            existing_repost.save()
-            r = existing_repost
-        else:
-            # Create new repost
-            r = Repost.objects.create(
-                forum=forum, 
-                user=request.user, 
-                repost_date=timezone.now(),
-                caption=caption
-            )
-            
-            # Award engagement points (+5 for share/repost) - only if reposting someone else's forum post
-            # Milestone task requires sharing posts from OTHER users
-            if not is_own_forum:
-                award_engagement_points(request.user, 'share')
-            else:
-                # Log that self-repost was attempted (for debugging)
-                logger.info(f"User {request.user.user_id} reposted their own forum post {forum.forum_id} - points not awarded")
+        # Always create new repost - allow multiple reposts of the same forum post
+        r = Repost.objects.create(
+            forum=forum, 
+            user=request.user, 
+            repost_date=timezone.now(),
+            caption=caption
+        )
         
-        # Create notification for forum owner (only if the reposter is not the forum owner and it's a new repost)
-        if is_new_repost and request.user.user_id != forum.user.user_id:
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's forum post
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_forum:
+            award_engagement_points(request.user, 'share')
+        else:
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {request.user.user_id} reposted their own forum post {forum.forum_id} - points not awarded")
+        
+        # Create notification for forum owner (only if the reposter is not the forum owner)
+        if request.user.user_id != forum.user.user_id:
             forum_repost_notification = Notification.objects.create(
                 user=forum.user,
                 notif_type='repost',
@@ -8160,11 +8320,8 @@ def donation_repost_view(request, donation_id):
     try:
         donation = DonationRequest.objects.select_related('user').get(donation_id=donation_id)
         
-        # Check if user already reposted this donation - update existing repost instead of creating duplicate
-        existing_repost = Repost.objects.filter(user=request.user, donation_request=donation).first()
-        is_new_repost = existing_repost is None
-        
         # Create repost with optional caption
+        # Allow multiple reposts - users can repost the same donation multiple times with different captions
         payload = {}
         try:
             payload = json.loads(request.body or "{}")
@@ -8175,32 +8332,24 @@ def donation_repost_view(request, donation_id):
         # Check if user is reposting their own donation - don't count for milestones
         is_own_donation = request.user.user_id == donation.user.user_id
         
-        if existing_repost:
-            # Update existing repost
-            existing_repost.repost_date = timezone.now()
-            if caption is not None:
-                existing_repost.caption = caption
-            existing_repost.save()
-            repost = existing_repost
-        else:
-            # Create new repost
-            repost = Repost.objects.create(
-                donation_request=donation,
-                user=request.user,
-                repost_date=timezone.now(),
-                caption=caption
-            )
-            
-            # Award engagement points (+5 for share/repost) - only if reposting someone else's donation
-            # Milestone task requires sharing posts from OTHER users
-            if not is_own_donation:
-                award_engagement_points(request.user, 'share')
-            else:
-                # Log that self-repost was attempted (for debugging)
-                logger.info(f"User {request.user.user_id} reposted their own donation {donation_id} - points not awarded")
+        # Always create new repost - allow multiple reposts of the same donation
+        repost = Repost.objects.create(
+            donation_request=donation,
+            user=request.user,
+            repost_date=timezone.now(),
+            caption=caption
+        )
         
-        # Create notification for donation owner (only if the reposter is not the donation owner and it's a new repost)
-        if is_new_repost and request.user.user_id != donation.user.user_id:
+        # Award engagement points (+5 for share/repost) - only if reposting someone else's donation
+        # Milestone task requires sharing posts from OTHER users
+        if not is_own_donation:
+            award_engagement_points(request.user, 'share')
+        else:
+            # Log that self-repost was attempted (for debugging)
+            logger.info(f"User {request.user.user_id} reposted their own donation {donation_id} - points not awarded")
+        
+        # Create notification for donation owner (only if the reposter is not the donation owner)
+        if request.user.user_id != donation.user.user_id:
             donation_repost_notification = Notification.objects.create(
                 user=donation.user,
                 notif_type='repost',
@@ -9025,9 +9174,42 @@ def posts_view(request):
                 })
                 
                 # Add each repost as a separate feed item
+                # CRITICAL: Use repost.post to ensure we get the correct original post
+                # This handles cases where reposts might reference different posts
                 reposts = Repost.objects.filter(post=post).select_related('user', 'post', 'post__user')
                 for repost in reposts:
                     try:
+                        # CRITICAL FIX: Always use repost.post to get the original post
+                        # This ensures we're using the correct post even if there are edge cases
+                        original_post = repost.post
+                        if not original_post:
+                            # Skip if repost has no associated post (forum/donation repost)
+                            continue
+                        
+                        # Verify we're using the correct post (defensive check)
+                        if original_post.post_id != post.post_id:
+                            print(f"⚠️ WARNING: Repost {repost.repost_id} references post {original_post.post_id} but loop post is {post.post_id}")
+                            # Use the repost's post to ensure correctness
+                            post = original_post
+                        
+                        # Recalculate post_images for this specific post to avoid stale data
+                        repost_post_images = []
+                        repost_seen_urls = set()
+                        try:
+                            content_images = ContentImage.objects.filter(content_type='post', content_id=original_post.post_id).order_by('order')
+                            for img in content_images:
+                                image_url = build_image_url(img.image, request)
+                                if image_url and image_url not in repost_seen_urls:
+                                    repost_seen_urls.add(image_url)
+                                    repost_post_images.append({
+                                        'image_id': img.image_id,
+                                        'image_url': image_url,
+                                        'order': img.order
+                                    })
+                        except Exception as img_error:
+                            print(f"Error processing images for repost {repost.repost_id} original post {original_post.post_id}: {img_error}")
+                            repost_post_images = []
+                        
                         # Get repost likes count and data
                         repost_likes = Like.objects.filter(repost=repost).select_related('user')
                         repost_likes_count = repost_likes.count()
@@ -9088,28 +9270,31 @@ def posts_view(request):
                                 'profile_pic': build_profile_pic_url(repost.user),
                             },
                             'original_post': {
-                                'post_id': post.post_id,
-                                'post_content': post.post_content,
-                                'post_image': (post.post_image.url if getattr(post, 'post_image', None) else None),  # Backward compatibility
-                                'post_images': post_images,  # Multiple images (already calculated above)
-                                'created_at': post.created_at.isoformat() if hasattr(post, 'created_at') else None,
-                                'reposts_count': Repost.objects.filter(post=post).count(),
+                                'post_id': original_post.post_id,  # Use original_post.post_id explicitly
+                                'post_content': original_post.post_content,  # Use original_post.post_content explicitly
+                                'post_image': (original_post.post_image.url if getattr(original_post, 'post_image', None) else None),  # Backward compatibility
+                                'post_images': repost_post_images,  # Use recalculated images for this specific post
+                                'created_at': original_post.created_at.isoformat() if hasattr(original_post, 'created_at') else None,
+                                'reposts_count': Repost.objects.filter(post=original_post).count(),
                                 # Event fields
-                                'is_event': getattr(post, 'is_event', False),
-                                'event_date': post.event_date.isoformat() if getattr(post, 'event_date', None) else None,
-                                'event_time': post.event_time.isoformat() if getattr(post, 'event_time', None) else None,
+                                'is_event': getattr(original_post, 'is_event', False),
+                                'event_date': original_post.event_date.isoformat() if getattr(original_post, 'event_date', None) else None,
+                                'event_time': original_post.event_time.isoformat() if getattr(original_post, 'event_time', None) else None,
                                 'user': {
-                                    'user_id': post.user.user_id,
-                                    'f_name': post.user.f_name,
-                                    'm_name': post.user.m_name,
-                                    'l_name': post.user.l_name,
-                                    'profile_pic': build_profile_pic_url(post.user),
+                                    'user_id': original_post.user.user_id,  # Use original_post.user explicitly
+                                    'f_name': original_post.user.f_name,
+                                    'm_name': original_post.user.m_name,
+                                    'l_name': original_post.user.l_name,
+                                    'profile_pic': build_profile_pic_url(original_post.user),
                                 }
                             },
                             'item_type': 'repost',  # Mark as repost
                             'sort_date': repost.repost_date.isoformat(),
                         })
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error processing repost {repost.repost_id}: {e}")
+                        import traceback
+                        traceback.print_exc()
                         continue
             except Exception as e:
                 print(f"Error processing post {post.post_id}: {e}")
@@ -12268,6 +12453,9 @@ def reward_requests_list_view(request):
                         'reward_value': reward_value,
                         'status': req.status,
                         'points_cost': req.points_cost,
+                        'gcash_number': req.gcash_number,
+                        'gcash_name': req.gcash_name,
+                        'gcash_receipt': req.gcash_receipt.url if req.gcash_receipt else None,
                         'voucher_code': req.voucher_code,
                         'voucher_file': req.voucher_file.url if req.voucher_file else None,
                         'requested_at': req.requested_at.isoformat(),
@@ -12336,6 +12524,7 @@ def reward_requests_list_view(request):
                     'reward_value': reward_value,
                     'status': req.status,
                     'points_cost': req.points_cost,
+                    'gcash_receipt': req.gcash_receipt.url if req.gcash_receipt else None,
                     'voucher_code': req.voucher_code,
                     'voucher_file': req.voucher_file.url if req.voucher_file else None,
                     'requested_at': req.requested_at.isoformat(),
@@ -12424,7 +12613,7 @@ def inventory_items_view(request):
             )
         
         # Validate type
-        valid_types = ['voucher', 'merchandise']
+        valid_types = ['gcash', 'merchandise']
         if item_type not in valid_types:
             return JsonResponse(
                 {'success': False, 'message': f'Invalid type. Must be one of: {", ".join(valid_types)}'},
@@ -12707,7 +12896,7 @@ def inventory_item_detail_view(request, item_id):
 
         if 'type' in data and data['type'] is not None:
             item_type = str(data['type']).strip()
-            valid_types = ['voucher', 'merchandise']
+            valid_types = ['gcash', 'merchandise']
             if item_type not in valid_types:
                 return JsonResponse(
                     {'success': False, 'message': f'Invalid type. Must be one of: {", ".join(valid_types)}'},
@@ -12982,6 +13171,8 @@ def request_reward_view(request):
         user = request.user
         data = json.loads(request.body or '{}')
         reward_id = data.get('reward_id')
+        gcash_number = data.get('gcash_number', '').strip()
+        gcash_name = data.get('gcash_name', '').strip()
 
         if not reward_id:
             return JsonResponse(
@@ -12997,6 +13188,19 @@ def request_reward_view(request):
                     {'success': False, 'message': 'Reward item not found'},
                     status=404
                 )
+
+            # Check if gcash reward and validate required fields
+            if reward_item.type.lower() == 'gcash':
+                if not gcash_number:
+                    return JsonResponse(
+                        {'success': False, 'message': 'Gcash number is required for Gcash rewards'},
+                        status=400
+                    )
+                if not gcash_name:
+                    return JsonResponse(
+                        {'success': False, 'message': 'Gcash name is required for Gcash rewards'},
+                        status=400
+                    )
 
             if reward_item.quantity <= 0:
                 return JsonResponse(
@@ -13041,7 +13245,9 @@ def request_reward_view(request):
                 user=user,
                 reward_item=reward_item,
                 status='pending',
-                points_cost=points_cost
+                points_cost=points_cost,
+                gcash_number=gcash_number if gcash_number else None,
+                gcash_name=gcash_name if gcash_name else None
             )
 
         notif_date = timezone.now()
@@ -13171,8 +13377,8 @@ def get_business_days_after(start_date, days):
 def approve_reward_request_view(request, request_id):
     """
     Admin approves a reward request
-    Admin can add instructions/notes on how to claim the voucher
-    For vouchers: can upload voucher code/file, sets 5-day expiration
+    Admin can add instructions/notes on how to claim
+    For gcash: admin uploads receipt image as proof of payment
     For merchandise: marks as ready for pickup
     Status changes to 'approved' but points/inventory NOT deducted yet
     """
@@ -13207,25 +13413,35 @@ def approve_reward_request_view(request, request_id):
                 'message': 'Cannot approve request: The reward item has been deleted from inventory. Please contact admin.'
             }, status=400)
         
-        data = json.loads(request.body) if request.body else {}
-        is_voucher = reward_request.reward_item.type.lower() in ['voucher', 'gift card', 'giftcard', 'coupon']
+        # Handle both JSON and form data (for file uploads)
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            # Form data with file upload
+            notes = request.POST.get('notes') or request.POST.get('instructions')
+            gcash_receipt = request.FILES.get('gcash_receipt')
+        else:
+            # JSON data
+            data = json.loads(request.body) if request.body else {}
+            notes = data.get('notes') or data.get('instructions')
+            gcash_receipt = None
+        
+        is_gcash = reward_request.reward_item.type.lower() in ['gcash', 'gift card', 'giftcard', 'coupon']
         is_merchandise = reward_request.reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
         
         # Update request status to 'approved' (ready for user to claim)
-        reward_request.status = 'approved' if is_voucher else 'ready_for_pickup'
+        reward_request.status = 'approved' if is_gcash else 'ready_for_pickup'
         reward_request.approved_at = timezone.now()
         reward_request.approved_by = admin_user
         
-        # Handle voucher expiration (5 business days, excluding weekends and holidays)
-        if is_voucher:
+        # Handle gcash - upload receipt image
+        if is_gcash:
             approval_date = timezone.now()
             reward_request.expires_at = get_business_days_after(approval_date, 1)
-            voucher_code = data.get('voucher_code')
-            if voucher_code:
-                reward_request.voucher_code = voucher_code
+            
+            # Handle gcash receipt upload
+            if gcash_receipt:
+                reward_request.gcash_receipt = gcash_receipt
         
         # Admin can add instructions/notes on how to claim
-        notes = data.get('notes') or data.get('instructions')
         if notes:
             reward_request.notes = notes
         
@@ -13241,12 +13457,12 @@ def approve_reward_request_view(request, request_id):
             logger.warning(f"Error getting admin profile pic for notification: {e}")
         
         # Create notification for user (with instructions if provided)
-        notification_content = f'Your request for "{reward_request.reward_item.name}" has been {"approved" if is_voucher else "processed"}. '
+        notification_content = f'Your request for "{reward_request.reward_item.name}" has been {"approved" if is_gcash else "processed"}. '
         if notes:
             notification_content += f'\n\nInstructions: {notes}\n\n'
-        if reward_request.voucher_code:
-            notification_content += f'Voucher code: {reward_request.voucher_code}. '
-        if is_voucher:
+        if is_gcash and reward_request.gcash_receipt:
+            notification_content += 'Payment receipt is available for viewing. '
+        if is_gcash:
             notification_content += f'Please claim it within 5 business days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
         else:
             notification_content += 'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office.'
@@ -13262,7 +13478,7 @@ def approve_reward_request_view(request, request_id):
         notification = Notification.objects.create(
             user=reward_request.user,
             notif_type='Reward',
-            subject=f'🎁 Your reward request has been {"approved" if is_voucher else "processed"}!',
+            subject=f'🎁 Your reward request has been {"approved" if is_gcash else "processed"}!',
             notifi_content=notification_content,
             notif_date=timezone.now(),
             is_read=False
@@ -13279,7 +13495,7 @@ def approve_reward_request_view(request, request_id):
         
         return JsonResponse({
             'success': True,
-            'message': f'Reward request {"approved" if is_voucher else "marked as ready for pickup"}. User will receive notification with instructions.',
+            'message': f'Reward request {"approved" if is_gcash else "marked as ready for pickup"}. User will receive notification with instructions.',
             'status': reward_request.status,
             'expires_at': reward_request.expires_at.isoformat() if reward_request.expires_at else None
         })

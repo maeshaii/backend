@@ -93,17 +93,13 @@ class UserService:
                 employment.save()
                 
                 print("Updating job alignment...")
-                # Update job alignment
+                # Update job alignment (this reads from TrackerData to determine self_employed, etc.)
                 employment.update_job_alignment()
                 
-                print("Updating tracker data...")
-                # Update tracker data
-                tracker, created = TrackerData.objects.get_or_create(user=user)
-                tracker.q_company_name = employment.company_name_current
-                tracker.q_current_position = employment.position_current
-                tracker.q_job_sector = employment.sector_current
-                tracker.q_employment_status = 'employed' if employment.company_name_current else 'unemployed'
-                tracker.save()
+                # ⚠️ REMOVED: TrackerData update from here
+                # TrackerData should be updated by the caller BEFORE calling this service
+                # This ensures update_job_alignment() reads the correct values
+                # Old code was overwriting TrackerData fields that were set by the caller
                 
                 print("Employment update completed successfully")
                 return employment

@@ -112,16 +112,31 @@ def tracker_responses_view(request):
                 actual_file_question_ids.add(str(file_upload.question_id))
             
             # Remove file metadata from answers if no actual file exists
+            # ⚠️ EXCEPTION: Q32 (awards) and Q33 (employment) are stored in TrackerData, NOT TrackerFileUpload
+            TRACKER_DATA_FILE_QUESTIONS = {'32', '33'}  # These files live in TrackerData
+            
             for question_id, answer in list(merged_answers.items()):
                 if isinstance(answer, dict) and answer.get('type') == 'file':
+                    # Skip cleanup for TrackerData files (Q32, Q33)
+                    if question_id in TRACKER_DATA_FILE_QUESTIONS:
+                        logger.info(f"✅ Preserving TrackerData file for Q{question_id} (not in TrackerFileUpload)")
+                        continue
+                    
                     if question_id not in actual_file_question_ids:
                         # ⚠️ File metadata exists but no actual file uploaded (bug from before fix)
                         logger.warning(f"🧹 Cleaning broken file reference for question {question_id} in response {resp.id}")
                         merged_answers[question_id] = "No file uploaded"
             
             # Attach file uploads metadata with absolute URLs
+            # ⚠️ Don't overwrite Q32 and Q33 - those come from TrackerData, not TrackerFileUpload
             for file_upload in resp.files.all():
                 question_id_str = str(file_upload.question_id)
+                
+                # Skip TrackerData file questions - they're already in answers from TrackerData
+                if question_id_str in TRACKER_DATA_FILE_QUESTIONS:
+                    logger.info(f"⏭️ Skipping TrackerFileUpload for Q{question_id_str} (using TrackerData instead)")
+                    continue
+                
                 # Build absolute URL for file
                 file_url = None
                 if file_upload.file:
@@ -1000,6 +1015,99 @@ def file_upload_stats_view(request):
                     'uploaded_at': upload.uploaded_at.strftime('%Y-%m-%d %H:%M:%S'),
                     'file_url': file_url
                 })
+        
+        # 🔧 CRITICAL FIX: Also include Q32 and Q33 from TrackerData (not in TrackerFileUpload)
+        from apps.shared.models import TrackerData, TrackerResponse
+        
+        # Get Q32 and Q33 question details
+        q32 = Question.objects.filter(id=32).first()  # Awards documents
+        q33 = Question.objects.filter(id=33).first()  # Employment documents
+        
+        # Get all users with TrackerData that have files
+        tracker_data_with_files = TrackerData.objects.filter(
+            user__isnull=False
+        ).select_related('user').all()
+        
+        for tracker_data in tracker_data_with_files:
+            user = tracker_data.user
+            
+            # Q32: Awards document
+            if q32 and tracker_data.q_awards_document:
+                try:
+                    question_text = q32.text
+                    if question_text in stats:
+                        # Build absolute URL
+                        file_url = tracker_data.q_awards_document.url
+                        if not (file_url.startswith('http://') or file_url.startswith('https://')):
+                            file_url = request.build_absolute_uri(file_url)
+                        
+                        # Get file size
+                        try:
+                            file_size = tracker_data.q_awards_document.size / 1024 / 1024  # MB
+                        except:
+                            file_size = 0
+                        
+                        # Get filename
+                        filename = tracker_data.q_awards_document.name.split('/')[-1]
+                        
+                        # Get upload timestamp
+                        try:
+                            uploaded_at = tracker_data.updated_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(tracker_data, 'updated_at') else 'N/A'
+                        except:
+                            uploaded_at = 'N/A'
+                        
+                        stats[question_text]['total_files'] += 1
+                        stats[question_text]['total_size_mb'] += file_size
+                        stats[question_text]['users'].add(user.user_id)
+                        stats[question_text]['files'].append({
+                            'filename': filename,
+                            'user': f"{user.f_name} {user.l_name}",
+                            'file_size_mb': round(file_size, 2),
+                            'uploaded_at': uploaded_at,
+                            'file_url': file_url
+                        })
+                        logger.info(f"✅ Added Q32 (awards) from TrackerData for user {user.user_id}: {filename}")
+                except Exception as e:
+                    logger.error(f"⚠️ Error processing Q32 for user {user.user_id}: {e}")
+            
+            # Q33: Employment document
+            if q33 and tracker_data.q_employment_document:
+                try:
+                    question_text = q33.text
+                    if question_text in stats:
+                        # Build absolute URL
+                        file_url = tracker_data.q_employment_document.url
+                        if not (file_url.startswith('http://') or file_url.startswith('https://')):
+                            file_url = request.build_absolute_uri(file_url)
+                        
+                        # Get file size
+                        try:
+                            file_size = tracker_data.q_employment_document.size / 1024 / 1024  # MB
+                        except:
+                            file_size = 0
+                        
+                        # Get filename
+                        filename = tracker_data.q_employment_document.name.split('/')[-1]
+                        
+                        # Get upload timestamp
+                        try:
+                            uploaded_at = tracker_data.updated_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(tracker_data, 'updated_at') else 'N/A'
+                        except:
+                            uploaded_at = 'N/A'
+                        
+                        stats[question_text]['total_files'] += 1
+                        stats[question_text]['total_size_mb'] += file_size
+                        stats[question_text]['users'].add(user.user_id)
+                        stats[question_text]['files'].append({
+                            'filename': filename,
+                            'user': f"{user.f_name} {user.l_name}",
+                            'file_size_mb': round(file_size, 2),
+                            'uploaded_at': uploaded_at,
+                            'file_url': file_url
+                        })
+                        logger.info(f"✅ Added Q33 (employment) from TrackerData for user {user.user_id}: {filename}")
+                except Exception as e:
+                    logger.error(f"⚠️ Error processing Q33 for user {user.user_id}: {e}")
         
         # Convert sets to counts and format the response (sorted by question_id)
         formatted_stats = []

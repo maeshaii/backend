@@ -543,10 +543,10 @@ def export_detailed_alumni_data(request):
         export_fields = [
             'CTU_ID', 'First_Name', 'Middle_Name', 'Last_Name', 'Gender', 'Birthdate', 'Year_Graduated', 'Program', 'Section',
             'Program', 'Status', 'Phone_Number', 'Email', 'Address', 'Civil_Status', 'Social_Media', 'Age',
-            'Company_Name_Current', 'Position_Current', 'Sector_Current', 'Employment_Duration_Current', 'Salary_Current',
-            'Supporting_Document_Current', 'Awards_Recognition_Current', 'Supporting_Document_Awards_Recognition',
-            'Unemployment_Reason', 'Pursue_Further_Study', 'Date_Started', 'School_Name', 'Profile_Pic', 'Profile_Bio',
-            'Profile_Resume'
+            'Employment_Type', 'Company_Name_Current', 'Position_Current', 'Sector_Current', 'Scope_Current', 'Employment_Permanent',
+            'Employment_Duration_Current', 'Salary_Current', 'Supporting_Document_Current', 'Awards_Recognition_Current', 
+            'Supporting_Document_Awards_Recognition', 'Unemployment_Reason', 'Pursue_Further_Study', 'Date_Started', 
+            'School_Name', 'Profile_Pic', 'Profile_Bio', 'Profile_Resume'
         ]
         
         export_columns = []
@@ -567,6 +567,7 @@ def export_detailed_alumni_data(request):
                 profile = getattr(alumni, 'profile', None)
                 academic_info = getattr(alumni, 'academic_info', None)
                 employment = getattr(alumni, 'employment', None)
+                tracker_data = getattr(alumni, 'tracker_data', None)
                 
                 # Helper function to safely convert file fields to strings
                 def safe_file_field(field_value):
@@ -595,15 +596,19 @@ def export_detailed_alumni_data(request):
                     'Civil_Status': getattr(profile, 'civil_status', None) if profile else None,
                     'Social_Media': getattr(profile, 'social_media', None) if profile else None,
                     'Age': getattr(profile, 'age', None) if profile else None,
-                    'Company_Name_Current': getattr(employment, 'company_name_current', None) if employment else None,
-                    'Position_Current': getattr(employment, 'position_current', None) if employment else None,
-                    'Sector_Current': getattr(employment, 'sector_current', None) if employment else None,
-                    'Employment_Duration_Current': getattr(employment, 'employment_duration_current', None) if employment else None,
-                    'Salary_Current': getattr(employment, 'salary_current', None) if employment else None,
-                    'Supporting_Document_Current': safe_file_field(getattr(employment, 'supporting_document_current', None)) if employment else '',
-                    'Awards_Recognition_Current': getattr(employment, 'awards_recognition_current', None) if employment else None,
-                    'Supporting_Document_Awards_Recognition': safe_file_field(getattr(employment, 'supporting_document_awards_recognition', None)) if employment else '',
-                    'Unemployment_Reason': getattr(employment, 'unemployment_reason', None) if employment else None,
+                    # Employment data - Prefer TrackerData (Part III) for current accurate data
+                    'Employment_Type': getattr(tracker_data, 'q_employment_type', None) if tracker_data else None,
+                    'Company_Name_Current': getattr(tracker_data, 'q_company_name', None) if tracker_data else (getattr(employment, 'company_name_current', None) if employment else None),
+                    'Position_Current': getattr(tracker_data, 'q_current_position', None) if tracker_data else (getattr(employment, 'position_current', None) if employment else None),
+                    'Sector_Current': getattr(tracker_data, 'q_sector_current', None) if tracker_data else (getattr(employment, 'sector_current', None) if employment else None),
+                    'Scope_Current': getattr(tracker_data, 'q_scope_current', None) if tracker_data else (getattr(employment, 'scope_current', None) if employment else None),
+                    'Employment_Permanent': getattr(tracker_data, 'q_employment_permanent', None) if tracker_data else None,
+                    'Employment_Duration_Current': getattr(tracker_data, 'q_employment_duration', None) if tracker_data else (getattr(employment, 'employment_duration_current', None) if employment else None),
+                    'Salary_Current': getattr(tracker_data, 'q_salary_range', None) if tracker_data else (getattr(employment, 'salary_current', None) if employment else None),
+                    'Supporting_Document_Current': safe_file_field(getattr(tracker_data, 'q_employment_document', None)) if tracker_data else (safe_file_field(getattr(employment, 'supporting_document_current', None)) if employment else ''),
+                    'Awards_Recognition_Current': getattr(tracker_data, 'q_awards_received', None) if tracker_data else (getattr(employment, 'awards_recognition_current', None) if employment else None),
+                    'Supporting_Document_Awards_Recognition': safe_file_field(getattr(tracker_data, 'q_awards_document', None)) if tracker_data else (safe_file_field(getattr(employment, 'supporting_document_awards_recognition', None)) if employment else ''),
+                    'Unemployment_Reason': getattr(tracker_data, 'q_unemployment_reason', None) if tracker_data else (getattr(employment, 'unemployment_reason', None) if employment else None),
                     'Pursue_Further_Study': getattr(academic_info, 'pursue_further_study', None) if academic_info else None,
                     'Date_Started': getattr(academic_info, 'q_study_start_date', None) if academic_info else None,
                     'School_Name': getattr(academic_info, 'school_name', None) if academic_info else None,

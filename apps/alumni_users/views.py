@@ -73,10 +73,15 @@ def build_alumni_data(a):
         'social_media': getattr(profile, 'social_media', None) if profile else None,
         'school_name': getattr(academic, 'school_name', None) if academic else None,
         'profile_pic': _build_profile_pic_url(a),
-        # Add employment data
-        'position_current': getattr(employment, 'position_current', None) if employment else None,
-        'company_name_current': getattr(employment, 'company_name_current', None) if employment else None,
-        'salary_current': getattr(employment, 'salary_current', None) if employment else None,
+        # Add employment data - Prefer TrackerData (Part III) over EmploymentHistory for current data
+        'employment_type': getattr(tracker_data, 'q_employment_type', None) if tracker_data else None,
+        'position_current': getattr(tracker_data, 'q_current_position', None) if tracker_data else (getattr(employment, 'position_current', None) if employment else None),
+        'company_name_current': getattr(tracker_data, 'q_company_name', None) if tracker_data else (getattr(employment, 'company_name_current', None) if employment else None),
+        'sector_current': getattr(tracker_data, 'q_sector_current', None) if tracker_data else (getattr(employment, 'sector_current', None) if employment else None),
+        'scope_current': getattr(tracker_data, 'q_scope_current', None) if tracker_data else (getattr(employment, 'scope_current', None) if employment else None),
+        'salary_current': getattr(tracker_data, 'q_salary_range', None) if tracker_data else (getattr(employment, 'salary_current', None) if employment else None),
+        'employment_duration': getattr(tracker_data, 'q_employment_duration', None) if tracker_data else None,
+        'employment_permanent': getattr(tracker_data, 'q_employment_permanent', None) if tracker_data else None,
     }
 
 def get_field_from_question_map(user, question_text_map, field, *question_labels):
@@ -135,7 +140,7 @@ def alumni_detail_view(request, user_id):
     from apps.shared.models import TrackerResponse, Question
     try:
         # Always pull related data to avoid extra queries and ensure academic_info is available
-        user = User.objects.select_related('profile', 'academic_info', 'employment').get(user_id=user_id)
+        user = User.objects.select_related('profile', 'academic_info', 'employment', 'tracker_data').get(user_id=user_id)
         tracker_responses = TrackerResponse.objects.filter(user=user).order_by('-submitted_at')
         latest_tracker = tracker_responses.first() if tracker_responses.exists() else None
         tracker_answers = latest_tracker.answers if latest_tracker and latest_tracker.answers else {}
@@ -195,12 +200,15 @@ def alumni_detail_view(request, user_id):
             'social_media': get_field('social_media', 'social media'),
             'school_name': getattr(academic_info, 'school_name', None) if academic_info else get_field('school_name', 'school name'),
             'profile_pic': _build_profile_pic_url(user),
-            # Employment data
-            'position_current': getattr(employment_info, 'position_current', None) if employment_info else get_field('position_current', 'current position'),
-            'company_name_current': getattr(employment_info, 'company_name_current', None) if employment_info else get_field('company_name_current', 'current company'),
-            'sector_current': getattr(employment_info, 'sector_current', None) if employment_info else get_field('sector_current', 'employment sector'),
-            'scope_current': getattr(employment_info, 'scope_current', None) if employment_info else get_field('scope_current', 'current scope'),
-            'salary_current': getattr(employment_info, 'salary_current', None) if employment_info else get_field('salary_current', 'salary'),
+            # Employment data - Prefer TrackerData (Part III) over EmploymentHistory for accurate current data
+            'employment_type': getattr(tracker_data, 'q_employment_type', None) if tracker_data else None,
+            'position_current': getattr(tracker_data, 'q_current_position', None) if tracker_data else (getattr(employment_info, 'position_current', None) if employment_info else get_field('position_current', 'current position')),
+            'company_name_current': getattr(tracker_data, 'q_company_name', None) if tracker_data else (getattr(employment_info, 'company_name_current', None) if employment_info else get_field('company_name_current', 'current company')),
+            'sector_current': getattr(tracker_data, 'q_sector_current', None) if tracker_data else (getattr(employment_info, 'sector_current', None) if employment_info else get_field('sector_current', 'employment sector')),
+            'scope_current': getattr(tracker_data, 'q_scope_current', None) if tracker_data else (getattr(employment_info, 'scope_current', None) if employment_info else get_field('scope_current', 'current scope')),
+            'salary_current': getattr(tracker_data, 'q_salary_range', None) if tracker_data else (getattr(employment_info, 'salary_current', None) if employment_info else get_field('salary_current', 'salary')),
+            'employment_duration': getattr(tracker_data, 'q_employment_duration', None) if tracker_data else None,
+            'employment_permanent': getattr(tracker_data, 'q_employment_permanent', None) if tracker_data else None,
             'self_employed': getattr(employment_info, 'self_employed', False) if employment_info else False,
             'employment_status': employment_status,
             'followers_count': followers_count,
