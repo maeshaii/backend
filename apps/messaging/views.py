@@ -617,29 +617,33 @@ def delete_conversation(request, conversation_id):
         # Check if conversation has any remaining participants
         remaining_participants = conversation.participants.count()
         
+        conversation_id_for_log = conversation.conversation_id
+        
         if remaining_participants == 0:
             # No participants left, delete the entire conversation
             # This will cascade delete all messages due to ForeignKey on_delete=CASCADE
-            conversation_id_for_log = conversation.conversation_id
             conversation.delete()
             logger.info(f"Conversation {conversation_id_for_log} fully deleted (no remaining participants)")
-            
-            # Broadcast deletion to WebSocket if needed
-            try:
-                channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f"user_{user.user_id}",
-                    {
-                        'type': 'conversation_deleted',
-                        'conversation_id': conversation_id_for_log,
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Failed to broadcast conversation deletion: {str(e)}")
         else:
             # Other participants remain, just remove this user
             logger.info(f"User {user.user_id} removed from conversation {conversation_id}")
             conversation.save()
+        
+        # Broadcast deletion to WebSocket - ALWAYS broadcast, regardless of whether conversation was fully deleted or user was just removed
+        # Use notifications_{user_id} group to match NotificationConsumer's group name
+        try:
+            channel_layer = get_channel_layer()
+            async_to_sync(channel_layer.group_send)(
+                f"notifications_{user.user_id}",
+                {
+                    'type': 'conversation_deleted',
+                    'conversation_id': conversation_id_for_log,
+                    'fully_deleted': remaining_participants == 0,
+                }
+            )
+            logger.info(f"Broadcasted conversation deletion event to notifications_{user.user_id} for conversation {conversation_id_for_log}")
+        except Exception as e:
+            logger.warning(f"Failed to broadcast conversation deletion: {str(e)}")
         
         # Clear message cache for this user
         try:

@@ -75,8 +75,14 @@ def add_or_remove_reaction(request, conversation_id, message_id):
         channel_layer = get_channel_layer()
         
         if action_type == 'add':
-            # Add reaction (or get existing)
-            reaction, created = MessageReaction.objects.get_or_create(
+            # Remove any existing reactions from this user on this message (enforce 1 reaction limit)
+            MessageReaction.objects.filter(
+                message=message,
+                user=request.user
+            ).delete()
+            
+            # Create new reaction
+            reaction = MessageReaction.objects.create(
                 message=message,
                 user=request.user,
                 emoji=emoji
@@ -99,14 +105,14 @@ def add_or_remove_reaction(request, conversation_id, message_id):
             
             return Response({
                 'status': 'reaction_added',
-                'created': created,
+                'created': True,
                 'reaction': {
                     'emoji': emoji,
                     'user_id': request.user.user_id,
                     'user_name': getattr(request.user, 'full_name', ''),
                     'created_at': reaction.created_at.isoformat()
                 }
-            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+            }, status=status.HTTP_201_CREATED)
             
         elif action_type == 'remove':
             # Remove reaction

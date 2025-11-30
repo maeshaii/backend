@@ -519,31 +519,33 @@ class CreateConversationSerializer(serializers.ModelSerializer):
                 conversation.participants.set([current_user, other_user])
                 return conversation
             
-            # For regular users, check mutual follow
-            # Check if current user follows other user
+            # For regular users, check if current user follows the other user
+            # If current user follows the other user, it's a regular conversation (not a message request)
+            # Only create message request if current user does NOT follow the other user
             current_follows_other = Follow.objects.filter(
                 follower=current_user,
                 following=other_user
             ).exists()
             
-            # Check if other user follows current user
+            # Check if other user follows current user (for reference, but not used for message request logic)
             other_follows_current = Follow.objects.filter(
                 follower=other_user,
                 following=current_user
             ).exists()
             
-            # If not mutual follows, this will be a message request
-            is_mutual_follow = current_follows_other and other_follows_current
+            # FIX: If current user follows the other user, it should NOT be a message request
+            # Message requests should only be created when current user does NOT follow the other user
+            is_message_request = not current_follows_other
             
             # Create conversation with request status
             conversation = Conversation.objects.create(
-                is_message_request=not is_mutual_follow,
-                request_initiator=current_user if not is_mutual_follow else None,
+                is_message_request=is_message_request,
+                request_initiator=current_user if is_message_request else None,
             )
             conversation.participants.set([current_user, other_user])
             
             # Broadcast message request count update if this is a message request
-            if not is_mutual_follow:
+            if is_message_request:
                 try:
                     from apps.messaging.notification_broadcaster import broadcast_message_request_count
                     # Count pending message requests for the recipient (other_user)

@@ -5933,19 +5933,29 @@ def alumni_employment_view(request, user_id):
                 })
                 
         elif request.method == 'PUT':
-            # Check if request contains files (FormData) or JSON
-            if request.FILES:
-                # FormData request (with file uploads)
-                data = request.POST.dict()
-                print(f"📎 FormData request detected with files: {list(request.FILES.keys())}")
+            # Use request.data which works with both MultiPartParser and JSONParser
+            # This avoids the "cannot access body after reading" error
+            # request.data is a QueryDict that contains both form fields and files
+            data = {}
+            files = {}
+            
+            # Get form data from request.data (DRF parser handles both JSON and multipart)
+            if hasattr(request, 'data'):
+                # request.data is a QueryDict, convert to regular dict
+                # Exclude file fields from data dict
+                for key, value in request.data.items():
+                    if key not in ['awards_supporting_doc', 'employment_supporting_doc']:
+                        data[key] = value
+            
+            # Get files separately from request.FILES
+            if hasattr(request, 'FILES') and request.FILES:
+                files = dict(request.FILES)
+                print(f"📎 FormData request detected with files: {list(files.keys())}")
             else:
-                # Regular JSON request
-                try:
-                    data = json.loads(request.body)
-                    print(f"📄 JSON request detected")
-                except json.JSONDecodeError as e:
-                    print(f"❌ JSON decode error: {e}")
-                    return JsonResponse({'error': 'Invalid JSON data'}, status=400)
+                print(f"📄 JSON request detected")
+            
+            print(f"🔍 Data keys: {list(data.keys())}")
+            print(f"🔍 Files keys: {list(files.keys())}")
             
             # For OJT accounts, update OJTCompanyProfile (not EmploymentHistory)
             if is_ojt:
@@ -6060,8 +6070,32 @@ def alumni_employment_view(request, user_id):
                 from apps.shared.models import AcademicInfo
                 
                 # STEP 1: Update TrackerData with dropdown values from Part III FIRST
-                tracker_data, created = TrackerData.objects.get_or_create(user=user)
-                tracker_data.q_employment_status = 'employed'
+                # CRITICAL: Only update if TrackerData already exists - don't create it for untracked users
+                # This prevents marking untracked users as tracked when they update employment details
+                try:
+                    tracker_data = TrackerData.objects.get(user=user)
+                except TrackerData.DoesNotExist:
+                    # User doesn't have TrackerData - they're untracked
+                    # Don't create it here - this endpoint is only for updating existing employment details
+                    # If they're updating employment details, they should already have TrackerData from tracker submission
+                    return JsonResponse({
+                        'error': 'Cannot update employment details. Please complete the tracker form first.'
+                    }, status=400)
+                
+                # CRITICAL FIX: Only update q_employment_status if user is actually updating employment details
+                # Use 'yes' (not 'employed') to match admin statistics expectations
+                # Only set to 'yes' if they're providing employment data (company name, position, etc.)
+                has_employment_data = bool(
+                    data.get('current_company_name') or 
+                    data.get('current_position') or 
+                    data.get('employment_type')
+                )
+                
+                if has_employment_data:
+                    # User is providing employment details, so they're employed
+                    # Use 'yes' to match admin statistics view expectations (line 1955)
+                    tracker_data.q_employment_status = 'yes'
+                # If no employment data provided, preserve existing status
                 
                 # Update Part III dropdown fields in TrackerData
                 if data.get('employment_type'):
@@ -6089,18 +6123,29 @@ def alumni_employment_view(request, user_id):
                 awards_file_uploaded = False
                 employment_file_uploaded = False
                 
-                print(f"🔍 REQUEST.FILES keys: {list(request.FILES.keys())}")
-                print(f"🔍 REQUEST.POST keys: {list(request.POST.keys())}")
+                # Use files dict we extracted earlier, or check request.FILES directly
+                files_dict = files if files else (dict(request.FILES) if hasattr(request, 'FILES') and request.FILES else {})
                 
-                if 'awards_supporting_doc' in request.FILES:
-                    tracker_data.q_awards_document = request.FILES['awards_supporting_doc']
+                print(f"🔍 Files available: {list(files_dict.keys())}")
+                print(f"🔍 Data keys: {list(data.keys())}")
+                
+                if 'awards_supporting_doc' in files_dict:
+                    awards_file_obj = files_dict['awards_supporting_doc']
+                    # Handle case where QueryDict returns a list (multiple files with same key)
+                    if isinstance(awards_file_obj, list):
+                        awards_file_obj = awards_file_obj[0]
+                    tracker_data.q_awards_document = awards_file_obj
                     awards_file_uploaded = True
                     print(f"✅ NEW awards document uploaded: {tracker_data.q_awards_document.name}")
                 else:
                     print(f"ℹ️  No new awards document in this request")
                 
-                if 'employment_supporting_doc' in request.FILES:
-                    tracker_data.q_employment_document = request.FILES['employment_supporting_doc']
+                if 'employment_supporting_doc' in files_dict:
+                    employment_file_obj = files_dict['employment_supporting_doc']
+                    # Handle case where QueryDict returns a list (multiple files with same key)
+                    if isinstance(employment_file_obj, list):
+                        employment_file_obj = employment_file_obj[0]
+                    tracker_data.q_employment_document = employment_file_obj
                     employment_file_uploaded = True
                     print(f"✅ NEW employment document uploaded: {tracker_data.q_employment_document.name}")
                 else:
@@ -6131,6 +6176,18 @@ def alumni_employment_view(request, user_id):
                     tracker_response = TrackerResponse.objects.filter(user=user, is_draft=False).order_by('-submitted_at').first()
                     if tracker_response:
                         print(f"📝 Found TrackerResponse for user {user.user_id}, updating answers...")
+                        
+                        # CRITICAL: Update Question 22 (Employment Status: Yes/No) based on TrackerData
+                        # This is what admin views use to determine if user is employed/unemployed/untracked
+                        if tracker_data.q_employment_status:
+                            if tracker_data.q_employment_status.lower() == 'yes':
+                                tracker_response.answers['22'] = 'Yes'
+                                print(f"🔧 Updated TrackerResponse Q22 = 'Yes' (employed)")
+                            elif tracker_data.q_employment_status.lower() == 'no':
+                                tracker_response.answers['22'] = 'No'
+                                print(f"🔧 Updated TrackerResponse Q22 = 'No' (unemployed)")
+                            # Don't update if status is 'pending' or 'untracked' - preserve existing value
+                        
                         # Question 23: Employment Type
                         if data.get('employment_type'):
                             tracker_response.answers['23'] = data.get('employment_type')
@@ -9110,6 +9167,39 @@ def follow_user_view(request, user_id):
                 following=user_to_follow
             )
             if created:
+                # FIX: Update existing message requests to regular conversations
+                # If current user now follows the other user, convert any message requests to regular conversations
+                from apps.shared.models import Conversation
+                try:
+                    # Find conversations between current user and user_to_follow that are message requests
+                    # initiated by user_to_follow (meaning user_to_follow sent a message request to current_user)
+                    # Use a subquery to find conversations where both users are participants
+                    conversations_to_update = Conversation.objects.filter(
+                        participants=current_user,
+                        is_message_request=True,
+                        request_initiator=user_to_follow
+                    ).filter(participants=user_to_follow).distinct()
+                    
+                    if conversations_to_update.exists():
+                        updated_count = conversations_to_update.update(
+                            is_message_request=False,
+                            request_initiator=None
+                        )
+                        logger.info(f"Updated {updated_count} message request(s) to regular conversation(s) after user {current_user.user_id} followed user {user_to_follow.user_id}")
+                        
+                        # Broadcast updated message request count
+                        try:
+                            from apps.messaging.notification_broadcaster import broadcast_message_request_count
+                            pending_count = Conversation.objects.filter(
+                                participants=current_user,
+                                is_message_request=True
+                            ).exclude(request_initiator=current_user).count()
+                            broadcast_message_request_count(current_user.user_id, pending_count)
+                        except Exception as broadcast_error:
+                            logger.error(f"Error broadcasting message request count after follow: {broadcast_error}")
+                except Exception as e:
+                    logger.error(f"Error updating message requests after follow: {e}")
+                
                 # Notify the followed user
                 try:
                     follow_notification = Notification.objects.create(

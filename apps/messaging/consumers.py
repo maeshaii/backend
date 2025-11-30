@@ -616,21 +616,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
 			logger.error(f"Error marking message as read: {e}")
 	
 	def _add_reaction_to_db(self, message_id, user_id, emoji):
-		"""Add reaction to database"""
+		"""Add reaction to database - enforces 1 reaction per user per message"""
 		try:
 			from apps.shared.models import MessageReaction
 			
 			# Check if message exists
 			message = Message.objects.get(message_id=message_id)
 			
-			# Create or get reaction (unique constraint prevents duplicates)
-			reaction, created = MessageReaction.objects.get_or_create(
+			# Remove any existing reactions from this user on this message (enforce 1 reaction limit)
+			MessageReaction.objects.filter(
+				message_id=message_id,
+				user_id=user_id
+			).delete()
+			
+			# Create new reaction
+			reaction = MessageReaction.objects.create(
 				message_id=message_id,
 				user_id=user_id,
 				emoji=emoji
 			)
 			
-			logger.info(f"Reaction {'created' if created else 'already exists'}: {emoji} on message {message_id} by user {user_id}")
+			logger.info(f"Reaction created: {emoji} on message {message_id} by user {user_id} (replaced any existing reactions)")
 			return reaction
 			
 		except Message.DoesNotExist:
@@ -798,6 +804,23 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'notification': event['notification']
 		}))
 		logger.info(f"NotificationConsumer: Sent notification to WebSocket client")
+
+	async def conversation_deleted(self, event):
+		"""Handle conversation deletion event from group"""
+		logger.info(f"NotificationConsumer: Received conversation_deleted event: {event}")
+		conversation_id = event.get('conversation_id')
+		fully_deleted = event.get('fully_deleted', False)
+		
+		if conversation_id:
+			await self.send(text_data=json.dumps({
+				'type': 'conversation_deleted',
+				'conversation_id': conversation_id,
+				'fully_deleted': fully_deleted,
+				'timestamp': timezone.now().isoformat()
+			}))
+			logger.info(f"NotificationConsumer: Sent conversation_deleted event to WebSocket client for conversation {conversation_id}")
+		else:
+			logger.warning(f"NotificationConsumer: Received conversation_deleted event without conversation_id: {event}")
 
 	async def presence_update(self, event):
 		"""Handle presence update from group (ignore for notification consumer)"""
