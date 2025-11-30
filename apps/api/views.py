@@ -2253,6 +2253,24 @@ def import_ojt_view(request):
 
             return normalized
 
+        def validate_ctu_id_format(ctu_id):
+            """
+            Validate that CTU_ID is exactly 7 numeric digits.
+            Returns (is_valid, error_message)
+            """
+            if not ctu_id:
+                return False, "CTU_ID cannot be empty"
+            
+            # Check if it's exactly 7 characters
+            if len(ctu_id) != 7:
+                return False, f"CTU_ID must be exactly 7 digits, but got {len(ctu_id)} character(s): '{ctu_id}'"
+            
+            # Check if all characters are numeric
+            if not ctu_id.isdigit():
+                return False, f"CTU_ID must contain only numbers, but got: '{ctu_id}'"
+            
+            return True, None
+
         ctu_id_series = df['CTU_ID'].dropna().apply(normalize_ctu_id_value)
         ctu_id_series = ctu_id_series[ctu_id_series != '']
 
@@ -2260,6 +2278,22 @@ def import_ojt_view(request):
             return JsonResponse({
                 'success': False,
                 'message': 'The file must contain at least one CTU_ID value.'
+            }, status=400)
+
+        # Validate all CTU IDs after normalization
+        invalid_ctu_ids = []
+        for idx, ctu_id in ctu_id_series.items():
+            is_valid, error_msg = validate_ctu_id_format(ctu_id)
+            if not is_valid:
+                invalid_ctu_ids.append(f"Row {idx + 2}: {error_msg}")
+        
+        if invalid_ctu_ids:
+            error_summary = f"Invalid CTU_ID format detected. CTU_ID must be exactly 7 numeric digits.\n\nFound {len(invalid_ctu_ids)} error(s):\n" + "\n".join(invalid_ctu_ids[:10])  # Show first 10 errors
+            if len(invalid_ctu_ids) > 10:
+                error_summary += f"\n... and {len(invalid_ctu_ids) - 10} more error(s)"
+            return JsonResponse({
+                'success': False,
+                'message': error_summary
             }, status=400)
 
         all_ctu_ids = set(ctu_id_series.tolist())
@@ -2739,6 +2773,15 @@ def import_ojt_view(request):
                 # CTU_ID is always required
                 if not ctu_id:
                     error_msg = f"Row {index + 2}: Missing CTU_ID (required)"
+                    print(f"SKIPPING: {error_msg}")
+                    errors.append(error_msg)
+                    skipped_count += 1
+                    continue
+                
+                # Validate CTU_ID format: must be exactly 7 numeric digits
+                is_valid, format_error = validate_ctu_id_format(ctu_id)
+                if not is_valid:
+                    error_msg = f"Row {index + 2}: {format_error}"
                     print(f"SKIPPING: {error_msg}")
                     errors.append(error_msg)
                     skipped_count += 1
