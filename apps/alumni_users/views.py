@@ -72,9 +72,14 @@ def build_alumni_data(a):
         'age': getattr(profile, 'age', None) if profile else None,
         'social_media': getattr(profile, 'social_media', None) if profile else None,
         'school_name': getattr(academic, 'school_name', None) if academic else None,
+        'q_institution_name': getattr(academic, 'q_institution_name', None) if academic else None,
+        'q_study_start_date': str(getattr(academic, 'q_study_start_date', None)) if academic and getattr(academic, 'q_study_start_date', None) else None,
+        'pursue_further_study': getattr(academic, 'pursue_further_study', None) if academic else None,
         'profile_pic': _build_profile_pic_url(a),
         # Add employment data - Prefer TrackerData (Part III) over EmploymentHistory for current data
         'employment_type': getattr(tracker_data, 'q_employment_type', None) if tracker_data else None,
+        'q_awards_received': getattr(tracker_data, 'q_awards_received', None) if tracker_data else None,
+        'q_unemployment_reason': getattr(tracker_data, 'q_unemployment_reason', None) if tracker_data else None,
         'position_current': getattr(tracker_data, 'q_current_position', None) if tracker_data else (getattr(employment, 'position_current', None) if employment else None),
         'company_name_current': getattr(tracker_data, 'q_company_name', None) if tracker_data else (getattr(employment, 'company_name_current', None) if employment else None),
         'sector_current': getattr(tracker_data, 'q_sector_current', None) if tracker_data else (getattr(employment, 'sector_current', None) if employment else None),
@@ -85,34 +90,77 @@ def build_alumni_data(a):
     }
 
 def get_field_from_question_map(user, question_text_map, field, *question_labels):
-    for label in question_labels:
-        for qtext, answer in question_text_map.items():
-            if label in qtext:
-                return answer
+    # DEBUG: Log function call
+    logger.debug(f"get_field_from_question_map called: field='{field}', labels={question_labels}")
     
-    # Handle fields that are in the User model
-    user_fields = ['f_name', 'm_name', 'l_name', 'gender', 'user_status', 'acc_username']
-    if field in user_fields:
-        return getattr(user, field, '')
+    # CRITICAL FIX: For basic profile fields, prioritize database fields over tracker answers
+    # This prevents empty tracker answers from overriding valid profile data
     
-    # Handle fields that are in the UserProfile model
+    # Handle fields that are in the UserProfile model - CHECK PROFILE FIRST
     profile_fields = ['birthdate', 'phone_num', 'address', 'email', 'civil_status', 'age', 'social_media']
     if field in profile_fields:
         if hasattr(user, 'profile') and user.profile:
             val = getattr(user.profile, field, None)
-            # Special handling for birthdate to avoid 'None' string
-            if field == 'birthdate':
-                return str(val) if val else ''
-            return val if val is not None else ''
+            logger.debug(f"  Profile field '{field}' = '{val}' (type: {type(val)})")
+            # If profile has a value, use it (don't check tracker answers)
+            if val is not None and val != '':
+                # Special handling for birthdate to avoid 'None' string
+                if field == 'birthdate':
+                    result = str(val) if val else ''
+                    logger.debug(f"  Returning profile birthdate: '{result}'")
+                    return result
+                logger.debug(f"  Returning profile value: '{val}'")
+                return val
+            else:
+                logger.debug(f"  Profile field '{field}' is empty/None, checking tracker answers...")
+        else:
+            logger.debug(f"  No profile exists, checking tracker answers...")
+        
+        # Only check tracker answers if profile doesn't have the value
+        for label in question_labels:
+            for qtext, answer in question_text_map.items():
+                if label in qtext:
+                    logger.debug(f"  Found tracker match: label='{label}' in qtext='{qtext}', answer='{answer}'")
+                    if answer and str(answer).strip():
+                        logger.debug(f"  Returning tracker answer: '{answer}'")
+                        return answer
+                    else:
+                        logger.debug(f"  Tracker answer is empty, continuing search...")
+        logger.debug(f"  No valid tracker answer found, returning empty string")
         return ''
     
-    # Handle fields that are in the AcademicInfo model
-    academic_fields = ['year_graduated', 'program']
+    # Handle fields that are in the User model - CHECK USER FIRST
+    user_fields = ['f_name', 'm_name', 'l_name', 'gender', 'user_status', 'acc_username']
+    if field in user_fields:
+        val = getattr(user, field, '')
+        if val:
+            return val
+        # Only check tracker answers if user field is empty
+        for label in question_labels:
+            for qtext, answer in question_text_map.items():
+                if label in qtext and answer and str(answer).strip():
+                    return answer
+        return ''
+    
+    # Handle fields that are in the AcademicInfo model - CHECK ACADEMIC INFO FIRST
+    academic_fields = ['year_graduated', 'program', 'school_name']
     if field in academic_fields:
         if hasattr(user, 'academic_info') and user.academic_info:
             val = getattr(user.academic_info, field, None)
-            return val if val is not None else ''
+            if val is not None and val != '':
+                return val
+        # Only check tracker answers if academic_info doesn't have the value
+        for label in question_labels:
+            for qtext, answer in question_text_map.items():
+                if label in qtext and answer and str(answer).strip():
+                    return answer
         return ''
+    
+    # For other fields, check tracker answers first, then fallback
+    for label in question_labels:
+        for qtext, answer in question_text_map.items():
+            if label in qtext and answer and str(answer).strip():
+                return answer
     
     # Fallback to direct user attribute access
     return getattr(user, field, '')
@@ -177,6 +225,61 @@ def alumni_detail_view(request, user_id):
         followers_count = Follow.objects.filter(following=user).count()
         following_count = Follow.objects.filter(follower=user).count()
 
+        # DEBUG: Log all profile data to trace root cause
+        logger.debug(f"=== DEBUG alumni_detail_view for user_id={user_id} ===")
+        logger.debug(f"User: {user.acc_username} ({user.f_name} {user.l_name})")
+        
+        # DEBUG: Check UserProfile directly
+        if hasattr(user, 'profile') and user.profile:
+            profile = user.profile
+            logger.debug(f"UserProfile exists:")
+            logger.debug(f"  - phone_num: '{getattr(profile, 'phone_num', None)}' (type: {type(getattr(profile, 'phone_num', None))})")
+            logger.debug(f"  - email: '{getattr(profile, 'email', None)}' (type: {type(getattr(profile, 'email', None))})")
+            logger.debug(f"  - social_media: '{getattr(profile, 'social_media', None)}' (type: {type(getattr(profile, 'social_media', None))})")
+            logger.debug(f"  - address: '{getattr(profile, 'address', None)}'")
+            logger.debug(f"  - birthdate: '{getattr(profile, 'birthdate', None)}'")
+        else:
+            logger.debug(f"UserProfile does NOT exist!")
+        
+        # DEBUG: Check AcademicInfo
+        if academic_info:
+            logger.debug(f"AcademicInfo exists:")
+            logger.debug(f"  - q_study_start_date: '{getattr(academic_info, 'q_study_start_date', None)}'")
+            logger.debug(f"  - q_institution_name: '{getattr(academic_info, 'q_institution_name', None)}'")
+            logger.debug(f"  - school_name: '{getattr(academic_info, 'school_name', None)}'")
+        else:
+            logger.debug(f"AcademicInfo does NOT exist!")
+        
+        # DEBUG: Check TrackerData
+        if tracker_data:
+            logger.debug(f"TrackerData exists:")
+            logger.debug(f"  - q_company_name: '{getattr(tracker_data, 'q_company_name', None)}'")
+        else:
+            logger.debug(f"TrackerData does NOT exist!")
+        
+        # DEBUG: Check tracker answers (question_text_map)
+        logger.debug(f"Tracker answers (question_text_map) has {len(question_text_map)} entries:")
+        for qtext, answer in list(question_text_map.items())[:10]:  # Show first 10
+            logger.debug(f"  - '{qtext}': '{answer}'")
+        
+        # DEBUG: Test get_field function
+        phone_from_get_field = get_field('phone_num', 'phone', 'contact', 'mobile')
+        email_from_get_field = get_field('email', 'email')
+        social_from_get_field = get_field('social_media', 'social media')
+        logger.debug(f"get_field results:")
+        logger.debug(f"  - phone_num: '{phone_from_get_field}'")
+        logger.debug(f"  - email: '{email_from_get_field}'")
+        logger.debug(f"  - social_media: '{social_from_get_field}'")
+        
+        # DEBUG: Test direct profile access
+        phone_direct = getattr(user.profile, 'phone_num', None) if hasattr(user, 'profile') and user.profile else None
+        email_direct = getattr(user.profile, 'email', None) if hasattr(user, 'profile') and user.profile else None
+        social_direct = getattr(user.profile, 'social_media', None) if hasattr(user, 'profile') and user.profile else None
+        logger.debug(f"Direct profile access:")
+        logger.debug(f"  - phone_num: '{phone_direct}'")
+        logger.debug(f"  - email: '{email_direct}'")
+        logger.debug(f"  - social_media: '{social_direct}'")
+        
         data = {
             'id': user.user_id,
             'ctu_id': user.acc_username,
@@ -191,17 +294,27 @@ def alumni_detail_view(request, user_id):
             'status': get_field('user_status', 'status'),
             'gender': get_field('gender', 'gender'),
             'birthdate': get_field('birthdate', 'birthdate', 'birth date', 'birthday', 'date of birth', 'dob', 'bday'),
-            'phone': get_field('phone_num', 'phone', 'contact', 'mobile'),
-            'address': get_field('address', 'address'),
-            'email': get_field('email', 'email'),
+            # CRITICAL FIX: Prioritize profile fields directly - don't use get_field for basic profile data
+            # This ensures imported data from UserProfile is shown, not empty tracker answers
+            'phone': getattr(user.profile, 'phone_num', None) if hasattr(user, 'profile') and user.profile else get_field('phone_num', 'phone', 'contact', 'mobile'),
+            'address': getattr(user.profile, 'address', None) if hasattr(user, 'profile') and user.profile else get_field('address', 'address'),
+            'email': getattr(user.profile, 'email', None) if hasattr(user, 'profile') and user.profile else get_field('email', 'email'),
             'program': getattr(academic_info, 'program', None) if academic_info else get_field('program', 'program'),
-            'civil_status': get_field('civil_status', 'civil status'),
-            'age': get_field('age', 'age'),
-            'social_media': get_field('social_media', 'social media'),
-            'school_name': getattr(academic_info, 'school_name', None) if academic_info else get_field('school_name', 'school name'),
+            'civil_status': getattr(user.profile, 'civil_status', None) if hasattr(user, 'profile') and user.profile else get_field('civil_status', 'civil status'),
+            'age': getattr(user.profile, 'age', None) if hasattr(user, 'profile') and user.profile else get_field('age', 'age'),
+            'social_media': getattr(user.profile, 'social_media', None) if hasattr(user, 'profile') and user.profile else get_field('social_media', 'social media'),
+            # CRITICAL FIX: For school_name, prioritize AcademicInfo, avoid tracker answers that might match wrong fields
+            'school_name': getattr(academic_info, 'school_name', None) if academic_info else None,
+            'q_post_graduate_degree': getattr(academic_info, 'q_post_graduate_degree', None) if academic_info else None,
+            'q_units_obtained': getattr(academic_info, 'q_units_obtained', None) if academic_info else None,
+            'q_institution_name': getattr(academic_info, 'q_institution_name', None) if academic_info else None,
+            'q_study_start_date': str(getattr(academic_info, 'q_study_start_date', None)) if academic_info and getattr(academic_info, 'q_study_start_date', None) else None,
+            'pursue_further_study': getattr(academic_info, 'pursue_further_study', None) if academic_info else None,
             'profile_pic': _build_profile_pic_url(user),
             # Employment data - Prefer TrackerData (Part III) over EmploymentHistory for accurate current data
             'employment_type': getattr(tracker_data, 'q_employment_type', None) if tracker_data else None,
+            'q_awards_received': getattr(tracker_data, 'q_awards_received', None) if tracker_data else None,
+            'q_unemployment_reason': getattr(tracker_data, 'q_unemployment_reason', None) if tracker_data else None,
             'position_current': getattr(tracker_data, 'q_current_position', None) if tracker_data else (getattr(employment_info, 'position_current', None) if employment_info else get_field('position_current', 'current position')),
             'company_name_current': getattr(tracker_data, 'q_company_name', None) if tracker_data else (getattr(employment_info, 'company_name_current', None) if employment_info else get_field('company_name_current', 'current company')),
             'sector_current': getattr(tracker_data, 'q_sector_current', None) if tracker_data else (getattr(employment_info, 'sector_current', None) if employment_info else get_field('sector_current', 'employment sector')),
@@ -221,6 +334,18 @@ def alumni_detail_view(request, user_id):
                 'ojt': getattr(user.account_type, 'ojt', False),
             },
         }
+        
+        # DEBUG: Log final data being returned
+        logger.debug(f"Final data being returned:")
+        logger.debug(f"  - phone: '{data.get('phone')}'")
+        logger.debug(f"  - email: '{data.get('email')}'")
+        logger.debug(f"  - social_media: '{data.get('social_media')}'")
+        logger.debug(f"  - q_study_start_date: '{data.get('q_study_start_date')}'")
+        logger.debug(f"  - q_institution_name: '{data.get('q_institution_name')}'")
+        logger.debug(f"  - school_name: '{data.get('school_name')}'")
+        logger.debug(f"  - company_name_current: '{data.get('company_name_current')}'")
+        logger.debug(f"=== END DEBUG ===")
+        
         return JsonResponse({'success': True, 'alumni': data})
     except User.DoesNotExist as e:
         logger.error(f"User with id {user_id} not found: {e}")

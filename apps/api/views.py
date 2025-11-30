@@ -918,6 +918,90 @@ def import_alumni_view(request):
             
             # Normalize column names by stripping whitespace FIRST
             df.columns = df.columns.str.strip()
+            
+            # Helper function to find column by partial match (case-insensitive, handles variations)
+            def find_column(df, possible_names):
+                """Find a column by trying multiple possible names (case-insensitive)"""
+                if isinstance(possible_names, str):
+                    possible_names = [possible_names]
+                
+                # First, try exact matches (case-sensitive)
+                for name in possible_names:
+                    if name in df.columns:
+                        return name
+                
+                # Then try case-insensitive exact matches
+                for name in possible_names:
+                    name_lower = name.lower().strip()
+                    for col in df.columns:
+                        if col.lower().strip() == name_lower:
+                            return col
+                
+                # Finally, try partial matches (but be more careful)
+                for name in possible_names:
+                    name_lower = name.lower().strip()
+                    # Get key words from the name (longer words are more specific)
+                    name_words = [w for w in name_lower.split() if len(w) > 3]
+                    best_match = None
+                    best_score = 0
+                    
+                    for col in df.columns:
+                        col_lower = col.lower().strip()
+                        # Check if all key words are in the column name
+                        if name_words:
+                            matching_words = sum(1 for word in name_words if word in col_lower)
+                            score = matching_words / len(name_words)
+                            if score > best_score and score >= 0.5:  # At least 50% of words match
+                                best_score = score
+                                best_match = col
+                        # Also check if the name is contained in column or vice versa
+                        elif name_lower in col_lower or col_lower in name_lower:
+                            if len(name_lower) > 10 or len(col_lower) > 10:  # Only for longer names
+                                return col
+                    
+                    if best_match:
+                        return best_match
+                
+                return None
+            
+            # Create a comprehensive column mapping for all fields
+            # This maps our expected column names to actual column names in the Excel file
+            column_mapping_dict = {}
+            
+            # Map all possible column name variations to standardized names
+            column_variations = {
+                'Please specify post graduate/degree': [
+                    'Please specify post graduate/degree',
+                    'Please specify post graduate/degree.',
+                    'post graduate/degree',
+                    'post graduate degree',
+                ],
+                'Current Salary range': [
+                    'Current Salary range',
+                    'Current Salary Range',
+                    'Current Salary',
+                    'Salary range',
+                ],
+                'Are you employed by a company/organization or are you self employed ?': [
+                    'Are you employed by a company/organization or are you self employed ?',
+                    'Are you employed by a company/organization or are you self employed?',
+                    'Employment Type',
+                    'employment type',
+                    'Are you employed by a company',
+                ],
+            }
+            
+            # Build the mapping by finding actual columns
+            for standard_name, variations in column_variations.items():
+                found_col = find_column(df, variations)
+                if found_col and found_col != standard_name:
+                    column_mapping_dict[found_col] = standard_name
+            
+            # Rename columns if they match the mapping
+            if column_mapping_dict:
+                print(f'🔄 Column name mapping: {column_mapping_dict}')
+                df.rename(columns=column_mapping_dict, inplace=True)
+            
             print('HEADERS (after normalization):', list(df.columns))
             
             # Check if Excel has Year_Graduated and Program columns (exported format)
@@ -959,6 +1043,43 @@ def import_alumni_view(request):
                 'message': f'Missing required columns: {", ".join(missing_columns)}'
             }, status=400)
         
+        # Validate CTU_ID format: must be exactly 7 numeric digits
+        def validate_ctu_id_format(ctu_id):
+            """
+            Validate that CTU_ID is exactly 7 numeric digits.
+            Returns (is_valid, error_message)
+            """
+            if not ctu_id:
+                return False, "CTU_ID cannot be empty"
+            
+            # Check if it's exactly 7 characters
+            if len(ctu_id) != 7:
+                return False, f"CTU_ID must be exactly 7 digits, but got {len(ctu_id)} character(s): '{ctu_id}'"
+            
+            # Check if all characters are numeric
+            if not ctu_id.isdigit():
+                return False, f"CTU_ID must contain only numbers, but got: '{ctu_id}'"
+            
+            return True, None
+
+        # Early validation: Check all CTU IDs before processing
+        invalid_ctu_ids = []
+        for idx, row in df.iterrows():
+            ctu_id = str(row.get('CTU_ID', '')).strip()
+            if ctu_id:
+                is_valid, error_msg = validate_ctu_id_format(ctu_id)
+                if not is_valid:
+                    invalid_ctu_ids.append(f"Row {idx + 2}: {error_msg}")
+        
+        if invalid_ctu_ids:
+            error_summary = f"Invalid CTU_ID format detected. CTU_ID must be exactly 7 numeric digits.\n\nFound {len(invalid_ctu_ids)} error(s):\n" + "\n".join(invalid_ctu_ids[:10])  # Show first 10 errors
+            if len(invalid_ctu_ids) > 10:
+                error_summary += f"\n... and {len(invalid_ctu_ids) - 10} more error(s)"
+            return JsonResponse({
+                'success': False,
+                'message': error_summary
+            }, status=400)
+        
         # Get alumni account type (user=True) - ensure AccountType is properly imported
         # Get or create alumni account type to avoid failures when it's missing
         from apps.shared.models import AccountType
@@ -983,21 +1104,71 @@ def import_alumni_view(request):
         except Exception:
             ojt_account_type = None
 
+        # Helper function to safely get column value with flexible matching
+        def get_column_value(row, df, possible_names, default=''):
+            """Get value from row using flexible column name matching"""
+            col_name = find_column(df, possible_names)
+            if col_name and col_name in df.columns:
+                value = row.get(col_name)
+                if pd.notna(value) and value is not None:
+                    value_str = str(value).strip()
+                    if value_str and value_str.lower() not in ['n/a', 'na', 'none', 'null']:
+                        return value_str
+            return default
+        
+        # Debug: Print all column names before processing
+        print(f"\n{'='*80}")
+        print(f"DEBUG: All columns in Excel file ({len(df.columns)} total):")
+        for i, col in enumerate(df.columns, 1):
+            print(f"  {i}. '{col}' (length: {len(col)})")
+        print(f"{'='*80}")
+        print(f"DEBUG: Total rows to process: {len(df)}\n")
+        
+        # Check if all records are duplicates (same file imported again)
+        # Collect all valid CTU IDs from the file
+        valid_ctu_ids = []
+        for idx, row in df.iterrows():
+            ctu_id = str(row.get('CTU_ID', '')).strip()
+            if ctu_id:
+                is_valid, _ = validate_ctu_id_format(ctu_id)
+                if is_valid:
+                    valid_ctu_ids.append(ctu_id)
+        
+        # Check if ALL valid CTU IDs already exist
+        if valid_ctu_ids:
+            existing_ctu_ids = set(User.objects.filter(acc_username__in=valid_ctu_ids).values_list('acc_username', flat=True))
+            all_exist = len(existing_ctu_ids) == len(valid_ctu_ids) and len(valid_ctu_ids) > 0
+            
+            if all_exist:
+                # All records are duplicates - return early with specific message
+                return JsonResponse({
+                    'success': False,
+                    'is_duplicate_file': True,
+                    'message': f'All {len(valid_ctu_ids)} valid CTU ID(s) in this file already exist in the system. This appears to be a duplicate import. Each file can only be imported once to prevent duplicate records.',
+                    'duplicate_count': len(valid_ctu_ids),
+                    'created_count': 0,
+                    'skipped_count': len(valid_ctu_ids)
+                })
+        
         for index, row in df.iterrows():
             try:
                 ctu_id = str(row['CTU_ID']).strip()
                 first_name = str(row['First_Name']).strip()
-                middle_name = str(row.get('Middle_Name', '')).strip() if pd.notna(row.get('Middle_Name')) else ''
+                middle_name = get_column_value(row, df, ['Middle_Name', 'Middle Name'])
                 last_name = str(row.get('Last_Nam', row.get('Last_Name', ''))).strip()
                 gender = str(row['Gender']).strip().upper()
                 password_raw = str(row.get('Password', '')).strip()
                 birthdate_val = row.get('Birthdate') if 'Birthdate' in df.columns else None
 
+                print(f"\nDEBUG: ========== Processing Row {index + 2} ==========")
                 print(f"DEBUG: Row {index + 2} - CTU_ID: {ctu_id}, Name: {first_name} {last_name}")
-                phone_number = str(row.get('Phone_Number', '')).strip() if pd.notna(row.get('Phone_Number')) else ''
-                address = str(row.get('Address', '')).strip() if pd.notna(row.get('Address')) else ''
-                civil_status = str(row.get('Civil Status', '')).strip() if pd.notna(row.get('Civil Status', '')) else ''
-                social_media = str(row.get('Social Media', '')).strip() if pd.notna(row.get('Social Media', '')) else ''
+                # Extract all profile fields using flexible column matching
+                email = get_column_value(row, df, ['Email', 'email'])
+                phone_number = get_column_value(row, df, ['Phone_Number', 'Phone Number', 'Phone'])
+                address = get_column_value(row, df, ['Address', 'address'])
+                complete_home_address = get_column_value(row, df, ['Complete Home Address', 'Complete Home Address', 'Home Address'])
+                civil_status = get_column_value(row, df, ['Civil Status', 'Civil Status', 'civil_status'])
+                social_media = get_column_value(row, df, ['Social Media', 'Social Media', 'social_media'])
                 
                 # Determine batch_year and course: use row values if available, else form parameters
                 # Initialize batch_year with default value to prevent scope errors
@@ -1029,6 +1200,15 @@ def import_alumni_view(request):
                 if not ctu_id or not first_name or not last_name or not gender:
                     print(f"DEBUG: Validation failed - missing required fields: ctu_id='{ctu_id}', first_name='{first_name}', last_name='{last_name}', gender='{gender}'")
                     errors.append(f"Row {index + 2}: Missing required fields (CTU_ID, First_Name, Last_Name, Gender)")
+                    continue
+                
+                # Validate CTU_ID format: must be exactly 7 numeric digits
+                is_valid, format_error = validate_ctu_id_format(ctu_id)
+                if not is_valid:
+                    error_msg = f"Row {index + 2}: {format_error}"
+                    print(f"SKIPPING: {error_msg}")
+                    errors.append(error_msg)
+                    skipped_count += 1
                     continue
                 
                 # Validate batch_year and course for this row
@@ -1092,8 +1272,10 @@ def import_alumni_view(request):
                 # Set profile including birthdate if provided
                 profile_kwargs = dict(
                     user=user,
+                    email=email or None,
                     phone_num=phone_number or None,
                     address=address or None,
+                    home_address=complete_home_address or None,
                     civil_status=civil_status or None,
                     social_media=social_media or None,
                 )
@@ -1119,14 +1301,110 @@ def import_alumni_view(request):
                         'section': section,  # Add section from form parameter
                     }
                     
-                    # Post graduate degree and further study detection
-                    if 'Please specify post graduate/degree.' in df.columns and pd.notna(row.get('Please specify post graduate/degree.')):
-                        degree = str(row['Please specify post graduate/degree.']).strip()
+                    # Further study detection - use flexible column matching
+                    pursue_col = find_column(df, [
+                        'Did you pursue futher study?',
+                        'Did you pursue further study?',
+                        'Pursue further study',
+                        'pursue further study',
+                    ])
+                    if pursue_col:
+                        # Get raw value first to preserve original
+                        pursue_study_raw = row.get(pursue_col)
+                        if pd.notna(pursue_study_raw) and pursue_study_raw is not None:
+                            pursue_study_str = str(pursue_study_raw).strip()
+                            pursue_study = pursue_study_str.lower()
+                            print(f"DEBUG: Row {index + 2} - Pursue study column '{pursue_col}' = '{pursue_study_str}'")
+                            if pursue_study in ['yes', 'y', '1', 'true']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED
+                                academic_kwargs['pursue_further_study'] = pursue_study_str
+                                academic_kwargs['q_pursue_study'] = pursue_study_str
+                                print(f"DEBUG: Row {index + 2} - Set pursue_further_study = '{pursue_study_str}'")
+                            elif pursue_study in ['no', 'n', '0', 'false']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED
+                                academic_kwargs['pursue_further_study'] = pursue_study_str
+                                academic_kwargs['q_pursue_study'] = pursue_study_str
+                                print(f"DEBUG: Row {index + 2} - Set pursue_further_study = '{pursue_study_str}'")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Did you pursue futher study?' column")
+                    
+                    # Post graduate degree - use flexible column matching
+                    degree_col = find_column(df, [
+                        'Please specify post graduate/degree',
+                        'Please specify post graduate/degree.',
+                        'Post graduate degree',
+                    ])
+                    if degree_col:
+                        degree = get_column_value(row, df, [degree_col])
                         if degree and degree.lower() not in ['n/a', 'na', '']:
                             academic_kwargs['q_post_graduate_degree'] = degree
-                            # If there's a post-graduate degree, they're pursuing further study
-                            academic_kwargs['pursue_further_study'] = 'yes'
-                            academic_kwargs['q_pursue_study'] = 'yes'
+                    
+                    # Date Started (further study) - use flexible column matching
+                    date_started_col = find_column(df, [
+                        'Date Started',
+                        'Date started',
+                        'date started',
+                    ])
+                    if date_started_col:
+                        date_value = row.get(date_started_col)
+                        print(f"DEBUG: Row {index + 2} - Date Started column '{date_started_col}' = '{date_value}' (type: {type(date_value)})")
+                        if pd.notna(date_value) and date_value is not None:
+                            try:
+                                date_started = pd.to_datetime(date_value, errors='coerce').date()
+                                if date_started and not pd.isna(date_started):
+                                    academic_kwargs['q_study_start_date'] = date_started
+                                    print(f"DEBUG: Row {index + 2} - Set q_study_start_date = '{date_started}'")
+                            except Exception as e:
+                                print(f"DEBUG: Error parsing Date Started for {ctu_id}: {e}")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Date Started' column")
+                    
+                    # Institution name - use flexible column matching
+                    institution_col = find_column(df, [
+                        'Name of Institution/University',
+                        'Institution/University',
+                        'Institution',
+                        'University',
+                        'School Name',
+                        'School',
+                    ])
+                    if institution_col:
+                        institution = get_column_value(row, df, [institution_col])
+                        print(f"DEBUG: Row {index + 2} - Institution column '{institution_col}' = '{institution}'")
+                        if institution:
+                            academic_kwargs['q_institution_name'] = institution
+                            print(f"DEBUG: Row {index + 2} - Set q_institution_name = '{institution}'")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Name of Institution/University' column")
+                    
+                    # Units obtained - use flexible column matching (CONVERT FLOAT TO INTEGER STRING)
+                    units_col = find_column(df, [
+                        'Total number of units obtain',
+                        'Total number of units obtained',
+                        'Units obtained',
+                        'Units',
+                    ])
+                    if units_col:
+                        units = get_column_value(row, df, [units_col])
+                        if units and units.lower() not in ['n/a', 'na', '']:
+                            # Convert float to integer string if it's a number
+                            try:
+                                units_float = float(units)
+                                if units_float.is_integer():
+                                    academic_kwargs['q_units_obtained'] = str(int(units_float))
+                                else:
+                                    academic_kwargs['q_units_obtained'] = str(units_float)
+                            except (ValueError, TypeError):
+                                # If it's not a number, keep as is
+                                academic_kwargs['q_units_obtained'] = units
+                    
+                    # Debug: Print summary of academic info before saving
+                    print(f"DEBUG: Row {index + 2} - AcademicInfo summary:")
+                    print(f"  - pursue_further_study: {academic_kwargs.get('pursue_further_study', 'NOT SET')}")
+                    print(f"  - q_study_start_date: {academic_kwargs.get('q_study_start_date', 'NOT SET')}")
+                    print(f"  - q_institution_name: {academic_kwargs.get('q_institution_name', 'NOT SET')}")
+                    print(f"  - q_post_graduate_degree: {academic_kwargs.get('q_post_graduate_degree', 'NOT SET')}")
+                    print(f"  - q_units_obtained: {academic_kwargs.get('q_units_obtained', 'NOT SET')}")
                     
                     AcademicInfo.objects.create(**academic_kwargs)
                     # Extract all tracker data from Excel columns
@@ -1135,9 +1413,14 @@ def import_alumni_view(request):
                         'tracker_submitted_at': timezone.now()
                     }
                     
-                    # Employment status
-                    if 'Are you PRESENTLY employed?' in df.columns and pd.notna(row.get('Are you PRESENTLY employed?')):
-                        emp_response = str(row['Are you PRESENTLY employed?']).strip().lower()
+                    # Employment status - use flexible column matching
+                    emp_status_col = find_column(df, [
+                        'Are you PRESENTLY employed?',
+                        'Are you PRESENTLY employed',
+                        'Presently employed',
+                    ])
+                    if emp_status_col and pd.notna(row.get(emp_status_col)):
+                        emp_response = str(row[emp_status_col]).strip().lower()
                         if emp_response in ['yes', 'y']:
                             tracker_data_kwargs['q_employment_status'] = 'yes'
                         elif emp_response in ['no', 'n']:
@@ -1147,52 +1430,262 @@ def import_alumni_view(request):
                     else:
                         tracker_data_kwargs['q_employment_status'] = 'pending'
                     
-                    # Company name
-                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
-                        company_name = str(row['Current Company Name']).strip()
+                    # Employment type - use flexible column matching (PRESERVE ORIGINAL VALUE)
+                    emp_type_col = find_column(df, [
+                        'Are you employed by a company/organization or are you self employed ?',
+                        'Are you employed by a company/organization or are you self employed?',
+                        'Employment Type',
+                        'employment type',
+                        'Are you employed by a company',
+                    ])
+                    if emp_type_col:
+                        # Get raw value first to preserve original
+                        emp_type_raw = row.get(emp_type_col)
+                        if pd.notna(emp_type_raw) and emp_type_raw is not None:
+                            emp_type = str(emp_type_raw).strip()
+                            print(f"DEBUG: Row {index + 2} - Employment Type column '{emp_type_col}' = '{emp_type}'")
+                            if emp_type and emp_type.lower() not in ['n/a', 'na', '']:
+                                # PRESERVE ORIGINAL VALUE - don't normalize
+                                emp_type_lower = emp_type.lower()
+                                if 'self' in emp_type_lower or 'self-employed' in emp_type_lower:
+                                    # Only normalize if it's self-employed, otherwise preserve original
+                                    tracker_data_kwargs['q_employment_type'] = 'Self-employed' if emp_type[0].isupper() else 'self-employed'
+                                elif 'company' in emp_type_lower or 'organization' in emp_type_lower or 'employed by' in emp_type_lower:
+                                    # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED
+                                    tracker_data_kwargs['q_employment_type'] = emp_type
+                                else:
+                                    # Default to employed by company if it's not clearly self-employed
+                                    tracker_data_kwargs['q_employment_type'] = emp_type
+                                print(f"DEBUG: Row {index + 2} - Set q_employment_type = '{tracker_data_kwargs['q_employment_type']}'")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Are you employed by a company/organization or are you self employed ?' column")
+                        print(f"DEBUG: Available columns: {list(df.columns)}")
+                    
+                    # Status of current employment - use flexible column matching
+                    emp_status_col = find_column(df, [
+                        'Status of your current employment',
+                        'Status of current employment',
+                        'Current employment status',
+                    ])
+                    if emp_status_col:
+                        emp_status = get_column_value(row, df, [emp_status_col])
+                        if emp_status and emp_status.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_employment_permanent'] = emp_status
+                    
+                    # Company name - use flexible column matching
+                    company_col = find_column(df, [
+                        'Current Company Name',
+                        'Current Company',
+                        'Company Name',
+                    ])
+                    if company_col:
+                        company_name = get_column_value(row, df, [company_col])
                         if company_name and company_name.lower() not in ['n/a', 'na', '']:
                             tracker_data_kwargs['q_company_name'] = company_name
                     
-                    # Current position
-                    if 'Current Position' in df.columns and pd.notna(row.get('Current Position')):
-                        position = str(row['Current Position']).strip()
+                    # Current position - use flexible column matching
+                    position_col = find_column(df, [
+                        'Current Position',
+                        'Position',
+                    ])
+                    if position_col:
+                        position = get_column_value(row, df, [position_col])
                         if position and position.lower() not in ['n/a', 'na', '']:
                             tracker_data_kwargs['q_current_position'] = position
                     
-                    # Job sector (Public/Private) - normalize for statistics
-                    if 'Current Sector of your Job' in df.columns and pd.notna(row.get('Current Sector of your Job')):
-                        sector = str(row['Current Sector of your Job']).strip()
-                        if sector and sector.lower() not in ['n/a', 'na', '']:
-                            # Normalize sector values for statistics queries
-                            sector_lower = sector.lower()
-                            if sector_lower in ['government', 'public']:
-                                tracker_data_kwargs['q_sector_current'] = 'government'
-                            elif sector_lower == 'private':
-                                tracker_data_kwargs['q_sector_current'] = 'private'
-                            else:
+                    # Job sector (Public/Private) - use flexible column matching (PRESERVE ORIGINAL VALUE)
+                    sector_col = find_column(df, [
+                        'Current Sector of your Job',
+                        'Current Sector',
+                        'Sector',
+                    ])
+                    if sector_col:
+                        # Get raw value first to preserve original
+                        sector_raw = row.get(sector_col)
+                        if pd.notna(sector_raw) and sector_raw is not None:
+                            sector = str(sector_raw).strip()
+                            if sector and sector.lower() not in ['n/a', 'na', '']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED
                                 tracker_data_kwargs['q_sector_current'] = sector
+                                print(f"DEBUG: Row {index + 2} - Set q_sector_current = '{sector}' (preserved original)")
                     
-                    # Salary range
-                    if 'Current Salary Range' in df.columns and pd.notna(row.get('Current Salary Range')):
-                        salary_range = str(row['Current Salary Range']).strip()
-                        if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
-                            tracker_data_kwargs['q_salary_range'] = salary_range
+                    # Employment duration - use flexible column matching
+                    duration_col = find_column(df, [
+                        'How long have you been employed?',
+                        'How long employed',
+                        'Employment duration',
+                    ])
+                    if duration_col:
+                        duration = get_column_value(row, df, [duration_col])
+                        if duration and duration.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_employment_duration'] = duration
                     
-                    # Employment type (for self-employment detection)
-                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
-                        company_name = str(row['Current Company Name']).strip()
-                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
-                            # Check if it's self-employment based on company name patterns
-                            company_lower = company_name.lower()
-                            if any(keyword in company_lower for keyword in ['self', 'freelance', 'independent', 'own', 'personal']):
-                                tracker_data_kwargs['q_employment_type'] = 'self-employed'
-                            else:
-                                tracker_data_kwargs['q_employment_type'] = 'employed by company'
+                    # Salary range - use flexible column matching (PRESERVE ORIGINAL FORMAT)
+                    salary_col = find_column(df, [
+                        'Current Salary range',
+                        'Current Salary Range',
+                        'Salary range',
+                        'Salary',
+                    ])
+                    if salary_col:
+                        # Get raw value to preserve original format (e.g., "20,000 - 30,000")
+                        salary_raw = row.get(salary_col)
+                        if pd.notna(salary_raw) and salary_raw is not None:
+                            salary_range = str(salary_raw).strip()
+                            if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED (including format)
+                                tracker_data_kwargs['q_salary_range'] = salary_range
+                                print(f"DEBUG: Row {index + 2} - Set q_salary_range = '{salary_range}' (preserved original format)")
+                    
+                    # Awards recognition - use flexible column matching
+                    awards_col = find_column(df, [
+                        'Have you received any awards or recognition during your employment?',
+                        'Awards recognition',
+                        'Awards',
+                        'awards',
+                    ])
+                    if awards_col:
+                        awards = get_column_value(row, df, [awards_col])
+                        print(f"DEBUG: Row {index + 2} - Awards column '{awards_col}' = '{awards}'")
+                        if awards:
+                            tracker_data_kwargs['q_awards_received'] = awards
+                            print(f"DEBUG: Row {index + 2} - Set q_awards_received = '{awards}'")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Have you received any awards or recognition during your employment?' column")
+                    
+                    # Employment scope - use flexible column matching
+                    scope_col = find_column(df, [
+                        'Employment Scope',
+                        'Scope',
+                    ])
+                    if scope_col:
+                        scope = get_column_value(row, df, [scope_col])
+                        if scope and scope.lower() not in ['n/a', 'na', '']:
+                            tracker_data_kwargs['q_scope_current'] = scope
+                    
+                    # Reason for unemployment - use flexible column matching
+                    reason_col = find_column(df, [
+                        'Reason for unemployment',
+                        'Unemployment reason',
+                        'Reason',
+                        'reason for unemployment',
+                    ])
+                    if reason_col:
+                        reason = get_column_value(row, df, [reason_col])
+                        print(f"DEBUG: Row {index + 2} - Unemployment reason column '{reason_col}' = '{reason}'")
+                        if reason:
+                            # Store as JSON array if multiple reasons, otherwise as single item
+                            tracker_data_kwargs['q_unemployment_reason'] = [reason] if reason else []
+                            print(f"DEBUG: Row {index + 2} - Set q_unemployment_reason = {tracker_data_kwargs['q_unemployment_reason']}")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - Could not find 'Reason for unemployment' column")
+                    
+                    # Debug: Print summary of tracker data before saving
+                    print(f"DEBUG: Row {index + 2} - TrackerData summary:")
+                    print(f"  - q_employment_status: {tracker_data_kwargs.get('q_employment_status', 'NOT SET')}")
+                    print(f"  - q_employment_type: {tracker_data_kwargs.get('q_employment_type', 'NOT SET')}")
+                    print(f"  - q_company_name: {tracker_data_kwargs.get('q_company_name', 'NOT SET')}")
+                    print(f"  - q_current_position: {tracker_data_kwargs.get('q_current_position', 'NOT SET')}")
+                    print(f"  - q_awards_received: {tracker_data_kwargs.get('q_awards_received', 'NOT SET')}")
+                    print(f"  - q_unemployment_reason: {tracker_data_kwargs.get('q_unemployment_reason', 'NOT SET')}")
                     
                     # Create TrackerData record with all extracted data
                     TrackerData.objects.create(**tracker_data_kwargs)
                     
+                    # CRITICAL FIX: Create TrackerResponse record so imported alumni are marked as "responded"
+                    # The frontend checks TrackerResponse to determine if a user has responded to the tracker
+                    # Only create TrackerResponse if we have actual tracker data (not just pending status)
+                    has_tracker_data = (
+                        tracker_data_kwargs.get('q_employment_status') and 
+                        tracker_data_kwargs.get('q_employment_status', '').lower() != 'pending'
+                    ) or any([
+                        tracker_data_kwargs.get('q_employment_type'),
+                        tracker_data_kwargs.get('q_company_name'),
+                        tracker_data_kwargs.get('q_current_position'),
+                        tracker_data_kwargs.get('q_sector_current'),
+                        tracker_data_kwargs.get('q_salary_range'),
+                        tracker_data_kwargs.get('q_awards_received'),
+                        tracker_data_kwargs.get('q_unemployment_reason'),
+                    ])
+                    
+                    if has_tracker_data:
+                        from apps.shared.models import TrackerResponse
+                        # Use get_or_create to avoid unique constraint violation
+                        # Map TrackerData fields to question IDs (based on standard tracker form structure)
+                        tracker_answers = {}
+                        
+                        # Map employment status (if available)
+                        if tracker_data_kwargs.get('q_employment_status'):
+                            # Question 22: Are you PRESENTLY employed?
+                            emp_status = tracker_data_kwargs.get('q_employment_status', '').lower()
+                            if emp_status == 'yes':
+                                tracker_answers['22'] = 'Yes'
+                            elif emp_status == 'no':
+                                tracker_answers['22'] = 'No'
+                        
+                        # Map employment type (if available)
+                        if tracker_data_kwargs.get('q_employment_type'):
+                            # Question 23: Are you employed by a company/organization or are you self employed?
+                            tracker_answers['23'] = tracker_data_kwargs.get('q_employment_type')
+                        
+                        # Map company name (if available)
+                        if tracker_data_kwargs.get('q_company_name'):
+                            # Question 25: Current Company Name
+                            tracker_answers['25'] = tracker_data_kwargs.get('q_company_name')
+                        
+                        # Map current position (if available)
+                        if tracker_data_kwargs.get('q_current_position'):
+                            # Question 26: Current Position
+                            tracker_answers['26'] = tracker_data_kwargs.get('q_current_position')
+                        
+                        # Map sector (if available)
+                        if tracker_data_kwargs.get('q_sector_current'):
+                            # Question 27: Current Sector
+                            tracker_answers['27'] = tracker_data_kwargs.get('q_sector_current')
+                        
+                        # Map salary range (if available)
+                        if tracker_data_kwargs.get('q_salary_range'):
+                            # Question 30: Salary Range
+                            tracker_answers['30'] = tracker_data_kwargs.get('q_salary_range')
+                        
+                        # Map awards (if available)
+                        if tracker_data_kwargs.get('q_awards_received'):
+                            # Question 31: Awards Received
+                            tracker_answers['31'] = tracker_data_kwargs.get('q_awards_received')
+                        
+                        # Map unemployment reason (if available)
+                        if tracker_data_kwargs.get('q_unemployment_reason'):
+                            # Question 34: Reason for unemployment
+                            unemployment_reason = tracker_data_kwargs.get('q_unemployment_reason')
+                            if isinstance(unemployment_reason, list):
+                                tracker_answers['34'] = unemployment_reason[0] if unemployment_reason else ''
+                            else:
+                                tracker_answers['34'] = str(unemployment_reason)
+                        
+                        # Create or update TrackerResponse to mark user as having responded
+                        tracker_response, created = TrackerResponse.objects.get_or_create(
+                            user=user,
+                            defaults={
+                                'answers': tracker_answers,
+                                'submitted_at': timezone.now(),
+                                'is_draft': False  # Mark as final submission, not draft
+                            }
+                        )
+                        
+                        if not created:
+                            # Update existing TrackerResponse to mark as final submission
+                            tracker_response.answers = tracker_answers
+                            tracker_response.is_draft = False
+                            tracker_response.submitted_at = timezone.now()
+                            tracker_response.save()
+                            print(f"DEBUG: Row {index + 2} - Updated existing TrackerResponse to mark user as having responded")
+                        else:
+                            print(f"DEBUG: Row {index + 2} - Created TrackerResponse to mark user as having responded")
+                    else:
+                        print(f"DEBUG: Row {index + 2} - No tracker data to create TrackerResponse (only pending status or empty)")
+                    
                     # Create EmploymentHistory record for statistics (CHED, SUC, AACUP)
+                    # IMPORTANT: This is what the table displays, so we must populate position_current and salary_current
                     employment_kwargs = {
                         'user': user,
                         'job_alignment_status': 'not_aligned',  # Default
@@ -1201,33 +1694,138 @@ def import_alumni_view(request):
                         'absorbed': False,  # Default
                     }
                     
-                    # Map TrackerData fields to EmploymentHistory fields
-                    if 'Current Company Name' in df.columns and pd.notna(row.get('Current Company Name')):
-                        company_name = str(row['Current Company Name']).strip()
-                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
-                            employment_kwargs['company_name_current'] = company_name
+                    # CRITICAL: Copy position and salary from TrackerData to EmploymentHistory for table display
+                    # This ensures the table can show the data even if it's only in TrackerData
+                    if tracker_data_kwargs.get('q_current_position'):
+                        employment_kwargs['position_current'] = tracker_data_kwargs['q_current_position']
+                        print(f"DEBUG: Row {index + 2} - Copied q_current_position to EmploymentHistory: '{tracker_data_kwargs['q_current_position']}'")
+                    if tracker_data_kwargs.get('q_salary_range'):
+                        employment_kwargs['salary_current'] = tracker_data_kwargs['q_salary_range']
+                        print(f"DEBUG: Row {index + 2} - Copied q_salary_range to EmploymentHistory: '{tracker_data_kwargs['q_salary_range']}'")
+                    if tracker_data_kwargs.get('q_company_name'):
+                        employment_kwargs['company_name_current'] = tracker_data_kwargs['q_company_name']
+                    if tracker_data_kwargs.get('q_sector_current'):
+                        employment_kwargs['sector_current'] = tracker_data_kwargs['q_sector_current']
                     
-                    if 'Current Position' in df.columns and pd.notna(row.get('Current Position')):
-                        position = str(row['Current Position']).strip()
-                        if position and position.lower() not in ['n/a', 'na', '']:
-                            employment_kwargs['position_current'] = position
+                    # First employer after graduation fields - use flexible column matching
+                    first_employer_col = find_column(df, [
+                        'Name of your organization/employer (1st employer right after graduation)',
+                        '1st employer',
+                        'First employer',
+                    ])
+                    if first_employer_col:
+                        first_employer = get_column_value(row, df, [first_employer_col])
+                        if first_employer and first_employer.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['company_name_current'] = first_employer
                     
-                    if 'Current Sector of your Job' in df.columns and pd.notna(row.get('Current Sector of your Job')):
-                        sector = str(row['Current Sector of your Job']).strip()
-                        if sector and sector.lower() not in ['n/a', 'na', '']:
-                            # Use the same normalization as TrackerData
-                            sector_lower = sector.lower()
+                    date_hired_col = find_column(df, [
+                        'Date Hired (1st employer right after graduation)',
+                        'Date Hired',
+                    ])
+                    if date_hired_col and pd.notna(row.get(date_hired_col)):
+                        try:
+                            date_hired = pd.to_datetime(row[date_hired_col], errors='coerce').date()
+                            if date_hired:
+                                employment_kwargs['date_started'] = date_hired
+                        except Exception as e:
+                            print(f"DEBUG: Error parsing Date Hired for {ctu_id}: {e}")
+                    
+                    first_position_col = find_column(df, [
+                        'Position (1st employer right after graduation) N/A if not applicable',
+                        'Position (1st employer',
+                        'First employer position',
+                    ])
+                    if first_position_col:
+                        first_position = get_column_value(row, df, [first_position_col])
+                        if first_position and first_position.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['position_current'] = first_position
+                    
+                    company_addr_col = find_column(df, [
+                        'Company Address (1st employer right after graduation)',
+                        'Company Address',
+                    ])
+                    if company_addr_col:
+                        company_addr = get_column_value(row, df, [company_addr_col])
+                        if company_addr and company_addr.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['company_address'] = company_addr
+                    
+                    first_sector_col = find_column(df, [
+                        'Sector (1st employer right after graduation)',
+                        'Sector (1st employer',
+                        'First employer sector',
+                    ])
+                    if first_sector_col:
+                        first_sector = get_column_value(row, df, [first_sector_col])
+                        if first_sector and first_sector.lower() not in ['n/a', 'na', '']:
+                            sector_lower = first_sector.lower()
                             if sector_lower in ['government', 'public']:
                                 employment_kwargs['sector_current'] = 'government'
                             elif sector_lower == 'private':
                                 employment_kwargs['sector_current'] = 'private'
                             else:
-                                employment_kwargs['sector_current'] = sector
+                                employment_kwargs['sector_current'] = first_sector
                     
-                    if 'Current Salary Range' in df.columns and pd.notna(row.get('Current Salary Range')):
-                        salary_range = str(row['Current Salary Range']).strip()
-                        if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
-                            employment_kwargs['salary_current'] = salary_range
+                    # Current employment fields (override first employer if present) - use flexible column matching
+                    # IMPORTANT: These must match TrackerData values for consistency
+                    # NOTE: We already copied from TrackerData above, but we'll override if Excel has current employment data
+                    if company_col:  # Reuse company_col from above
+                        company_name = get_column_value(row, df, [company_col])
+                        if company_name and company_name.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['company_name_current'] = company_name
+                    
+                    if position_col:  # Reuse position_col from above
+                        position = get_column_value(row, df, [position_col])
+                        if position and position.lower() not in ['n/a', 'na', '']:
+                            # Override with current position if provided
+                            employment_kwargs['position_current'] = position
+                            print(f"DEBUG: Row {index + 2} - Set EmploymentHistory.position_current from Excel = '{position}'")
+                    
+                    if sector_col:  # Reuse sector_col from above
+                        # Get raw value to preserve original
+                        sector_raw = row.get(sector_col)
+                        if pd.notna(sector_raw) and sector_raw is not None:
+                            sector = str(sector_raw).strip()
+                            if sector and sector.lower() not in ['n/a', 'na', '']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED
+                                employment_kwargs['sector_current'] = sector
+                                print(f"DEBUG: Row {index + 2} - Set EmploymentHistory.sector_current = '{sector}' (preserved original)")
+                    
+                    if duration_col:  # Reuse duration_col from above
+                        duration = get_column_value(row, df, [duration_col])
+                        if duration and duration.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['employment_duration_current'] = duration
+                    
+                    if salary_col:  # Reuse salary_col from above
+                        # Get raw value to preserve original format (e.g., "20,000 - 30,000")
+                        salary_raw = row.get(salary_col)
+                        if pd.notna(salary_raw) and salary_raw is not None:
+                            salary_range = str(salary_raw).strip()
+                            if salary_range and salary_range.lower() not in ['n/a', 'na', '']:
+                                # PRESERVE ORIGINAL VALUE EXACTLY AS ENTERED (including format)
+                                employment_kwargs['salary_current'] = salary_range
+                                print(f"DEBUG: Row {index + 2} - Set EmploymentHistory.salary_current from Excel = '{salary_range}' (preserved original)")
+                    
+                    if awards_col:  # Reuse awards_col from above
+                        awards = get_column_value(row, df, [awards_col])
+                        if awards and awards.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['awards_recognition_current'] = awards
+                    
+                    if scope_col:  # Reuse scope_col from above
+                        scope = get_column_value(row, df, [scope_col])
+                        if scope and scope.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['scope_current'] = scope
+                    
+                    if reason_col:  # Reuse reason_col from above
+                        reason = get_column_value(row, df, [reason_col])
+                        if reason and reason.lower() not in ['n/a', 'na', '']:
+                            employment_kwargs['unemployment_reason'] = reason
+                    
+                    # Debug: Print summary of EmploymentHistory before saving
+                    print(f"DEBUG: Row {index + 2} - EmploymentHistory summary:")
+                    print(f"  - position_current: {employment_kwargs.get('position_current', 'NOT SET')}")
+                    print(f"  - salary_current: {employment_kwargs.get('salary_current', 'NOT SET')}")
+                    print(f"  - company_name_current: {employment_kwargs.get('company_name_current', 'NOT SET')}")
+                    print(f"  - sector_current: {employment_kwargs.get('sector_current', 'NOT SET')}")
                     
                     # Determine job alignment based on employment status and position
                     if tracker_data_kwargs.get('q_employment_status') == 'yes':
@@ -9535,8 +10133,8 @@ def users_alumni_view(request):
     try:
         year = request.GET.get('year', '').strip()
         
-        # Base query for alumni
-        alumni_qs = User.objects.filter(account_type__user=True).select_related('academic_info', 'profile')
+        # Base query for alumni - include employment relationship
+        alumni_qs = User.objects.filter(account_type__user=True).select_related('academic_info', 'profile', 'employment')
         
         # Filter by year if provided
         if year and year.isdigit():
@@ -9545,12 +10143,26 @@ def users_alumni_view(request):
         alumni_data = []
         for a in alumni_qs:
             try:
-                # Get employment data from tracker responses, not OJT data
+                # Get employment data - check EmploymentHistory first, then TrackerData
                 employment_status = 'Pending'  # Default status
-                current_position = 'Not disclosed'
-                current_salary = 'Not disclosed'
+                current_position = None
+                current_salary = None
                 
-                # Try to get employment data from tracker responses
+                # STEP 1: Check EmploymentHistory model first (most up-to-date)
+                try:
+                    employment = getattr(a, 'employment', None)
+                    if employment:
+                        # Get position from EmploymentHistory
+                        if hasattr(employment, 'position_current') and employment.position_current:
+                            current_position = employment.position_current
+                        
+                        # Get salary from EmploymentHistory
+                        if hasattr(employment, 'salary_current') and employment.salary_current:
+                            current_salary = employment.salary_current
+                except Exception:
+                    pass
+                
+                # STEP 2: Check TrackerData model if EmploymentHistory doesn't have the data
                 try:
                     from apps.shared.models import TrackerData
                     tracker_data = TrackerData.objects.filter(user=a).order_by('-tracker_submitted_at').first()
@@ -9564,15 +10176,21 @@ def users_alumni_view(request):
                             else:
                                 employment_status = 'Pending'
                         
-                        # Get current position from tracker
-                        if hasattr(tracker_data, 'q_current_position') and tracker_data.q_current_position:
+                        # Get current position from tracker if not already set from EmploymentHistory
+                        if not current_position and hasattr(tracker_data, 'q_current_position') and tracker_data.q_current_position:
                             current_position = tracker_data.q_current_position
                         
-                        # Get current salary from tracker
-                        if hasattr(tracker_data, 'q_salary_range') and tracker_data.q_salary_range:
+                        # Get current salary from tracker if not already set from EmploymentHistory
+                        if not current_salary and hasattr(tracker_data, 'q_salary_range') and tracker_data.q_salary_range:
                             current_salary = tracker_data.q_salary_range
                 except Exception:
                     pass  # Use defaults if tracker data not available
+                
+                # Set defaults if still no data
+                if not current_position:
+                    current_position = 'Not specified'
+                if not current_salary:
+                    current_salary = 'Not disclosed'
                 
                 alumni_data.append({
                     'id': a.user_id,
