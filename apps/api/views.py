@@ -6378,11 +6378,32 @@ def check_employment_update_reminder(request, user_id):
             })
         
         # Check if tracker was submitted
+        # If tracker_submitted_at is not set, try to get it from TrackerResponse
+        # This handles users who submitted before tracker_submitted_at was being set
         if not tracker_data.tracker_submitted_at:
-            return JsonResponse({
-                'should_show_reminder': False,
-                'reason': 'tracker_not_submitted'
-            })
+            from apps.shared.models import TrackerResponse
+            try:
+                tracker_response = TrackerResponse.objects.filter(
+                    user=user, 
+                    is_draft=False
+                ).order_by('-submitted_at').first()
+                
+                if tracker_response and tracker_response.submitted_at:
+                    # Set tracker_submitted_at from TrackerResponse for backward compatibility
+                    tracker_data.tracker_submitted_at = tracker_response.submitted_at
+                    tracker_data.save()
+                    print(f"🔧 Fixed tracker_submitted_at for user {user_id} from TrackerResponse")
+                else:
+                    return JsonResponse({
+                        'should_show_reminder': False,
+                        'reason': 'tracker_not_submitted'
+                    })
+            except Exception as e:
+                print(f"⚠️ Error checking TrackerResponse for user {user_id}: {e}")
+                return JsonResponse({
+                    'should_show_reminder': False,
+                    'reason': 'tracker_not_submitted'
+                })
         
         # Check if Part III data exists (employment data)
         has_part_iii_data = (
@@ -6400,9 +6421,9 @@ def check_employment_update_reminder(request, user_id):
         # Calculate time since last tracker submission
         time_since_submission = timezone.now() - tracker_data.tracker_submitted_at
         
-        # FOR TESTING: 2 minutes (120 seconds)
-        # FOR PRODUCTION: Change to 180 days (6 months)
-        reminder_threshold = timedelta(minutes=2)  # Change to days=180 for production
+        # FOR TESTING: 0 seconds (show immediately after submission)
+        # FOR PRODUCTION: Change to 180 days (6 months) - use: timedelta(days=180)
+        reminder_threshold = timedelta(seconds=0)  # Show immediately for testing
         
         should_show = time_since_submission >= reminder_threshold
         
@@ -13397,6 +13418,16 @@ def inventory_items_view(request):
                 status=400
             )
 
+        # Prevent duplicate names (case-insensitive)
+        if RewardInventoryItem.objects.filter(name__iexact=name).exists():
+            return JsonResponse(
+                {
+                    'success': False,
+                    'message': f'An inventory item named "{name}" already exists. Please update its stock instead of creating a duplicate.'
+                },
+                status=400
+            )
+
         item = RewardInventoryItem.objects.create(
             name=name,
             type=item_type,
@@ -13641,7 +13672,24 @@ def inventory_item_detail_view(request, item_id):
         save_fields = set()
 
         if 'name' in data and data['name'] is not None:
-            item.name = str(data['name']).strip()
+            new_name = str(data['name']).strip()
+            if not new_name:
+                return JsonResponse(
+                    {'success': False, 'message': 'Name cannot be empty'},
+                    status=400
+                )
+            duplicate_exists = RewardInventoryItem.objects.filter(
+                name__iexact=new_name
+            ).exclude(pk=item.pk).exists()
+            if duplicate_exists:
+                return JsonResponse(
+                    {
+                        'success': False,
+                        'message': f'Another inventory item named "{new_name}" already exists'
+                    },
+                    status=400
+                )
+            item.name = new_name
             updated_fields.append('name')
             save_fields.add('name')
 
@@ -14122,82 +14170,164 @@ def get_business_days_after(start_date, days):
     return result_datetime
 
 
+def _auto_claim_gcash_reward(reward_request, admin_user):
+    """
+    Automatically fulfill a gcash reward request by deducting points, updating inventory,
+    and creating a reward history entry. Must be executed inside a transaction.
+    """
+    try:
+        if not reward_request.reward_item:
+            raise DjangoValidationError('Cannot process reward: the inventory item no longer exists.')
+
+        # Reuse the same safe logic as claim_reward_request_view
+        reward_item = reward_request.reward_item
+
+        if reward_item.quantity <= 0:
+            raise DjangoValidationError('Reward item is out of stock. Please restock before approving.')
+
+        user_points, _ = UserPoints.objects.get_or_create(user=reward_request.user)
+        if user_points.total_points < reward_request.points_cost:
+            raise DjangoValidationError(
+                f'{reward_request.user.full_name} no longer has enough points for this reward. '
+                f'Required: {reward_request.points_cost}, Available: {user_points.total_points}'
+            )
+
+        user_points.total_points -= reward_request.points_cost
+        user_points.save()
+
+        reward_item.quantity -= 1
+        reward_item.save()
+
+        reward_request.status = 'claimed'
+        reward_request.expires_at = None
+        reward_request.save()
+
+        reward_history = RewardHistory.objects.create(
+            user=reward_request.user,
+            reward_name=reward_item.name,
+            reward_type=reward_item.type,
+            reward_value=reward_item.value,
+            points_deducted=reward_request.points_cost,
+            given_by=reward_request.approved_by or admin_user
+        )
+
+        logger.info(
+            f'Auto-claimed gcash reward request {reward_request.request_id} for '
+            f'{reward_request.user.full_name}; history_id={reward_history.history_id}'
+        )
+
+        return {
+            'history_id': reward_history.history_id,
+            'remaining_points': user_points.total_points,
+            'points_deducted': reward_request.points_cost,
+        }
+    except RewardInventoryItem.DoesNotExist:
+        logger.error(
+            'Auto-claim failed for reward request %s: inventory item %s not found.',
+            reward_request.request_id,
+            getattr(reward_request.reward_item, "item_id", None),
+        )
+        raise DjangoValidationError('Cannot process reward: the inventory item was not found in inventory.')
+    except UserPoints.DoesNotExist:
+        logger.error(
+            'Auto-claim failed for reward request %s: UserPoints row missing for user %s.',
+            reward_request.request_id,
+            reward_request.user_id,
+        )
+        raise DjangoValidationError('Cannot process reward: points record for user is missing.')
+    except DjangoValidationError:
+        # Re-raise validation errors as-is so outer handler can convert to 400
+        raise
+    except Exception as e:
+        logger.error(f'Unexpected error during auto-claim for reward request {reward_request.request_id}: {e}')
+        raise DjangoValidationError('An unexpected error occurred while auto-claiming this GCash reward.')
+
+
 @api_view(['POST'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_reward_request_view(request, request_id):
     """
-    Admin approves a reward request
-    Admin can add instructions/notes on how to claim
-    For gcash: admin uploads receipt image as proof of payment
-    For merchandise: marks as ready for pickup
-    Status changes to 'approved' but points/inventory NOT deducted yet
+    Admin approves a reward request.
+    Gcash rewards are fulfilled automatically (points deducted + history entry) after approval.
+    Merchandise rewards are marked as ready for pickup for manual release.
     """
     try:
-        # Check if user is admin
         admin_user = request.user
         if not hasattr(admin_user, 'account_type') or not admin_user.account_type.admin:
-            return JsonResponse({
-                'success': False,
-                'message': 'Admin access required'
-            }, status=403)
-        
-        # Get reward request
-        try:
-            reward_request = RewardRequest.objects.get(request_id=request_id)
-        except RewardRequest.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'message': 'Reward request not found'
-            }, status=404)
-        
-        if reward_request.status != 'pending':
-            return JsonResponse({
-                'success': False,
-                'message': f'Request is already {reward_request.status}'
-            }, status=400)
-        
-        # SENIOR-LEVEL FIX: Check if reward item was deleted
-        if not reward_request.reward_item:
-            return JsonResponse({
-                'success': False,
-                'message': 'Cannot approve request: The reward item has been deleted from inventory. Please contact admin.'
-            }, status=400)
-        
-        # Handle both JSON and form data (for file uploads)
+            return JsonResponse(
+                {'success': False, 'message': 'Admin access required'},
+                status=403
+            )
+
+        # Handle both JSON and multipart bodies up front
         if request.content_type and 'multipart/form-data' in request.content_type:
-            # Form data with file upload
             notes = request.POST.get('notes') or request.POST.get('instructions')
             gcash_receipt = request.FILES.get('gcash_receipt')
         else:
-            # JSON data
             data = json.loads(request.body) if request.body else {}
             notes = data.get('notes') or data.get('instructions')
             gcash_receipt = None
-        
-        is_gcash = reward_request.reward_item.type.lower() in ['gcash', 'gift card', 'giftcard', 'coupon']
-        is_merchandise = reward_request.reward_item.type.lower() in ['merchandise', 'merch', 'item', 'product']
-        
-        # Update request status to 'approved' (ready for user to claim)
-        reward_request.status = 'approved' if is_gcash else 'ready_for_pickup'
-        reward_request.approved_at = timezone.now()
-        reward_request.approved_by = admin_user
-        
-        # Handle gcash - upload receipt image
-        if is_gcash:
-            approval_date = timezone.now()
-            reward_request.expires_at = get_business_days_after(approval_date, 1)
-            
-            # Handle gcash receipt upload
-            if gcash_receipt:
+
+        auto_claim_result = None
+        is_gcash = False
+        is_merchandise = False
+
+        with transaction.atomic():
+            try:
+                # Lock only the RewardRequest row to avoid FOR UPDATE on outer joins.
+                # Related objects (reward_item, user) will be fetched lazily without locking joins.
+                reward_request = (
+                    RewardRequest.objects
+                    .select_for_update()
+                    .get(request_id=request_id)
+                )
+            except RewardRequest.DoesNotExist:
+                return JsonResponse(
+                    {'success': False, 'message': 'Reward request not found'},
+                    status=404
+                )
+
+            if reward_request.status != 'pending':
+                return JsonResponse(
+                    {'success': False, 'message': f'Request is already {reward_request.status}'},
+                    status=400
+                )
+
+            if not reward_request.reward_item:
+                return JsonResponse(
+                    {
+                        'success': False,
+                        'message': 'Cannot approve request: The reward item has been deleted from inventory. Please contact admin.'
+                    },
+                    status=400
+                )
+
+            reward_type = reward_request.reward_item.type.lower()
+            is_gcash = reward_type in ['gcash', 'gift card', 'giftcard', 'coupon']
+            is_merchandise = reward_type in ['merchandise', 'merch', 'item', 'product']
+
+            reward_request.status = 'approved' if is_gcash else 'ready_for_pickup'
+            reward_request.approved_at = timezone.now()
+            reward_request.approved_by = admin_user
+
+            if is_gcash:
+                if not gcash_receipt:
+                    raise DjangoValidationError('GCash receipt image is required to approve this reward request.')
+                reward_request.expires_at = None
                 reward_request.gcash_receipt = gcash_receipt
-        
-        # Admin can add instructions/notes on how to claim
-        if notes:
-            reward_request.notes = notes
-        
-        reward_request.save()
-        
+            elif gcash_receipt:
+                # Prevent accidental uploads on non-gcash rewards
+                logger.warning(f"gcash_receipt uploaded for non-gcash reward request {request_id}; ignoring file.")
+
+            if notes:
+                reward_request.notes = notes
+
+            reward_request.save()
+
+            if is_gcash:
+                auto_claim_result = _auto_claim_gcash_reward(reward_request, admin_user)
+
         # Get admin profile picture for notification
         admin_profile_pic = None
         try:
@@ -14206,62 +14336,74 @@ def approve_reward_request_view(request, request_id):
                 admin_profile_pic = admin_profile.profile_pic.url
         except Exception as e:
             logger.warning(f"Error getting admin profile pic for notification: {e}")
-        
-        # Create notification for user (with instructions if provided)
-        notification_content = f'Your request for "{reward_request.reward_item.name}" has been {"approved" if is_gcash else "processed"}. '
+
+        if is_gcash:
+            notification_content = (
+                f'Your request for "{reward_request.reward_item.name}" has been approved and paid out automatically. '
+                'No further action is needed on your end. '
+            )
+            if auto_claim_result:
+                notification_content += (
+                    f'{auto_claim_result["points_deducted"]} points were deducted and the reward was saved to your history. '
+                )
+            if reward_request.gcash_receipt:
+                notification_content += 'A payment receipt is available for viewing. '
+        else:
+            notification_content = (
+                f'Your request for "{reward_request.reward_item.name}" has been processed. '
+                'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office. '
+            )
+
         if notes:
             notification_content += f'\n\nInstructions: {notes}\n\n'
-        if is_gcash and reward_request.gcash_receipt:
-            notification_content += 'Payment receipt is available for viewing. '
-        if is_gcash:
-            notification_content += f'Please claim it within 5 business days (expires: {reward_request.expires_at.strftime("%Y-%m-%d")}). Click "Claim" to redeem your reward.'
-        else:
-            notification_content += 'Your merchandise is ready for pickup. An admin will release it when you collect it in person at the CTU office.'
-        
-        # Add admin info to notification content for profile picture display
+
         notification_content += f'<!--AUTHOR_ID:{admin_user.user_id}-->'
         notification_content += f'<!--AUTHOR_NAME:{admin_user.full_name}-->'
         if admin_profile_pic:
             notification_content += f'<!--AUTHOR_PIC:{admin_profile_pic}-->'
-        # Add reward request ID for direct navigation to reward details
         notification_content += f'<!--REQUEST_ID:{request_id}-->'
-        
+
         notification = Notification.objects.create(
             user=reward_request.user,
             notif_type='Reward',
-            subject=f'🎁 Your reward request has been {"approved" if is_gcash else "processed"}!',
+            subject='🎉 Your GCash reward has been sent!' if is_gcash else '🎁 Your reward request has been processed!',
             notifi_content=notification_content,
             notif_date=timezone.now(),
             is_read=False
         )
-        
-        # Broadcast notification
+
         try:
             from apps.messaging.notification_broadcaster import broadcast_notification
             broadcast_notification(notification)
         except Exception as e:
             logger.error(f"Error broadcasting notification: {e}")
-        
-        logger.info(f"Admin {admin_user.full_name} approved reward request {request_id} for {reward_request.user.full_name}")
-        
-        return JsonResponse({
+
+        logger.info(
+            f"Admin {admin_user.full_name} approved reward request {request_id} "
+            f"for {reward_request.user.full_name} (auto_claim={bool(auto_claim_result)})"
+        )
+
+        response_payload = {
             'success': True,
-            'message': f'Reward request {"approved" if is_gcash else "marked as ready for pickup"}. User will receive notification with instructions.',
             'status': reward_request.status,
-            'expires_at': reward_request.expires_at.isoformat() if reward_request.expires_at else None
-        })
-    
+            'expires_at': reward_request.expires_at.isoformat() if reward_request.expires_at else None,
+            'auto_claimed': bool(auto_claim_result),
+            'message': 'Reward request approved and fulfilled automatically.' if is_gcash else
+                       'Reward request marked as ready for pickup. User notified.',
+        }
+
+        if auto_claim_result:
+            response_payload.update(auto_claim_result)
+
+        return JsonResponse(response_payload)
+
     except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data'
-        }, status=400)
+        return JsonResponse({'success': False, 'message': 'Invalid JSON data'}, status=400)
+    except DjangoValidationError as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=400)
     except Exception as e:
         logger.error(f"approve_reward_request_view error: {e}")
-        return JsonResponse({
-            'success': False,
-            'message': f'Error: {str(e)}'
-        }, status=500)
+        return JsonResponse({'success': False, 'message': f'Error: {str(e)}'}, status=500)
 
 
 @api_view(['POST'])
@@ -14317,18 +14459,18 @@ def claim_reward_request_view(request, request_id):
                     'message': 'Unauthorized access'
                 }, status=403)
         
-        # Check if request is approved or ready for pickup
-        if reward_request.status not in ['approved', 'ready_for_pickup']:
-            return JsonResponse({
-                'success': False,
-                'message': f'Reward request is not ready to claim. Current status: {reward_request.status}'
-            }, status=400)
-        
         # Check if already claimed
         if reward_request.status == 'claimed':
             return JsonResponse({
                 'success': False,
                 'message': 'Reward has already been claimed'
+            }, status=400)
+
+        # Check if request is approved or ready for pickup
+        if reward_request.status not in ['approved', 'ready_for_pickup']:
+            return JsonResponse({
+                'success': False,
+                'message': f'Reward request is not ready to claim. Current status: {reward_request.status}'
             }, status=400)
         
         # Check if expired (for vouchers)

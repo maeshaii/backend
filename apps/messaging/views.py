@@ -93,12 +93,17 @@ class ConversationListView(generics.ListCreateAPIView):
                 
                 # Optimize queryset with select_related and prefetch_related
                 # FIX: Removed empty select_related() and optimized prefetch for participants with nested data
+                from django.db.models import Prefetch
                 queryset = Conversation.objects.filter(
                     participants=user
                 ).prefetch_related(
                     'participants__profile',  # Prefetch participant profiles
                     'participants__academic_info',  # Prefetch academic info
-                    'messages__sender',
+                    Prefetch(
+                        'messages',
+                        queryset=Message.objects.select_related('sender', 'sender__profile').order_by('-created_at', '-message_id')[:1],
+                        to_attr='last_message_prefetch'
+                    ),
                     'messages__attachments'
                 ).distinct().order_by('-updated_at')
                 
@@ -146,16 +151,42 @@ class ConversationListView(generics.ListCreateAPIView):
         return ConversationSerializer
 
     def list(self, request, *args, **kwargs):
-        """Override list method to add error handling"""
+        """Override list method to add error handling and filter invalid conversations"""
         try:
             queryset = self.filter_queryset(self.get_queryset())
             page = self.paginate_queryset(queryset)
             if page is not None:
                 serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
+                # Filter out conversations with null other_participant
+                # EXCEPTION: Keep conversations where current user is the only participant (after other user deleted it)
+                filtered_data = []
+                for conv in serializer.data:
+                    other_participant = conv.get('other_participant')
+                    # If there's an other_participant, include it (normal case)
+                    if other_participant and other_participant.get('user_id'):
+                        filtered_data.append(conv)
+                    # If no other_participant but conversation has messages, include it (user deleted by other participant)
+                    elif conv.get('last_message') and conv.get('last_message', {}).get('content'):
+                        filtered_data.append(conv)
+                return self.get_paginated_response(filtered_data)
             
             serializer = self.get_serializer(queryset, many=True)
-            return Response(serializer.data)
+            # Filter out conversations with null other_participant
+            # EXCEPTION: Keep conversations where current user is the only participant (after other user deleted it)
+            # These conversations should still be visible to the remaining user
+            filtered_data = []
+            for conv in serializer.data:
+                other_participant = conv.get('other_participant')
+                # If there's an other_participant, include it (normal case)
+                if other_participant and other_participant.get('user_id'):
+                    filtered_data.append(conv)
+                # If no other_participant but conversation has messages, include it (user deleted by other participant)
+                # This allows the remaining user to still see the conversation
+                elif conv.get('last_message') and conv.get('last_message', {}).get('content'):
+                    # This is a valid conversation where the other participant was removed
+                    # We'll include it but mark other_participant as None (frontend should handle this)
+                    filtered_data.append(conv)
+            return Response(filtered_data)
         except Exception as e:
             logger.exception(f"Error in ConversationListView.list for user {request.user.user_id}: {str(e)}")
             return Response(
@@ -240,8 +271,46 @@ class MessageListView(generics.ListCreateAPIView):
             tracker.mark_stage('validation')
             
             # Determine receiver for 1:1 conversations to satisfy legacy non-null column
-            # FIX: Use prefetched participants
+            # FIX: Use prefetched participants, but if no other participant exists (user deleted conversation),
+            # try to find the receiver from message history
             receiver = conversation.participants.exclude(user_id=request.user.user_id).first()
+            logger.info(f"[MESSAGE_CREATE] Conversation {conversation_id} - Initial receiver from participants: {receiver.user_id if receiver else 'None'}")
+            
+            # CRITICAL FIX: If receiver is None (user deleted conversation), find from message history
+            # Use the same logic as ConversationSerializer.get_other_participant() for consistency
+            if not receiver:
+                logger.info(f"[MESSAGE_CREATE] Conversation {conversation_id} - No receiver in participants, searching message history...")
+                
+                # Method 1: Look for messages where current user is the sender, use receiver as other user
+                msg = Message.objects.filter(
+                    conversation_id=conversation_id,
+                    sender_id=request.user.user_id
+                ).exclude(receiver_id__isnull=True).select_related('receiver', 'receiver__profile').order_by('-created_at', '-message_id').first()
+                
+                if msg and msg.receiver_id and msg.receiver_id != request.user.user_id:
+                    receiver = msg.receiver
+                    logger.info(f"[MESSAGE_CREATE] Conversation {conversation_id} - Found receiver from message where current user was sender: {receiver.user_id}")
+                else:
+                    # Method 2: Look for messages where current user is the receiver, use sender as other user
+                    msg = Message.objects.filter(
+                        conversation_id=conversation_id,
+                        receiver_id=request.user.user_id
+                    ).exclude(sender_id__isnull=True).select_related('sender', 'sender__profile').order_by('-created_at', '-message_id').first()
+                    
+                    if msg and msg.sender_id and msg.sender_id != request.user.user_id:
+                        receiver = msg.sender
+                        logger.info(f"[MESSAGE_CREATE] Conversation {conversation_id} - Found receiver from message where current user was receiver: {receiver.user_id}")
+                    else:
+                        # Method 3: Fallback - any message in this conversation with a different sender
+                        msg = Message.objects.filter(
+                            conversation_id=conversation_id
+                        ).exclude(sender_id=request.user.user_id).select_related('sender', 'sender__profile').order_by('-created_at', '-message_id').first()
+                        
+                        if msg and msg.sender:
+                            receiver = msg.sender
+                            logger.info(f"[MESSAGE_CREATE] Conversation {conversation_id} - Found receiver from any message with different sender: {receiver.user_id}")
+                        else:
+                            logger.error(f"[MESSAGE_CREATE] Conversation {conversation_id} - Could not find receiver from message history!")
             
             # Convert message request to regular conversation only if the non-initiator replies
             if conversation.is_message_request:
@@ -376,6 +445,41 @@ class MessageListView(generics.ListCreateAPIView):
                 }
             )
             logger.info("WebSocket message %s broadcast successful", message.message_id)
+            
+            # CRITICAL FIX: Also send message to receiver's notification channel if they're not a participant
+            # This handles the case where the receiver deleted the conversation but should still receive messages
+            # The receiver should already be found from the earlier check (lines 279-297), but verify it exists
+            actual_receiver = receiver
+            
+            logger.info(f"[WebSocket] Message {message.message_id} - Receiver: {actual_receiver.user_id if actual_receiver else 'None'}, Sender: {request.user.user_id}")
+            
+            # Send to notification channel if receiver exists and is not a participant
+            if actual_receiver and actual_receiver.user_id != request.user.user_id:
+                # Check if receiver is still a participant (they might have deleted the conversation)
+                is_participant = conversation.participants.filter(user_id=actual_receiver.user_id).exists()
+                logger.info(f"[WebSocket] Message {message.message_id} - Receiver {actual_receiver.user_id} is participant: {is_participant}")
+                
+                if not is_participant:
+                    # Receiver deleted the conversation but should still receive the message
+                    # Send via their notification channel
+                    notification_group = f"notifications_{actual_receiver.user_id}"
+                    logger.info(f"[WebSocket] Sending message {message.message_id} to deleted user {actual_receiver.user_id} via notification channel: {notification_group}")
+                    try:
+                        async_to_sync(channel_layer.group_send)(
+                            notification_group,
+                            {
+                                'type': 'chat_message_notification',
+                                'message': message_data,
+                                'conversation_id': conversation.conversation_id
+                            }
+                        )
+                        logger.info(f"[WebSocket] SUCCESS: Message {message.message_id} sent to notification channel for user {actual_receiver.user_id}")
+                    except Exception as notif_error:
+                        logger.error(f"[WebSocket] ERROR: Failed to send message to notification channel for user {actual_receiver.user_id}: {notif_error}", exc_info=True)
+                else:
+                    logger.info(f"[WebSocket] Message {message.message_id} - Receiver {actual_receiver.user_id} is still a participant, no need for notification channel")
+            else:
+                logger.warning(f"[WebSocket] Message {message.message_id} - No valid receiver found (receiver={actual_receiver.user_id if actual_receiver else 'None'}, sender={request.user.user_id})")
         except Exception as e:
             logger.error(f"❌ [WebSocket] Failed to broadcast message {message.message_id}: {str(e)}")
             logger.exception(e)  # Log full traceback for debugging
@@ -604,33 +708,172 @@ def delete_conversation(request, conversation_id):
     If no other participants remain, the conversation is completely deleted.
     """
     try:
+        user = request.user
+        logger.info(f"[DELETE_CONVERSATION] START - User {user.user_id} deleting conversation {conversation_id}")
+        
         # Get conversation with access check
         conversation, error_response = get_conversation_with_access_check(conversation_id, request.user)
         if error_response:
+            logger.warning(f"[DELETE_CONVERSATION] Access denied for user {user.user_id} on conversation {conversation_id}")
             return error_response
         
-        user = request.user
+        # DEBUG: Get all participants BEFORE any operations
+        all_participants_before = list(conversation.participants.all())
+        all_participant_ids_before = [p.user_id for p in all_participants_before]
+        total_participants_before = len(all_participants_before)
+        
+        logger.info(f"[DELETE_CONVERSATION] STEP 1 - Before removal:")
+        logger.info(f"   - Total participants: {total_participants_before}")
+        logger.info(f"   - Participant IDs: {all_participant_ids_before}")
+        logger.info(f"   - Deleting user ID: {user.user_id}")
+
+        # Telegram-style behavior for 1-on-1 conversations:
+        # If there are exactly 2 participants, delete the entire conversation
+        # for BOTH users when either side deletes it.
+        if total_participants_before == 2:
+            conversation_id_for_log = conversation.conversation_id
+            other_participant_ids = [p.user_id for p in all_participants_before if p.user_id != user.user_id]
+
+            logger.info(
+                "[DELETE_CONVERSATION] 1-on-1: FULLY DELETING conversation %s for BOTH users (participants=%s)",
+                conversation_id_for_log,
+                all_participant_ids_before,
+            )
+
+            # Delete conversation and cascade all messages
+            conversation.delete()
+            fully_deleted = True
+
+            # Invalidate cache for both participants
+            try:
+                message_cache.invalidate_user_conversations(user.user_id)
+                logger.info("[DELETE_CONVERSATION] Invalidated cache for deleting user %s", user.user_id)
+            except Exception as e:
+                logger.warning(
+                    "[DELETE_CONVERSATION] Failed to invalidate message cache for user %s: %s",
+                    user.user_id,
+                    e,
+                )
+
+            for other_user_id in other_participant_ids:
+                try:
+                    message_cache.invalidate_user_conversations(other_user_id)
+                    logger.info(
+                        "[DELETE_CONVERSATION] Invalidated cache for other participant %s", other_user_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[DELETE_CONVERSATION] Failed to invalidate message cache for other participant %s: %s",
+                        other_user_id,
+                        e,
+                    )
+
+            logger.info(
+                "[DELETE_CONVERSATION] 1-on-1 delete complete for conversation %s (fully_deleted=True)",
+                conversation_id_for_log,
+            )
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Conversation deleted for both users",
+                    "conversation_id": conversation_id,
+                    "fully_deleted": fully_deleted,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Group conversations (3+ participants) follow the existing logic:
+        # remove the user from participants but keep the conversation.
+
+        # Get other participants BEFORE removing the user (needed for cache invalidation and notifications)
+        other_participants = [p for p in all_participants_before if p.user_id != user.user_id]
+        other_participant_ids = [p.user_id for p in other_participants]
+        has_other_participants = len(other_participants) > 0
+        
+        logger.info("[DELETE_CONVERSATION] STEP 2 - Other participants analysis:")
+        logger.info(f"   - Other participants count: {len(other_participants)}")
+        logger.info(f"   - Other participant IDs: {other_participant_ids}")
+        logger.info(f"   - Has other participants: {has_other_participants}")
         
         # Remove user from participants
+        logger.info(f"[DELETE_CONVERSATION] STEP 3 - Removing user {user.user_id} from participants...")
         conversation.participants.remove(user)
         
-        # Check if conversation has any remaining participants
-        remaining_participants = conversation.participants.count()
+        # CRITICAL FIX: refresh_from_db() doesn't refresh ManyToMany relationships
+        # Query the database directly to get accurate participant count and IDs after removal
+        # This ensures we get the real state, not cached ManyToMany data
+        logger.info(f"[DELETE_CONVERSATION] STEP 4 - Querying database for accurate participant count...")
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT user_id FROM shared_conversation_participants WHERE conversation_id = %s",
+                [conversation.conversation_id]
+            )
+            remaining_participant_ids_from_db = [row[0] for row in cursor.fetchall()]
+        
+        remaining_participants = len(remaining_participant_ids_from_db)
+        
+        # Get the actual remaining participants list using the IDs from database
+        remaining_participants_list = list(User.objects.filter(user_id__in=remaining_participant_ids_from_db))
+        remaining_participant_ids = [p.user_id for p in remaining_participants_list]
+        
+        logger.info(f"[DELETE_CONVERSATION] STEP 5 - After removal:")
+        logger.info(f"   - Remaining participants count: {remaining_participants}")
+        logger.info(f"   - Remaining participant IDs: {remaining_participant_ids}")
+        logger.info(f"   - Expected remaining IDs: {other_participant_ids}")
+        logger.info(f"   - Match check: {remaining_participant_ids == other_participant_ids}")
         
         conversation_id_for_log = conversation.conversation_id
         
-        if remaining_participants == 0:
+        # CRITICAL: Only delete if we confirmed there are no other participants
+        # Use both the pre-removal check AND post-removal count for safety
+        should_fully_delete = not has_other_participants and remaining_participants == 0
+        
+        logger.info("[DELETE_CONVERSATION] STEP 6 - Deletion decision:")
+        logger.info(f"   - has_other_participants: {has_other_participants}")
+        logger.info(f"   - remaining_participants == 0: {remaining_participants == 0}")
+        logger.info(f"   - should_fully_delete: {should_fully_delete}")
+
+        if should_fully_delete:
             # No participants left, delete the entire conversation
             # This will cascade delete all messages due to ForeignKey on_delete=CASCADE
+            logger.info(f"[DELETE_CONVERSATION] STEP 7 - FULLY DELETING conversation {conversation_id_for_log}")
+            logger.info(f"   - Reason: No participants remaining")
             conversation.delete()
-            logger.info(f"Conversation {conversation_id_for_log} fully deleted (no remaining participants)")
+            logger.info(f"[DELETE_CONVERSATION] Conversation {conversation_id_for_log} FULLY DELETED (no remaining participants)")
         else:
             # Other participants remain, just remove this user
-            logger.info(f"User {user.user_id} removed from conversation {conversation_id}")
-            conversation.save()
+            # IMPORTANT: Conversation should still exist for other participants
+            # CRITICAL: Verify the conversation still has participants before saving
+            if remaining_participants > 0:
+                logger.info(f"[DELETE_CONVERSATION] STEP 7 - KEEPING conversation {conversation_id_for_log} (other participants exist)")
+                logger.info(f"   - User {user.user_id} removed from conversation {conversation_id}")
+                logger.info(f"   - {remaining_participants} participants remain: {remaining_participant_ids}")
+                logger.info(f"   - Conversation will remain visible to: {remaining_participant_ids}")
+                conversation.save()
+                logger.info(f"[DELETE_CONVERSATION] Conversation {conversation_id_for_log} SAVED (still exists for other participants)")
+            else:
+                # Safety check: If count is 0 but we expected others, log error and don't delete
+                logger.error(f"[DELETE_CONVERSATION] CRITICAL ERROR: Expected other participants but count is 0!")
+                logger.error(f"   - Conversation ID: {conversation_id}")
+                logger.error(f"   - Pre-removal other participants: {other_participant_ids}")
+                logger.error(f"   - Post-removal count: {remaining_participants}")
+                logger.error(f"   - This should not happen! Possible database inconsistency.")
+                # Don't delete - this is a safety measure
+                # The conversation will remain but user is already removed, which is acceptable
+                conversation.save()
+                logger.warning(f"[DELETE_CONVERSATION] WARNING: Conversation {conversation_id_for_log} kept due to safety check (expected participants but found 0)")
         
-        # Broadcast deletion to WebSocket - ALWAYS broadcast, regardless of whether conversation was fully deleted or user was just removed
-        # Use notifications_{user_id} group to match NotificationConsumer's group name
+        # Determine if conversation was fully deleted
+        fully_deleted = should_fully_delete
+        
+        logger.info(f"[DELETE_CONVERSATION] STEP 8 - Cache invalidation and notifications:")
+        logger.info(f"   - Fully deleted: {fully_deleted}")
+        logger.info(f"   - Deleting user ID: {user.user_id}")
+        logger.info(f"   - Other participant IDs: {other_participant_ids}")
+        
+        # Broadcast deletion to WebSocket for the deleting user
         try:
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
@@ -638,24 +881,39 @@ def delete_conversation(request, conversation_id):
                 {
                     'type': 'conversation_deleted',
                     'conversation_id': conversation_id_for_log,
-                    'fully_deleted': remaining_participants == 0,
+                    'fully_deleted': fully_deleted,
                 }
             )
-            logger.info(f"Broadcasted conversation deletion event to notifications_{user.user_id} for conversation {conversation_id_for_log}")
+            logger.info(f"[DELETE_CONVERSATION] Broadcasted deletion event to user {user.user_id} (fully_deleted={fully_deleted})")
         except Exception as e:
-            logger.warning(f"Failed to broadcast conversation deletion: {str(e)}")
+            logger.warning(f"[DELETE_CONVERSATION] Failed to broadcast conversation deletion: {str(e)}")
         
-        # Clear message cache for this user
+        # Clear message cache for the deleting user
         try:
             message_cache.invalidate_user_conversations(user.user_id)
+            logger.info(f"[DELETE_CONVERSATION] Invalidated cache for deleting user {user.user_id}")
         except Exception as e:
-            logger.warning(f"Failed to invalidate message cache: {str(e)}")
+            logger.warning(f"[DELETE_CONVERSATION] Failed to invalidate message cache for user {user.user_id}: {str(e)}")
+        
+        # CRITICAL FIX: Also invalidate cache for other participants so they see updated conversation list
+        # This ensures the conversation doesn't disappear for them when it shouldn't
+        logger.info(f"[DELETE_CONVERSATION] Invalidating cache for {len(other_participant_ids)} other participants...")
+        for other_user_id in other_participant_ids:
+            try:
+                message_cache.invalidate_user_conversations(other_user_id)
+                logger.info(f"[DELETE_CONVERSATION] Invalidated cache for other participant {other_user_id}")
+            except Exception as e:
+                logger.warning(f"[DELETE_CONVERSATION] Failed to invalidate message cache for other participant {other_user_id}: {str(e)}")
+        
+        logger.info(f"[DELETE_CONVERSATION] END - User {user.user_id} deletion complete for conversation {conversation_id_for_log}")
+        logger.info(f"   - Fully deleted: {fully_deleted}")
+        logger.info(f"   - Conversation should {'NOT' if not fully_deleted else ''} exist for other participants: {other_participant_ids}")
         
         return Response({
             'status': 'success',
             'message': 'Conversation deleted successfully',
             'conversation_id': conversation_id,
-            'fully_deleted': remaining_participants == 0
+            'fully_deleted': fully_deleted
         }, status=status.HTTP_200_OK)
         
     except Exception as e:

@@ -383,23 +383,120 @@ class ConversationSerializer(serializers.ModelSerializer):
     def get_other_participant(self, obj):
         try:
             request = self.context.get('request')
-            if request and request.user.is_authenticated:
-                # FIX: Use prefetched participants to avoid extra queries
-                other_user = obj.get_other_participant(request.user)
-                if other_user:
-                    from apps.api.views import build_profile_pic_url
-                    avatar_url = build_profile_pic_url(other_user, request)
-                    return {
-                        'user_id': other_user.user_id,
-                        'name': other_user.full_name,
-                        'f_name': other_user.f_name,
-                        'l_name': other_user.l_name,
-                        'acc_username': other_user.acc_username,
-                        'avatar_url': avatar_url if avatar_url else None,
-                    }
-            return None
+            if not (request and request.user.is_authenticated):
+                return None
+
+            current_user_id = request.user.user_id
+
+            # Safety check: if current user is not a participant, don't expose anything
+            if not obj.participants.filter(user_id=current_user_id).exists():
+                logger.warning(
+                    "User %s is not a participant in conversation %s, returning None for other_participant",
+                    current_user_id,
+                    obj.conversation_id,
+                )
+                return None
+
+            # Normal path: conversation still has 2+ participants, use M2M relation
+            other_user = obj.get_other_participant(request.user)
+            if other_user:
+                from apps.api.views import build_profile_pic_url
+
+                avatar_url = build_profile_pic_url(other_user, request)
+                return {
+                    "user_id": other_user.user_id,
+                    "name": other_user.full_name,
+                    "f_name": other_user.f_name,
+                    "l_name": other_user.l_name,
+                    "acc_username": other_user.acc_username,
+                    "avatar_url": avatar_url if avatar_url else None,
+                }
+
+            # Edge case: current user is the ONLY participant (other user deleted the convo)
+            # We have to infer the other user from message history (sender/receiver).
+            from apps.shared.models import Message, User  # local import to avoid circulars
+            from django.db.models import Q
+
+            logger.info(
+                "[OTHER_PARTICIPANT] Conversation %s for user %s has only one participant – "
+                "inferring other user from messages",
+                obj.conversation_id,
+                current_user_id,
+            )
+
+            # 1) Prefer messages where current user is the sender – use receiver as other user
+            msg = (
+                Message.objects.filter(
+                    conversation_id=obj.conversation_id, sender_id=current_user_id
+                )
+                .exclude(receiver_id__isnull=True)
+                .select_related("receiver", "receiver__profile")
+                .order_by("-created_at", "-message_id")
+                .first()
+            )
+            if msg and msg.receiver_id and msg.receiver_id != current_user_id:
+                other_user = msg.receiver
+            else:
+                # 2) Prefer messages where current user is the receiver – use sender as other user
+                msg = (
+                    Message.objects.filter(
+                        conversation_id=obj.conversation_id, receiver_id=current_user_id
+                    )
+                    .exclude(sender_id__isnull=True)
+                    .select_related("sender", "sender__profile")
+                    .order_by("-created_at", "-message_id")
+                    .first()
+                )
+                if msg and msg.sender_id and msg.sender_id != current_user_id:
+                    other_user = msg.sender
+                else:
+                    # 3) Fallback: any message in this conversation with a different sender
+                    msg = (
+                        Message.objects.filter(conversation_id=obj.conversation_id)
+                        .exclude(sender_id=current_user_id)
+                        .select_related("sender", "sender__profile")
+                        .order_by("-created_at", "-message_id")
+                        .first()
+                    )
+                    if msg and msg.sender:
+                        other_user = msg.sender
+                    else:
+                        other_user = None
+
+            if not other_user:
+                logger.warning(
+                    "[OTHER_PARTICIPANT] Failed to infer other user for conversation %s "
+                    "for user %s. Participants: %s",
+                    obj.conversation_id,
+                    current_user_id,
+                    [p.user_id for p in obj.participants.all()],
+                )
+                return None
+
+            from apps.api.views import build_profile_pic_url
+
+            avatar_url = build_profile_pic_url(other_user, request)
+            logger.info(
+                "[OTHER_PARTICIPANT] Inferred other user %s for conversation %s (current user %s)",
+                other_user.user_id,
+                obj.conversation_id,
+                current_user_id,
+            )
+            return {
+                "user_id": other_user.user_id,
+                "name": other_user.full_name,
+                "f_name": other_user.f_name,
+                "l_name": other_user.l_name,
+                "acc_username": other_user.acc_username,
+                "avatar_url": avatar_url if avatar_url else None,
+            }
         except Exception as e:
-            logger.error(f"Error getting other participant for conversation {obj.conversation_id}: {str(e)}", exc_info=True)
+            logger.error(
+                "Error getting other participant for conversation %s: %s",
+                getattr(obj, "conversation_id", "unknown"),
+                str(e),
+                exc_info=True,
+            )
             return None
 
 class CreateConversationSerializer(serializers.ModelSerializer):
@@ -486,7 +583,10 @@ class CreateConversationSerializer(serializers.ModelSerializer):
         # Ensure uniqueness and remove potential self from list
         other_users = [u for u in other_users if u.user_id != current_user.user_id]
 
-        # If a 1:1 already exists, return it
+        # If a 1:1 already exists (both participants still in the conversation), return it.
+        # If either side previously deleted the conversation (removed as participant),
+        # we intentionally DO NOT resurrect it here so that the user who deleted
+        # sees a fresh, empty thread when they start messaging again.
         if len(other_users) == 1:
             other = other_users[0]
             existing = (
@@ -519,23 +619,24 @@ class CreateConversationSerializer(serializers.ModelSerializer):
                 conversation.participants.set([current_user, other_user])
                 return conversation
             
-            # For regular users, check if current user follows the other user
-            # If current user follows the other user, it's a regular conversation (not a message request)
-            # Only create message request if current user does NOT follow the other user
+            # For regular users, check if the recipient follows the sender
+            # Message requests should be created when the recipient does NOT follow the sender
+            # This ensures that if someone you don't follow messages you, it goes to message requests
             current_follows_other = Follow.objects.filter(
                 follower=current_user,
                 following=other_user
             ).exists()
             
-            # Check if other user follows current user (for reference, but not used for message request logic)
+            # Check if recipient (other_user) follows sender (current_user)
+            # This is the key check: if recipient doesn't follow sender, it's a message request
             other_follows_current = Follow.objects.filter(
                 follower=other_user,
                 following=current_user
             ).exists()
             
-            # FIX: If current user follows the other user, it should NOT be a message request
-            # Message requests should only be created when current user does NOT follow the other user
-            is_message_request = not current_follows_other
+            # FIX: Message requests should be created when the recipient doesn't follow the sender
+            # If recipient doesn't follow sender, it's a message request for the recipient
+            is_message_request = not other_follows_current
             
             # Create conversation with request status
             conversation = Conversation.objects.create(

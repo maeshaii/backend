@@ -863,6 +863,16 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 			'recent_searches': event.get('recent_searches', []),
 			'recent': event.get('recent', [])
 		}))
+	
+	async def chat_message_notification(self, event):
+		"""Handle chat message sent via notification channel (for users who deleted conversation)"""
+		logger.info(f"NotificationConsumer: Received chat_message_notification event for conversation {event.get('conversation_id')}")
+		await self.send(text_data=json.dumps({
+			'type': 'chat_message',
+			'message': event.get('message'),
+			'conversation_id': event.get('conversation_id')
+		}))
+		logger.info(f"NotificationConsumer: Sent chat message to user via notification channel")
 		logger.info("NotificationConsumer: Sent recent search update to WebSocket client")
 
 
