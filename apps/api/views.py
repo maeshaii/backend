@@ -6540,7 +6540,11 @@ def search_alumni(request):
     results = [
         {
             'id': u.user_id,
-            'name': f"{u.f_name} {u.l_name}",
+            'user_id': u.user_id,
+            'name': u.full_name,
+            'f_name': u.f_name,
+            'm_name': u.m_name or '',
+            'l_name': u.l_name,
             'profile_pic': u.profile.profile_pic.url if hasattr(u, 'profile') and u.profile and u.profile.profile_pic else None,
             'account_type': {
                 'user': getattr(u.account_type, 'user', False),
