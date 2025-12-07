@@ -699,7 +699,6 @@ def login_view(request):
     except Exception as e:
         logger.error(f"Login failed: Unexpected error: {e}")
         return JsonResponse({'success': False, 'message': 'Server error'}, status=500)
-
 class CustomTokenObtainPairSerializer(serializers.Serializer):
     """Used by Mobile – issues JWT pair on /api/token/ for acc_username+acc_password."""
     acc_username = serializers.CharField()
@@ -921,47 +920,17 @@ def import_alumni_view(request):
             
             # Helper function to find column by partial match (case-insensitive, handles variations)
             def find_column(df, possible_names):
-                """Find a column by trying multiple possible names (case-insensitive)"""
+                """Find a column by trying multiple possible names (case-insensitive, spaces/underscores-insensitive, no substrings)"""
                 if isinstance(possible_names, str):
                     possible_names = [possible_names]
-                
-                # First, try exact matches (case-sensitive)
+                # Normalize column names: lower-case, strip, replace underscores, replace multiple spaces
+                def norm(s):
+                    return s.lower().replace('_', ' ').replace('-', ' ').replace('  ', ' ').strip()
+                normed_cols = {norm(col): col for col in df.columns}
                 for name in possible_names:
-                    if name in df.columns:
-                        return name
-                
-                # Then try case-insensitive exact matches
-                for name in possible_names:
-                    name_lower = name.lower().strip()
-                    for col in df.columns:
-                        if col.lower().strip() == name_lower:
-                            return col
-                
-                # Finally, try partial matches (but be more careful)
-                for name in possible_names:
-                    name_lower = name.lower().strip()
-                    # Get key words from the name (longer words are more specific)
-                    name_words = [w for w in name_lower.split() if len(w) > 3]
-                    best_match = None
-                    best_score = 0
-                    
-                    for col in df.columns:
-                        col_lower = col.lower().strip()
-                        # Check if all key words are in the column name
-                        if name_words:
-                            matching_words = sum(1 for word in name_words if word in col_lower)
-                            score = matching_words / len(name_words)
-                            if score > best_score and score >= 0.5:  # At least 50% of words match
-                                best_score = score
-                                best_match = col
-                        # Also check if the name is contained in column or vice versa
-                        elif name_lower in col_lower or col_lower in name_lower:
-                            if len(name_lower) > 10 or len(col_lower) > 10:  # Only for longer names
-                                return col
-                    
-                    if best_match:
-                        return best_match
-                
+                    norm_name = norm(name)
+                    if norm_name in normed_cols:
+                        return normed_cols[norm_name]
                 return None
             
             # Create a comprehensive column mapping for all fields
@@ -1149,7 +1118,6 @@ def import_alumni_view(request):
                     'created_count': 0,
                     'skipped_count': len(valid_ctu_ids)
                 })
-        
         for index, row in df.iterrows():
             try:
                 ctu_id = str(row['CTU_ID']).strip()
@@ -3253,7 +3221,6 @@ def import_ojt_view(request):
         print(f"   - Deactivated {deactivated_count} old batch students")
         print(f"   - Reactivated {reactivated_count} students (will be updated)")
         print(f"   - Processing {len(new_import_ctu_ids)} students from new import")
-        
         for index, row in df.iterrows():
             print(f"--- Processing Row {index+2} ---")
             try:
@@ -4001,7 +3968,6 @@ def import_ojt_view(request):
         error_details = traceback.format_exc()
         print(f"IMPORT ERROR DETAILS: {error_details}")
         return JsonResponse({'success': False, 'message': f'Import failed: {str(e)}'}, status=500)
-
 # OJT statistics for coordinators
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -4788,7 +4754,6 @@ def ojt_students_by_company_view(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
 # Get all OJT students for a coordinator (for export to update template)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5570,7 +5535,6 @@ def profile_bio_view(request, user_id):
             return JsonResponse({'profile_bio': profile.profile_bio})
     except User.DoesNotExist:
         return JsonResponse({'error': 'User not found'}, status=404)
-
 @api_view(['PUT'])
 @parser_classes([MultiPartParser])
 @permission_classes([IsAuthenticated])
@@ -6349,7 +6313,6 @@ def alumni_employment_view(request, user_id):
         print(f"Error in alumni_employment_view: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def check_employment_update_reminder(request, user_id):
@@ -7883,7 +7846,6 @@ def recent_searches_view(request):
     except Exception as e:
         logger.error(f"recent_searches_view error: {e}")
         return JsonResponse({'success': False, 'error': 'Server error'}, status=500)
-
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def recent_search_delete_view(request, search_id):
@@ -9418,7 +9380,6 @@ def mutual_follows_view(request, user_id):
         return JsonResponse({'error': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def online_users_view(request):
@@ -10172,7 +10133,6 @@ def posts_by_user_type_view(request):
     except Exception as e:
         logger.error(f"posts_by_user_type_view failed: {e}")
         return JsonResponse({'posts': []}, status=200)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_all_alumni(request):
@@ -10934,7 +10894,6 @@ def reset_password_view(request):
         except Exception as e:
             logger.error(f"Reset password failed: Unexpected error: {e}")
             return JsonResponse({'success': False, 'message': 'Server error occurred'}, status=500)
-
 # Donation API Views
 @api_view(['GET', 'POST'])
 @authentication_classes([CustomJWTAuthentication])
@@ -11722,8 +11681,6 @@ def recent_searches_view(request):
     except Exception as e:
         logger.error(f"recent_searches_view error: {e}")
         return JsonResponse({ 'success': False, 'message': 'Server error' }, status=500)
-
-
 @api_view(['POST'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -12398,7 +12355,6 @@ def fetch_all_users_view(request):
             'success': False,
             'message': f'Server error: {str(e)}'
         }, status=500)
-
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -13825,8 +13781,6 @@ def reward_history_view(request):
             {'success': False, 'message': f'Error: {str(e)}'},
             status=500
         )
-
-
 @api_view(['POST'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -14575,8 +14529,6 @@ def claim_reward_request_view(request, request_id):
             'success': False,
             'message': f'Error: {str(e)}'
         }, status=500)
-
-
 @api_view(['POST'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
