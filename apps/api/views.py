@@ -412,6 +412,84 @@ def create_mention_notifications(content, commenter_user, post_id=None, comment_
                 if len(camel_case_parts) >= 2:
                     mention_parts = camel_case_parts
             
+            # Check for special keywords: "admin", "ccict", or "peso" (case-insensitive)
+            mention_lower = mention.lower().strip()
+            is_admin_mention = ('admin' in mention_lower) or ('administrator' in mention_lower) or ('ccict' in mention_lower)
+            is_peso_mention = ('peso' in mention_lower)
+            
+            if is_admin_mention:
+                # Notify only admin/CCICT accounts.
+                admin_ccict_users = User.objects.filter(
+                    Q(account_type__admin=True) | Q(user_status__iexact='ccict') | Q(acc_username__icontains='ccict') | Q(acc_username__icontains='admin')
+                ).exclude(
+                    user_id=commenter_user.user_id
+                )
+                admin_ccict_users = list(admin_ccict_users)
+                logger.info(f"create_mention_notifications: Found {len(admin_ccict_users)} admin/CCICT users for mention '{mention}'")
+                for admin_user in admin_ccict_users:
+                    # Create notification for each admin/CCICT user
+                    if reply_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in their reply"
+                    elif comment_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in their comment"
+                    elif repost_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in their repost"
+                    elif forum_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in a forum post"
+                    elif donation_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in a donation post"
+                    elif post_id:
+                        notification_content = f"{commenter_user.full_name} mentioned you in their post"
+                    else:
+                        notification_content = f"{commenter_user.full_name} mentioned you"
+                    notification_content += f"<!--ACTOR_ID:{commenter_user.user_id}-->"
+                    if reply_id:
+                        notification_content += f"<!--REPLY_ID:{reply_id}-->"
+                    if comment_id:
+                        notification_content += f"<!--COMMENT_ID:{comment_id}-->"
+                    if repost_id:
+                        notification_content += f"<!--REPOST_ID:{repost_id}-->"
+                    if forum_id:
+                        notification_content += f"<!--FORUM_ID:{forum_id}-->"
+                    elif donation_id:
+                        notification_content += f"<!--DONATION_ID:{donation_id}-->"
+                    elif post_id:
+                        notification_content += f"<!--POST_ID:{post_id}-->"
+                    notification = Notification.objects.create(
+                        user=admin_user,
+                        notif_type='mention',
+                        subject='You were mentioned',
+                        notifi_content=notification_content,
+                        notif_date=timezone.now()
+                    )
+                    logger.info(f"create_mention_notifications: Created notification {notification.notif_id} for admin/CCICT user {admin_user.user_id}")
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notification)
+                        logger.debug(f"create_mention_notifications: Broadcasted notification {notification.notif_id}")
+                    except Exception as e:
+                        logger.error(f"Error broadcasting mention notification: {e}")
+                continue
+            if is_peso_mention:
+                # Notify only peso accounts
+                peso_users = User.objects.filter(account_type__peso=True).exclude(user_id=commenter_user.user_id)
+                for peso_user in peso_users:
+                    notification_content = f"{commenter_user.full_name} mentioned you"
+                    notification_content += f"<!--ACTOR_ID:{commenter_user.user_id}-->"
+                    notification = Notification.objects.create(
+                        user=peso_user,
+                        notif_type='mention',
+                        subject='You were mentioned',
+                        notifi_content=notification_content,
+                        notif_date=timezone.now()
+                    )
+                    try:
+                        from apps.messaging.notification_broadcaster import broadcast_notification
+                        broadcast_notification(notification)
+                    except Exception as e:
+                        logger.error(f"Error broadcasting mention notification: {e}")
+                continue
+            
             # Require at least first and last name (prevents accidental partial mentions)
             if len(mention_parts) < 2:
                 logger.debug(f"create_mention_notifications: Skipping mention '{mention}' - not enough name parts to uniquely identify a user")
@@ -563,7 +641,6 @@ def build_profile_pic_url(user, request=None):
         pass
     # Return empty string instead of None for consistency
     return ""
-
 def build_image_url(image_field, request=None):
     """Build full URL for ContentImage fields"""
     try:
@@ -1256,7 +1333,6 @@ def import_alumni_view(request):
                             profile_kwargs['birthdate'] = bd
                     except Exception as e:
                         print(f"DEBUG: Error parsing birthdate for {ctu_id}: {e}")
-                
                 try:
                     from apps.shared.models import UserProfile, AcademicInfo, TrackerData, EmploymentHistory
                     UserProfile.objects.create(**profile_kwargs)
@@ -2331,11 +2407,18 @@ def notifications_view(request):
     except User.DoesNotExist:
         return JsonResponse({'success': False, 'message': 'User not found'}, status=404)
     # Role-based filtering:
-    # - Admin: receive SAME notifications as alumni (reminders/thank-you/engagement)
+    # - Admin/CCICT: receive SAME notifications as alumni (reminders/thank-you/engagement)
     #          PLUS tracker submission notifications from users who answered the tracker.
     #          Therefore, do not exclude 'CCICT' (reminders/thank-you) for admins.
     # - Alumni/OJT/PESO: receive tracker reminders + thank you + like/comment/repost (hide admin-only tracker submissions)
-    if getattr(user.account_type, 'admin', False):
+    is_admin_or_ccict = (
+        getattr(user.account_type, 'admin', False)
+        or getattr(user.account_type, 'ccict', False)
+        or 'ccict' in str(getattr(user, 'acc_username', '')).lower()
+        or 'admin' in str(getattr(user, 'acc_username', '')).lower()
+        or str(getattr(user, 'user_status', '')).lower() == 'ccict'
+    )
+    if is_admin_or_ccict:
         notifications = (
             Notification.objects
             .filter(user_id=user_id)
@@ -2532,7 +2615,6 @@ def users_list_view(request):
         return JsonResponse({'success': True, 'users': users_data})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def delete_notifications_view(request):
@@ -3157,7 +3239,6 @@ def import_ojt_view(request):
                 print(f"📅 New batch ({normalized_year}) has no send date set")
         except Exception as e:
             print(f"⚠️ Could not check send date for new batch: {e}")
-        
         for old_user in old_batch_users:
             old_ctu_id = old_user.acc_username
             
@@ -3799,7 +3880,6 @@ def import_ojt_view(request):
                         phone_num = str(int(float(phone_num)))
                     except:
                         pass
-                
                 # Extract email for UserProfile
                 profile_email = str(row.get('Email', '')).strip() if pd.notna(row.get('Email')) else None
                 
@@ -4400,8 +4480,6 @@ def ojt_clear_view(request):
         return JsonResponse({'success': True, 'message': f'Cleared OJT data for batch {year_int}'})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 # OJT Company Statistics for coordinators
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5050,8 +5128,6 @@ def coordinator_requests_count_view(request):
         return JsonResponse({'success': True, 'count': count_val})
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 # List requested batches with simple counts
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -6313,8 +6389,6 @@ def alumni_employment_view(request, user_id):
         print(f"Error in alumni_employment_view: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         return JsonResponse({'error': str(e)}, status=500)
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
 def check_employment_update_reminder(request, user_id):
     """Check if user should see employment update reminder (2 minutes for testing, 6 months for production)"""
     try:
@@ -6420,7 +6494,9 @@ def check_employment_update_reminder(request, user_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_following_for_mentions(request):
-    """Get list of users that current user follows for @mentions"""
+    """Get list of users that current user follows for @mentions.
+    Admin/PESO accounts: return all active users (excluding coordinators).
+    Other users: return following list + all active admin/PESO accounts so they can be mentioned."""
     try:
         # Use request.user which is set by DRF authentication
         current_user = request.user
@@ -6428,20 +6504,78 @@ def get_following_for_mentions(request):
             logger.warning(f"get_following_for_mentions: User not authenticated. request.user: {current_user}")
             return JsonResponse({'error': 'Authentication required'}, status=401)
         
-        from apps.shared.models import Follow
-        following = Follow.objects.filter(follower=current_user).select_related('following')
+        # Check if current user is admin or peso
+        is_admin = current_user.account_type and getattr(current_user.account_type, 'admin', False)
+        is_peso = current_user.account_type and getattr(current_user.account_type, 'peso', False)
         
         following_data = []
-        for follow_obj in following:
-            followed_user = follow_obj.following
-            following_data.append({
-                'user_id': followed_user.user_id,
-                'name': f"{followed_user.f_name} {followed_user.m_name or ''} {followed_user.l_name}".strip(),
-                'f_name': followed_user.f_name,
-                'm_name': followed_user.m_name,
-                'l_name': followed_user.l_name,
-                'profile_pic': build_profile_pic_url(followed_user),
-            })
+        
+        if is_admin or is_peso:
+            # For admin/peso accounts, return all active users (excluding coordinators)
+            all_users = User.objects.filter(
+                user_status='active'
+            ).exclude(
+                account_type__coordinator=True
+            ).select_related('account_type', 'profile')
+            
+            for user in all_users:
+                # Exclude the current user from the list
+                if user.user_id == current_user.user_id:
+                    continue
+                    
+                following_data.append({
+                    'user_id': user.user_id,
+                    'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
+                    'f_name': user.f_name,
+                    'm_name': user.m_name,
+                    'l_name': user.l_name,
+                    'profile_pic': build_profile_pic_url(user),
+                })
+            
+            logger.info(f"get_following_for_mentions: Admin/PESO user {current_user.user_id} - returning {len(following_data)} total users (excluding coordinators)")
+        else:
+            # For regular users, return their following list + all admin/PESO users
+            from apps.shared.models import Follow
+            following = Follow.objects.filter(follower=current_user).select_related('following')
+            
+            # Deduplicate by user_id
+            seen_ids = set()
+            
+            for follow_obj in following:
+                followed_user = follow_obj.following
+                if followed_user.user_id in seen_ids:
+                    continue
+                seen_ids.add(followed_user.user_id)
+                following_data.append({
+                    'user_id': followed_user.user_id,
+                    'name': f"{followed_user.f_name} {followed_user.m_name or ''} {followed_user.l_name}".strip(),
+                    'f_name': followed_user.f_name,
+                    'm_name': followed_user.m_name,
+                    'l_name': followed_user.l_name,
+                    'profile_pic': build_profile_pic_url(followed_user),
+                })
+            
+            # Add all active admin and PESO users so they can be mentioned by anyone
+            admin_peso_users = User.objects.filter(
+                user_status='active'
+            ).filter(
+                Q(account_type__admin=True) | Q(account_type__peso=True)
+            ).exclude(
+                user_id=current_user.user_id
+            ).select_related('account_type', 'profile')
+            
+            for user in admin_peso_users:
+                if user.user_id in seen_ids:
+                    continue
+                seen_ids.add(user.user_id)
+                following_data.append({
+                    'user_id': user.user_id,
+                    'name': f"{user.f_name} {user.m_name or ''} {user.l_name}".strip(),
+                    'f_name': user.f_name,
+                    'm_name': user.m_name,
+                    'l_name': user.l_name,
+                    'profile_pic': build_profile_pic_url(user),
+                })
         
         return JsonResponse({
             'success': True,
@@ -6785,8 +6919,6 @@ def post_likes_view(request, post_id):
             'initials': initials,
         })
     return JsonResponse({'likes': data})
-
-
 # ==========================
 # Repost interactions (Used by Mobile)
 # ==========================
@@ -9126,7 +9258,6 @@ def user_posts_view(request, user_id):
         return JsonResponse({'posts': data})
     except Exception as e:
         return JsonResponse({'posts': [], 'error': str(e)})
-
 @api_view(["POST","DELETE"])
 @permission_classes([IsAuthenticated])
 def follow_user_view(request, user_id):
@@ -10061,8 +10192,6 @@ def debug_posts_view(request):
         })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
 def posts_by_user_type_view(request):
     """Get posts filtered by user type (alumni, OJT, etc.)"""
     try:
@@ -11327,8 +11456,6 @@ def donation_comments_view(request, donation_id):
     except Exception as e:
         logger.error(f"Error handling donation comments: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to handle comments'}, status=500)
-
-
 @api_view(['PUT', 'DELETE'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -11976,8 +12103,6 @@ def delete_send_date_view(request):
             'success': False,
             'message': f'Error deleting send date: {str(e)}'
         }, status=500)
-
-
 @api_view(['GET'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -12613,7 +12738,6 @@ def create_user_view(request):
             'success': False,
             'message': f'Server error: {str(e)}'
         }, status=500)
-
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -13717,8 +13841,6 @@ def inventory_item_detail_view(request, item_id):
             {'success': False, 'message': f'Error: {str(e)}'},
             status=500
         )
-
-
 @api_view(['GET'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -13838,6 +13960,21 @@ def give_reward_view(request):
             points_cost = extract_points_from_value(reward_item.value)
             user_points, _ = UserPoints.objects.select_for_update().get_or_create(user=target_user)
 
+            # Check if user already received a tracker reward (one reward per user)
+            if is_tracker_reward:
+                existing_tracker_reward = RewardHistory.objects.filter(
+                    user=target_user,
+                    reward_type__icontains='tracker'
+                ).exists()
+                if existing_tracker_reward:
+                    return JsonResponse(
+                        {
+                            'success': False,
+                            'message': 'This user has already received a tracker reward. Each user can only receive one tracker reward.'
+                        },
+                        status=400
+                    )
+
             if not is_tracker_reward and points_cost > user_points.total_points:
                 return JsonResponse(
                     {
@@ -13865,17 +14002,46 @@ def give_reward_view(request):
                 # Ensure updated_at still reflects activity
                 user_points.save(update_fields=['updated_at'])
 
+            # Update reward_type to include "tracker" for tracker rewards
+            reward_type = reward_item.type
+            if is_tracker_reward:
+                reward_type = f"{reward_item.type} (Tracker)"
+
             history = RewardHistory.objects.create(
                 user=target_user,
                 reward_name=reward_item.name,
-                reward_type=reward_item.type,
+                reward_type=reward_type,
                 reward_value=reward_item.value,
                 points_deducted=points_deducted,
                 given_by=admin_user
             )
 
+            # Create RewardRequest entry for tracker rewards so it appears in user's "My Reward Requests"
+            if is_tracker_reward:
+                # Determine initial status based on reward type
+                reward_type_lower = reward_item.type.lower()
+                is_gcash = reward_type_lower in ['gcash', 'gift card', 'giftcard', 'coupon']
+                is_merchandise = reward_type_lower in ['merchandise', 'merch', 'item', 'product']
+                
+                # Merchandise: ready_for_pickup (goes through normal process)
+                # Gcash: approved (admin needs to send money, then it becomes claimed)
+                # Other (vouchers): ready_for_pickup
+                initial_status = 'approved' if is_gcash else 'ready_for_pickup'
+                
+                RewardRequest.objects.create(
+                    user=target_user,
+                    reward_item=reward_item,
+                    status=initial_status,
+                    points_cost=0,  # No points deducted for tracker rewards
+                    notes='Reward given for answering the tracker form',
+                    approved_at=timezone.now(),
+                    approved_by=admin_user
+                )
+
         notification_message = f'You received "{reward_item.name}"!'
-        if points_deducted:
+        if is_tracker_reward:
+            notification_message += ' This reward was given for answering the tracker form. Enjoy your reward!'
+        elif points_deducted:
             notification_message += f' {points_deducted} points have been deducted from your account.'
         else:
             notification_message += ' Enjoy your reward!'
@@ -14199,8 +14365,6 @@ def _auto_claim_gcash_reward(reward_request, admin_user):
     except Exception as e:
         logger.error(f'Unexpected error during auto-claim for reward request {reward_request.request_id}: {e}')
         raise DjangoValidationError('An unexpected error occurred while auto-claiming this GCash reward.')
-
-
 @api_view(['POST'])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
@@ -14812,8 +14976,6 @@ def calendar_events_view(request):
     except Exception as e:
         logger.error(f"calendar_events_view error: {e}")
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
-
-
 @api_view(["GET", "PUT", "DELETE"])
 @authentication_classes([CustomJWTAuthentication])
 @permission_classes([IsAuthenticated])
