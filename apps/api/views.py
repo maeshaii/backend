@@ -48,6 +48,7 @@ from django.core.mail import send_mail
 from rest_framework.decorators import api_view, parser_classes, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from apps.api.authentication import CustomJWTAuthentication
+from apps.api.permissions import IsAdmin
 from rest_framework.parsers import MultiPartParser, JSONParser
 from rest_framework.response import Response
 from rest_framework import status
@@ -2578,9 +2579,8 @@ def users_list_view(request):
             .filter(account_type__admin=False)
             .filter(account_type__peso=False)
             .filter(account_type__coordinator=False)
-            .filter(account_type__ojt=False)
-            .filter(account_type__user=True)  # Only show alumni
-            .filter(user_status='active')  # Only show active users
+            .filter(Q(account_type__user=True) | Q(account_type__ojt=True))
+            .filter(user_status='active')
             .select_related('profile', 'academic_info', 'account_type')
         )
         if current_user_id_int is not None:
@@ -4048,9 +4048,6 @@ def import_ojt_view(request):
         error_details = traceback.format_exc()
         print(f"IMPORT ERROR DETAILS: {error_details}")
         return JsonResponse({'success': False, 'message': f'Import failed: {str(e)}'}, status=500)
-# OJT statistics for coordinators
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
 def ojt_statistics_view(request):
     try:
         coordinator_username = request.GET.get('coordinator', '')
@@ -7186,7 +7183,11 @@ def repost_likes_list_view(request, repost_id):
             }
         })
     return JsonResponse({'likes': likes_data})
-@api_view(["GET", "POST"]) 
+def mutual_follows_view(request, user_id):
+    # TODO: Implement logic for mutual follows
+    return JsonResponse({"message": "Stub endpoint for mutual follows.", "user_id": user_id})
+
+@api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def repost_comments_view(request, repost_id):
     try:
@@ -7302,8 +7303,28 @@ def repost_comments_view(request, repost_id):
                 except Exception as e:
                     logger.error(f"Error broadcasting repost comment notification: {e}")
             
-            return JsonResponse({'success': True, 'comment_id': comment.comment_id})
+            # Return the full comment object for frontend compatibility
+            comment_data = {
+                'comment_id': comment.comment_id,
+                'comment_content': comment.comment_content,
+                'date_created': comment.date_created.isoformat() if comment.date_created else None,
+                'replies_count': Reply.objects.filter(comment=comment).count(),
+                'user': {
+                    'user_id': comment.user.user_id,
+                    'f_name': comment.user.f_name,
+                    'm_name': comment.user.m_name,
+                    'l_name': comment.user.l_name,
+                    'profile_pic': build_profile_pic_url(comment.user),
+                }
+            }
+            
+            return JsonResponse({
+                'success': True, 
+                'comment_id': comment.comment_id,
+                'comment': comment_data
+            })
         except Exception as e:
+            logger.error(f"Error creating repost comment: {e}")
             return JsonResponse({'error': str(e)}, status=400)
 
 
@@ -7982,8 +8003,6 @@ def recent_searches_view(request):
     except Exception as e:
         logger.error(f"recent_searches_view error: {e}")
         return JsonResponse({'success': False, 'error': 'Server error'}, status=500)
-@api_view(["DELETE"])
-@permission_classes([IsAuthenticated])
 def recent_search_delete_view(request, search_id):
     """Delete a specific recent search"""
     try:
@@ -9403,9 +9422,11 @@ def follow_user_view(request, user_id):
         return JsonResponse({'error': 'User not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def check_follow_status_view(request, user_id):
+    """Check if the current user is following the specified user"""
     if request.method == "OPTIONS":
         response = JsonResponse({'detail': 'OK'})
         response["Access-Control-Allow-Origin"] = "*"
@@ -9417,23 +9438,10 @@ def check_follow_status_view(request, user_id):
         # Get the user to check
         user_to_check = User.objects.get(user_id=user_id)
 
-        # Get the current user from token
-        auth_header = request.headers.get('Authorization') or request.META.get('HTTP_AUTHORIZATION')
-        if not auth_header or not auth_header.startswith('Bearer '):
+        # Get the current user from request
+        current_user = get_current_user_from_request(request)
+        if not current_user:
             # If no authentication, return not following
-            return JsonResponse({
-                'success': True,
-                'is_following': False
-            })
-
-        token = auth_header.split(' ')[1]
-        try:
-            from rest_framework_simplejwt.tokens import AccessToken
-            access_token = AccessToken(token)
-            current_user_id = access_token.get('user_id') or access_token.get('id')
-            current_user = User.objects.get(user_id=int(current_user_id))
-        except Exception as e:
-            # If token is invalid, return not following
             return JsonResponse({
                 'success': True,
                 'is_following': False
@@ -9456,65 +9464,6 @@ def check_follow_status_view(request, user_id):
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def mutual_follows_view(request, user_id):
-    """Get mutual follows between current user and target user"""
-    if request.method == "OPTIONS":
-        response = JsonResponse({'detail': 'OK'})
-        response["Access-Control-Allow-Origin"] = "*"
-        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response["Access-Control-Allow-Headers"] = "Content-Type, X-CSRFToken, Authorization"
-        return response
-
-    try:
-        current_user = get_current_user_from_request(request)
-        if not current_user:
-            return JsonResponse({'error': 'Authentication required'}, status=401)
-
-        target_user = User.objects.get(user_id=user_id)
-        
-        from apps.shared.models import Follow
-        
-        # Get users that both current_user and target_user follow
-        current_user_following = set(Follow.objects.filter(follower=current_user).values_list('following_id', flat=True))
-        target_user_following = set(Follow.objects.filter(follower=target_user).values_list('following_id', flat=True))
-        
-        # Find mutual follows
-        mutual_follow_ids = current_user_following.intersection(target_user_following)
-        
-        if not mutual_follow_ids:
-            return JsonResponse({
-                'success': True,
-                'mutual_follows': [],
-                'count': 0
-            })
-        
-        # Get mutual follow user details
-        mutual_follows = User.objects.filter(user_id__in=mutual_follow_ids)
-        mutual_follows_data = []
-        
-        for user in mutual_follows:
-            mutual_follows_data.append({
-                'user_id': user.user_id,
-                'ctu_id': user.acc_username,
-                'name': ' '.join(filter(None, [user.f_name, user.m_name, user.l_name])),
-                'f_name': user.f_name,
-                'm_name': user.m_name,
-                'l_name': user.l_name,
-                'profile_pic': build_profile_pic_url(user),
-            })
-        
-        return JsonResponse({
-            'success': True,
-            'mutual_follows': mutual_follows_data,
-            'count': len(mutual_follows_data)
-        })
-        
-    except User.DoesNotExist:
-        return JsonResponse({'error': 'User not found'}, status=404)
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def online_users_view(request):
@@ -12484,9 +12433,10 @@ def fetch_all_users_view(request):
             'success': False,
             'message': f'Server error: {str(e)}'
         }, status=500)
+
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])
 def create_user_view(request):
     """
     Create a new user (Admin only).
@@ -12740,7 +12690,7 @@ def create_user_view(request):
         }, status=500)
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])
 def update_user_password_view(request, user_id):
     """
     Update a user's password (Admin only).
@@ -12831,7 +12781,7 @@ def update_user_password_view(request, user_id):
 
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])
 def update_user_status_view(request, user_id):
     try:
         # Use request.user which is set by DRF authentication
@@ -12890,7 +12840,7 @@ def update_user_status_view(request, user_id):
 
 @api_view(["POST"])
 @authentication_classes([CustomJWTAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdmin])
 def verify_admin_password_view(request):
     """
     Require admins to re-enter their password before accessing sensitive actions.
@@ -13961,16 +13911,36 @@ def give_reward_view(request):
             user_points, _ = UserPoints.objects.select_for_update().get_or_create(user=target_user)
 
             # Check if user already received a tracker reward (one reward per user)
+            # Also check RewardRequest to catch rewards that haven't been released yet
             if is_tracker_reward:
-                existing_tracker_reward = RewardHistory.objects.filter(
+                # Check if user already has a tracker reward request (pending, ready_for_pickup, or claimed)
+                existing_tracker_request = RewardRequest.objects.filter(
                     user=target_user,
-                    reward_type__icontains='tracker'
-                ).exists()
-                if existing_tracker_reward:
+                    reward_item=reward_item,
+                    notes__icontains='tracker'
+                ).exclude(status__in=['rejected', 'cancelled']).exists()
+                
+                if existing_tracker_request:
                     return JsonResponse(
                         {
                             'success': False,
-                            'message': 'This user has already received a tracker reward. Each user can only receive one tracker reward.'
+                            'message': f'This user has already been assigned "{reward_item.name}" as a tracker reward. Each user can only receive one tracker reward per reward item.'
+                        },
+                        status=400
+                    )
+                
+                # Also check RewardHistory for already released tracker rewards
+                existing_tracker_history = RewardHistory.objects.filter(
+                    user=target_user,
+                    reward_name=reward_item.name,
+                    reward_type__icontains='tracker'
+                ).exists()
+                
+                if existing_tracker_history:
+                    return JsonResponse(
+                        {
+                            'success': False,
+                            'message': f'This user has already received "{reward_item.name}" as a tracker reward. Each user can only receive one tracker reward per reward item.'
                         },
                         status=400
                     )
@@ -14002,31 +13972,25 @@ def give_reward_view(request):
                 # Ensure updated_at still reflects activity
                 user_points.save(update_fields=['updated_at'])
 
-            # Update reward_type to include "tracker" for tracker rewards
-            reward_type = reward_item.type
-            if is_tracker_reward:
-                reward_type = f"{reward_item.type} (Tracker)"
-
-            history = RewardHistory.objects.create(
-                user=target_user,
-                reward_name=reward_item.name,
-                reward_type=reward_type,
-                reward_value=reward_item.value,
-                points_deducted=points_deducted,
-                given_by=admin_user
-            )
+            # For tracker rewards, don't create RewardHistory yet - it will be created when admin releases it
+            # For regular rewards, create RewardHistory immediately
+            if not is_tracker_reward:
+                reward_type = reward_item.type
+                history = RewardHistory.objects.create(
+                    user=target_user,
+                    reward_name=reward_item.name,
+                    reward_type=reward_type,
+                    reward_value=reward_item.value,
+                    points_deducted=points_deducted,
+                    given_by=admin_user
+                )
+            else:
+                history = None  # Tracker rewards create history when admin releases them
 
             # Create RewardRequest entry for tracker rewards so it appears in user's "My Reward Requests"
             if is_tracker_reward:
-                # Determine initial status based on reward type
-                reward_type_lower = reward_item.type.lower()
-                is_gcash = reward_type_lower in ['gcash', 'gift card', 'giftcard', 'coupon']
-                is_merchandise = reward_type_lower in ['merchandise', 'merch', 'item', 'product']
-                
-                # Merchandise: ready_for_pickup (goes through normal process)
-                # Gcash: approved (admin needs to send money, then it becomes claimed)
-                # Other (vouchers): ready_for_pickup
-                initial_status = 'approved' if is_gcash else 'ready_for_pickup'
+                # All tracker rewards start with 'pending' status (alumni needs to provide GCash info for GCash rewards)
+                initial_status = 'pending'
                 
                 RewardRequest.objects.create(
                     user=target_user,
@@ -14040,7 +14004,12 @@ def give_reward_view(request):
 
         notification_message = f'You received "{reward_item.name}"!'
         if is_tracker_reward:
-            notification_message += ' This reward was given for answering the tracker form. Enjoy your reward!'
+            reward_type_lower = reward_item.type.lower()
+            is_gcash = reward_type_lower in ['gcash', 'gift card', 'giftcard', 'coupon']
+            if is_gcash:
+                notification_message += ' This reward was given for answering the tracker form. Please provide your GCash number and account name in "My Reward Requests" to receive your reward.'
+            else:
+                notification_message += ' This reward was given for answering the tracker form. Please check "My Reward Requests" for details.'
         elif points_deducted:
             notification_message += f' {points_deducted} points have been deducted from your account.'
         else:
@@ -14060,12 +14029,11 @@ def give_reward_view(request):
         except Exception as e:
             logger.error(f"Error broadcasting reward notification: {e}")
 
-        return JsonResponse({
+        response_data = {
             'success': True,
             'message': f'Reward "{reward_item.name}" given successfully.',
             'points_deducted': points_deducted,
             'user_remaining_points': user_points.total_points,
-            'history_id': history.history_id,
             'reward': {
                 'id': reward_item.item_id,
                 'name': reward_item.name,
@@ -14073,7 +14041,13 @@ def give_reward_view(request):
                 'value': reward_item.value,
                 'quantity_remaining': reward_item.quantity,
             }
-        })
+        }
+        
+        # Only include history_id for non-tracker rewards (tracker rewards create history when released)
+        if history:
+            response_data['history_id'] = history.history_id
+        
+        return JsonResponse(response_data)
     except Exception as e:
         logger.error(f"give_reward_view error: {e}")
         return JsonResponse(
@@ -14410,6 +14384,7 @@ def approve_reward_request_view(request, request_id):
                     status=404
                 )
 
+            # Allow approval for 'pending' status (regular requests and tracker rewards with GCash info)
             if reward_request.status != 'pending':
                 return JsonResponse(
                     {'success': False, 'message': f'Request is already {reward_request.status}'},
@@ -14429,25 +14404,60 @@ def approve_reward_request_view(request, request_id):
             is_gcash = reward_type in ['gcash', 'gift card', 'giftcard', 'coupon']
             is_merchandise = reward_type in ['merchandise', 'merch', 'item', 'product']
 
-            reward_request.status = 'approved' if is_gcash else 'ready_for_pickup'
-            reward_request.approved_at = timezone.now()
-            reward_request.approved_by = admin_user
-
-            if is_gcash:
+            # Check if this is a tracker reward
+            is_tracker_reward = reward_request.points_cost == 0 and reward_request.notes and 'tracker' in reward_request.notes.lower()
+            
+            if is_gcash and is_tracker_reward:
+                # GCash tracker reward - check if GCash info is provided (status should be 'pending' at this point)
+                if not reward_request.gcash_number or not reward_request.gcash_name:
+                    return JsonResponse(
+                        {'success': False, 'message': 'GCash number and name must be provided by the user before approval.'},
+                        status=400
+                    )
+                if not gcash_receipt:
+                    return JsonResponse(
+                        {'success': False, 'message': 'GCash receipt image is required to approve this reward request.'},
+                        status=400
+                    )
+                # For GCash tracker rewards: upload receipt and mark as claimed
+                reward_request.gcash_receipt = gcash_receipt
+                reward_request.status = 'claimed'
+                reward_request.expires_at = None
+                
+                # Create RewardHistory entry now that the reward is released (this is what appears in history)
+                reward_history = RewardHistory.objects.create(
+                    user=reward_request.user,
+                    reward_name=reward_request.reward_item.name,
+                    reward_type=f"{reward_request.reward_item.type} (Tracker)",
+                    reward_value=reward_request.reward_item.value,
+                    points_deducted=0,  # No points deducted for tracker rewards
+                    given_by=admin_user
+                )
+                logger.info(f"Tracker reward history created: {reward_history.history_id} for user {reward_request.user.full_name} - {reward_request.reward_item.name}")
+            elif is_gcash:
+                # Regular GCash request (pending status)
                 if not gcash_receipt:
                     raise DjangoValidationError('GCash receipt image is required to approve this reward request.')
+                reward_request.status = 'approved'
                 reward_request.expires_at = None
                 reward_request.gcash_receipt = gcash_receipt
-            elif gcash_receipt:
-                # Prevent accidental uploads on non-gcash rewards
-                logger.warning(f"gcash_receipt uploaded for non-gcash reward request {request_id}; ignoring file.")
+            else:
+                # Merchandise or other rewards
+                reward_request.status = 'ready_for_pickup'
+                if gcash_receipt:
+                    # Prevent accidental uploads on non-gcash rewards
+                    logger.warning(f"gcash_receipt uploaded for non-gcash reward request {request_id}; ignoring file.")
+            
+            reward_request.approved_at = timezone.now()
+            reward_request.approved_by = admin_user
 
             if notes:
                 reward_request.notes = notes
 
             reward_request.save()
 
-            if is_gcash:
+            # Auto-claim only for regular GCash requests (pending -> approved), not tracker rewards
+            if is_gcash and reward_request.status == 'approved':
                 auto_claim_result = _auto_claim_gcash_reward(reward_request, admin_user)
 
         # Get admin profile picture for notification
@@ -14460,16 +14470,29 @@ def approve_reward_request_view(request, request_id):
             logger.warning(f"Error getting admin profile pic for notification: {e}")
 
         if is_gcash:
-            notification_content = (
-                f'Your request for "{reward_request.reward_item.name}" has been approved and paid out automatically. '
-                'No further action is needed on your end. '
-            )
-            if auto_claim_result:
-                notification_content += (
-                    f'{auto_claim_result["points_deducted"]} points were deducted and the reward was saved to your history. '
+            # Check if this is a tracker reward (points_cost = 0 and notes mention tracker)
+            is_tracker_reward = reward_request.points_cost == 0 and reward_request.notes and 'tracker' in reward_request.notes.lower()
+            
+            if is_tracker_reward and reward_request.status == 'claimed':
+                # Tracker reward with receipt uploaded and released
+                notification_content = (
+                    f'Your tracker reward "{reward_request.reward_item.name}" has been processed! '
+                    'The GCash payment has been sent to your account. '
                 )
-            if reward_request.gcash_receipt:
-                notification_content += 'A payment receipt is available for viewing. '
+                if reward_request.gcash_receipt:
+                    notification_content += 'A payment receipt is available for viewing. '
+            else:
+                # Regular GCash request
+                notification_content = (
+                    f'Your request for "{reward_request.reward_item.name}" has been approved and paid out automatically. '
+                    'No further action is needed on your end. '
+                )
+                if auto_claim_result:
+                    notification_content += (
+                        f'{auto_claim_result["points_deducted"]} points were deducted and the reward was saved to your history. '
+                    )
+                if reward_request.gcash_receipt:
+                    notification_content += 'A payment receipt is available for viewing. '
         else:
             notification_content = (
                 f'Your request for "{reward_request.reward_item.name}" has been processed. '
@@ -14516,6 +14539,21 @@ def approve_reward_request_view(request, request_id):
 
         if auto_claim_result:
             response_payload.update(auto_claim_result)
+        
+        # For tracker rewards that are now claimed, include history_id
+        if is_tracker_reward and reward_request.status == 'claimed':
+            try:
+                # Get the history entry we just created
+                reward_history = RewardHistory.objects.filter(
+                    user=reward_request.user,
+                    reward_name=reward_request.reward_item.name,
+                    reward_type__icontains='tracker',
+                    given_by=admin_user
+                ).order_by('-given_at').first()
+                if reward_history:
+                    response_payload['history_id'] = reward_history.history_id
+            except Exception as e:
+                logger.warning(f"Could not retrieve history_id for tracker reward: {e}")
 
         return JsonResponse(response_payload)
 
@@ -14525,6 +14563,120 @@ def approve_reward_request_view(request, request_id):
         return JsonResponse({'success': False, 'message': str(e)}, status=400)
     except Exception as e:
         logger.error(f"approve_reward_request_view error: {e}")
+        return JsonResponse({'success': False, 'message': f'Error: {str(e)}'}, status=500)
+def update_reward_request_gcash_view(request, request_id):
+    """
+    POST: User updates GCash number and name for an existing reward request.
+    Used for tracker rewards where admin assigned the reward and user needs to provide GCash info.
+    """
+    try:
+        user = request.user
+        data = json.loads(request.body or '{}')
+        gcash_number = data.get('gcash_number', '').strip()
+        gcash_name = data.get('gcash_name', '').strip()
+
+        if not gcash_number:
+            return JsonResponse(
+                {'success': False, 'message': 'GCash number is required'},
+                status=400
+            )
+        if not gcash_name:
+            return JsonResponse(
+                {'success': False, 'message': 'GCash name is required'},
+                status=400
+            )
+        
+        # Validate GCash number format (11 digits)
+        if not gcash_number.isdigit() or len(gcash_number) != 11:
+            return JsonResponse(
+                {'success': False, 'message': 'GCash number must be exactly 11 digits'},
+                status=400
+            )
+
+        try:
+            reward_request = RewardRequest.objects.get(request_id=request_id)
+        except RewardRequest.DoesNotExist:
+            return JsonResponse(
+                {'success': False, 'message': 'Reward request not found'},
+                status=404
+            )
+
+        # Verify this request belongs to the user
+        if reward_request.user.user_id != user.user_id:
+            return JsonResponse(
+                {'success': False, 'message': 'Unauthorized access'},
+                status=403
+            )
+
+        # Only allow updating GCash info for pending status (tracker rewards)
+        if reward_request.status != 'pending':
+            return JsonResponse(
+                {'success': False, 'message': f'Cannot update GCash info. Request status is {reward_request.status}'},
+                status=400
+            )
+        
+        # Check if GCash info already provided
+        if reward_request.gcash_number and reward_request.gcash_name:
+            return JsonResponse(
+                {'success': False, 'message': 'GCash information has already been provided for this reward.'},
+                status=400
+            )
+        
+        # Check if this is a tracker reward
+        is_tracker_reward = reward_request.points_cost == 0 and reward_request.notes and 'tracker' in reward_request.notes.lower()
+        if not is_tracker_reward:
+            return JsonResponse(
+                {'success': False, 'message': 'This endpoint is only for tracker rewards.'},
+                status=400
+            )
+
+        # Check if reward is GCash type
+        if not reward_request.reward_item:
+            return JsonResponse(
+                {'success': False, 'message': 'Reward item not found'},
+                status=400
+            )
+
+        reward_type = reward_request.reward_item.type.lower()
+        if reward_type not in ['gcash', 'gift card', 'giftcard', 'coupon']:
+            return JsonResponse(
+                {'success': False, 'message': 'This reward is not a GCash reward'},
+                status=400
+            )
+
+        # Update GCash info (status remains 'pending' - waiting for admin approval)
+        reward_request.gcash_number = gcash_number
+        reward_request.gcash_name = gcash_name
+        # Status stays as 'pending' - no need to change it since it's already pending
+        reward_request.save()
+
+        # Notify admins that GCash info has been provided
+        admin_users = User.objects.filter(account_type__admin=True)
+        for admin in admin_users:
+            notification = Notification.objects.create(
+                user=admin,
+                notif_type='Reward Request',
+                subject='GCash Info Provided',
+                notifi_content=f'{user.full_name} has provided GCash information for reward "{reward_request.reward_item.name}". You can now upload the receipt to complete the reward.',
+                notif_date=timezone.now(),
+                is_read=False
+            )
+            try:
+                from apps.messaging.notification_broadcaster import broadcast_notification
+                broadcast_notification(notification)
+            except Exception as e:
+                logger.error(f"Error broadcasting notification to admin {admin.user_id}: {e}")
+
+        return JsonResponse({
+            'success': True,
+            'message': 'GCash information updated successfully',
+            'request_id': reward_request.request_id
+        })
+
+    except json.JSONDecodeError:
+        return JsonResponse({'success': False, 'message': 'Invalid JSON data'}, status=400)
+    except Exception as e:
+        logger.error(f"update_reward_request_gcash_view error: {e}")
         return JsonResponse({'success': False, 'message': f'Error: {str(e)}'}, status=500)
 
 

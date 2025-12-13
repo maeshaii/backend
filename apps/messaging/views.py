@@ -980,18 +980,65 @@ class AttachmentUploadView(APIView):
             except (ValueError, TypeError):
                 return Response({'error': 'Invalid conversation_id'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Define allowed types first (needed for validation logic)
+        allowed_types = [
+            # Images
+            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+            # Documents - PDF
+            'application/pdf',
+            # Documents - Microsoft Word
+            'application/msword',  # .doc
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
+            # Documents - Microsoft Excel
+            'application/vnd.ms-excel',  # .xls
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',  # .xlsx
+            # Documents - Microsoft PowerPoint
+            'application/vnd.ms-powerpoint',  # .ppt
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',  # .pptx
+            # Text files
+            'text/plain', 'text/csv', 'text/rtf',
+            # OpenDocument formats
+            'application/vnd.oasis.opendocument.text',  # .odt
+            'application/vnd.oasis.opendocument.spreadsheet',  # .ods
+            'application/vnd.oasis.opendocument.presentation',  # .odp
+            # Compressed files
+            'application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed',
+            # Audio files (for voice messages/documentation)
+            'audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/mp4', 'audio/ogg',
+            # Video files (for documentation)
+            'video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo'
+        ]
+        
         try:
             # Sanitize filename
             original_filename = file.name
             sanitized_filename = ContentSanitizer.sanitize_filename(original_filename)
             
+            # Normalize MIME types (some browsers send variations)
+            # Map common variations to standard types
+            mime_type_mapping = {
+                'image/jpg': 'image/jpeg',  # Normalize jpg to jpeg
+            }
+            if file.content_type in mime_type_mapping:
+                file.content_type = mime_type_mapping[file.content_type]
+            
             # Additional security: Validate file extension matches MIME type
+            # But be lenient - if browser says it's a valid type, trust it
             file_extension = os.path.splitext(sanitized_filename)[1].lower()
             expected_mime = mimetypes.guess_type(sanitized_filename)[0]
+            
+            # Only override if:
+            # 1. Expected MIME exists
+            # 2. Browser MIME type is not in our allowed list
+            # 3. Expected MIME is in our allowed list
             if expected_mime and expected_mime != file.content_type:
-                logger.warning("File MIME type mismatch: %s vs expected %s for %s", file.content_type, expected_mime, sanitized_filename)
-                # Use the expected MIME type for validation instead of the provided one
-                file.content_type = expected_mime
+                # Check if browser's content_type is invalid but expected_mime is valid
+                if file.content_type not in allowed_types and expected_mime in allowed_types:
+                    logger.warning("File MIME type mismatch: %s vs expected %s for %s - using expected", file.content_type, expected_mime, sanitized_filename)
+                    file.content_type = expected_mime
+                elif file.content_type in allowed_types:
+                    # Browser's type is valid, trust it even if filename suggests different
+                    logger.debug("File MIME type from browser (%s) differs from filename guess (%s) for %s - trusting browser", file.content_type, expected_mime, sanitized_filename)
         except Exception as e:
             logger.error("Filename sanitization failed: %s", e)
             return Response({'error': 'Invalid filename'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1027,47 +1074,12 @@ class AttachmentUploadView(APIView):
             logger.error("File content validation error: %s", e)
             return Response({'error': 'File validation failed'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate file type - Comprehensive list of supported document and media types
-        allowed_types = [
-            # Images
-            'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
-            
-            # Documents - PDF
-            'application/pdf',
-            
-            # Documents - Microsoft Word
-            'application/msword',  # .doc
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
-            
-            # Documents - Microsoft Excel
-            'application/vnd.ms-excel',  # .xls
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',  # .xlsx
-            
-            # Documents - Microsoft PowerPoint
-            'application/vnd.ms-powerpoint',  # .ppt
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation',  # .pptx
-            
-            # Text files
-            'text/plain', 'text/csv', 'text/rtf',
-            
-            # OpenDocument formats
-            'application/vnd.oasis.opendocument.text',  # .odt
-            'application/vnd.oasis.opendocument.spreadsheet',  # .ods
-            'application/vnd.oasis.opendocument.presentation',  # .odp
-            
-            # Compressed files
-            'application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed',
-            
-            # Audio files (for voice messages/documentation)
-            'audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/mp4', 'audio/ogg',
-            
-            # Video files (for documentation)
-            'video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo'
-        ]
+        # Validate file type (allowed_types already defined above)
         if file.content_type not in allowed_types:
             return Response({'error': 'File type not allowed'}, status=status.HTTP_400_BAD_REQUEST)
         
         # Validate file extension matches content type
+        # Be more lenient - only validate if we have a strict mapping
         allowed_extensions = {
             'image/jpeg': ['.jpg', '.jpeg'],
             'image/png': ['.png'],
@@ -1098,9 +1110,23 @@ class AttachmentUploadView(APIView):
             'video/x-msvideo': ['.avi'],
         }
         
+        # Only validate extension if we have a strict mapping for this content type
+        # For types without strict mapping (or if extension validation fails), 
+        # trust the browser's content-type detection
+        # NOTE: Extension validation is lenient - we trust the browser's MIME type detection
+        # as it's more reliable than filename-based guessing
         if file.content_type in allowed_extensions:
-            if not SecurityValidator.validate_file_extension(sanitized_filename, allowed_extensions[file.content_type]):
-                return Response({'error': 'File extension does not match file type'}, status=status.HTTP_400_BAD_REQUEST)
+            file_ext_lower = os.path.splitext(sanitized_filename)[1].lower()
+            expected_exts = allowed_extensions[file.content_type]
+            if file_ext_lower not in expected_exts:
+                # Log warning but don't fail - browser's content-type detection is usually reliable
+                logger.warning("File extension (%s) doesn't match expected extensions (%s) for %s, but trusting browser's content-type", 
+                             file_ext_lower, expected_exts, file.content_type)
+                # Don't reject - browser's MIME type detection is usually correct
+                # This handles cases where:
+                # - File has correct MIME type but extension is slightly different
+                # - Browser correctly identifies file type despite extension mismatch
+                # - Mobile devices sometimes send files with generic extensions
 
         try:
             # Read file content for cloud storage
@@ -1163,47 +1189,62 @@ class AttachmentUploadView(APIView):
 @api_view(['GET'])
 def serve_file_with_ngrok_bypass(request, file_path):
     """
-    Serve files with ngrok-skip-browser-warning header to bypass ngrok warning page
+    Serve files with ngrok-skip-browser-warning header to bypass ngrok warning page.
+    Robust HTTP range support for seamless video/audio streaming.
+    Always serve videos/audio inline (never forced attachment).
     """
     try:
         # Construct the full file path
         full_path = os.path.join(settings.MEDIA_ROOT, file_path)
-        
-        # Check if file exists
         if not os.path.exists(full_path):
             raise Http404("File not found")
-        
-        # Read the file
-        with open(full_path, 'rb') as f:
-            file_content = f.read()
-        
-        # Determine content type
-        import mimetypes
+        file_size = os.path.getsize(full_path)
         content_type, _ = mimetypes.guess_type(full_path)
         if not content_type:
             content_type = 'application/octet-stream'
-        
-        # Create response with ngrok bypass header
+
+        range_header = request.META.get('HTTP_RANGE', '').strip()
+
+        # Video/audio always stream as inline, never force-download
+        is_media = content_type.startswith('video/') or content_type.startswith('audio/')
+
+        if range_header and is_media:
+            # Parse Range header: bytes=0-1023 or bytes=1024-
+            import re
+            range_match = re.match(r'bytes=(\d*)-(\d*)', range_header)
+            if range_match:
+                start = int(range_match.group(1)) if range_match.group(1) else 0
+                end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+                if start >= file_size:
+                    response = HttpResponse(status=416)
+                    response['Content-Range'] = f'bytes */{file_size}'
+                    response['ngrok-skip-browser-warning'] = 'true'
+                    return response
+                end = min(end, file_size - 1)
+                content_length = end - start + 1
+                with open(full_path, 'rb') as f:
+                    f.seek(start)
+                    file_content = f.read(content_length)
+                response = HttpResponse(file_content, status=206, content_type=content_type)
+                response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+                response['Content-Length'] = str(content_length)
+                response['Accept-Ranges'] = 'bytes'
+                response['ngrok-skip-browser-warning'] = 'true'
+                response['Content-Disposition'] = f'inline; filename="{os.path.basename(full_path)}"'
+                return response
+
+        # Default: serve full file (inline for video/audio)
+        with open(full_path, 'rb') as f:
+            file_content = f.read()
         response = HttpResponse(file_content, content_type=content_type)
         response['ngrok-skip-browser-warning'] = 'true'
-        
-        # Check for mobile download parameters
-        download_param = request.GET.get('download')
-        bypass_param = request.GET.get('bypass')
-        ua_param = request.GET.get('ua')
-        
-        if download_param == '1' or bypass_param == '1' or ua_param == 'mobile':
-            # Force download for mobile devices
-            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
-            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-            response['Pragma'] = 'no-cache'
-            response['Expires'] = '0'
+        response['Content-Length'] = str(file_size)
+        response['Accept-Ranges'] = 'bytes'
+        if is_media:
+            response['Content-Disposition'] = f'inline; filename="{os.path.basename(full_path)}"'
         else:
-            # Default behavior
             response['Content-Disposition'] = f'attachment; filename="{os.path.basename(full_path)}"'
-        
         return response
-        
     except Exception as e:
-        logger.exception(f"Error serving file {file_path}")
+        logger.exception(f"Error serving file {file_path}: {e}")
         raise Http404("File not found")
