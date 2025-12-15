@@ -22,6 +22,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 REDIS_URL = os.getenv('REDIS_URL')
 
+# Groq API Key for AI Summaries (loaded from .env file)
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/

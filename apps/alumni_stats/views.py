@@ -72,6 +72,7 @@ def alumni_statistics_view(request):
     Simple overview of alumni employment status counts and available years - Admin/PESO only
     
     ⚠️ SECURITY: Restricted to Admin/PESO to protect aggregate alumni data
+    Supports multi-select: year and program can be comma-separated values
     """
     try:
         year = request.GET.get('year')
@@ -82,10 +83,17 @@ def alumni_statistics_view(request):
             'academic_info', 'employment', 'tracker_data'
         )
         
+        # Support multi-select: year can be comma-separated (e.g., "2020,2021,2022")
         if year and year != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                alumni_qs = alumni_qs.filter(academic_info__year_graduated__in=years_list)
+        
+        # Support multi-select: program can be comma-separated (e.g., "BSIT,BSIS")
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__program=course)
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
 
         total_alumni = alumni_qs.count()
 
@@ -162,10 +170,17 @@ def generate_statistics_view(request):
             'profile', 'academic_info', 'employment', 'tracker_data', 'ojt_info'
         )
         
+        # Support multi-select: year can be comma-separated (e.g., "2020,2021,2022")
         if year and year != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                alumni_qs = alumni_qs.filter(academic_info__year_graduated__in=years_list)
+        
+        # Support multi-select: program can be comma-separated (e.g., "BSIT,BSIS")
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__program=course)
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
         
         total_alumni = alumni_qs.count()
         
@@ -514,6 +529,7 @@ def export_detailed_alumni_data(request):
     Export detailed alumni data - Admin/PESO only
     
     ⚠️ SECURITY: Restricted to Admin/PESO - Exports sensitive alumni data
+    Supports multi-select: year and program can be comma-separated values
     """
     try:
         year = request.GET.get('year', 'ALL')
@@ -524,10 +540,17 @@ def export_detailed_alumni_data(request):
             'profile', 'academic_info', 'employment', 'tracker_data', 'ojt_info'
         ).prefetch_related('trackerresponse_set')
         
+        # Support multi-select: year can be comma-separated (e.g., "2020,2021,2022")
         if year and year != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__year_graduated=year)
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                alumni_qs = alumni_qs.filter(academic_info__year_graduated__in=years_list)
+        
+        # Support multi-select: program can be comma-separated (e.g., "BSIT,BSIS")
         if course and course != 'ALL':
-            alumni_qs = alumni_qs.filter(academic_info__program=course)
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
         
         # Collect all tracker question texts that have been answered by any alumni in the queryset
         all_tracker_qids = set()
@@ -654,3 +677,579 @@ def export_detailed_alumni_data(request):
     except Exception as e:
         logger.error(f"Error in export_detailed_alumni_data: {e}")
         return JsonResponse({'success': False, 'message': 'Failed to export detailed data'}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminOrPeso])
+def chart_statistics_by_year(request):
+    """
+    Get employment statistics grouped by year for chart visualization.
+    Returns E (Employed), UE (Unemployed), NT (Not Tracked), and GT (Graduate Tracing Rate %)
+    for each year, filtered by selected programs.
+    
+    Supports multi-select: year and program can be comma-separated values
+    """
+    try:
+        year = request.GET.get('year', 'ALL')
+        course = request.GET.get('program', 'ALL')
+        
+        from apps.shared.models import TrackerData, EmploymentHistory
+        from django.db.models import Q, Count
+        
+        # Get base alumni queryset
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'academic_info', 'employment', 'tracker_data'
+        )
+        
+        # Filter by program if specified
+        if course and course != 'ALL':
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
+        
+        # Get all available years from the filtered alumni
+        all_years = alumni_qs.values_list(
+            'academic_info__year_graduated', flat=True
+        ).distinct().order_by('academic_info__year_graduated')
+        all_years = [y for y in all_years if y is not None]
+        
+        # If specific years are selected, filter to only those
+        if year and year != 'ALL':
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                all_years = [y for y in all_years if str(y) in years_list]
+        
+        chart_data = []
+        
+        for yr in all_years:
+            # Get alumni for this specific year
+            year_alumni = alumni_qs.filter(academic_info__year_graduated=yr)
+            total_for_year = year_alumni.count()
+            
+            if total_for_year == 0:
+                continue
+            
+            # Count employment status using TrackerData
+            employment_stats = TrackerData.objects.filter(user__in=year_alumni).aggregate(
+                employed=Count('id', filter=Q(q_employment_status__iexact='yes')),
+                unemployed=Count('id', filter=Q(q_employment_status__iexact='no'))
+            )
+            
+            employed = employment_stats['employed'] or 0
+            unemployed = employment_stats['unemployed'] or 0
+            
+            # Calculate not tracked: alumni who haven't answered tracker
+            alumni_with_tracker = TrackerData.objects.filter(
+                user__in=year_alumni
+            ).filter(
+                Q(q_employment_status__isnull=False) & ~Q(q_employment_status='') |
+                Q(tracker_submitted_at__isnull=False)
+            ).values_list('user_id', flat=True).distinct().count()
+            
+            not_tracked = max(total_for_year - alumni_with_tracker, 0)
+            
+            # Calculate Graduate Tracing Rate (percentage of tracked alumni)
+            tracked = employed + unemployed
+            tracking_rate = round((tracked / total_for_year * 100), 2) if total_for_year > 0 else 0
+            
+            chart_data.append({
+                'year': str(yr),
+                'E': employed,           # Employed
+                'UE': unemployed,        # Unemployed
+                'NT': not_tracked,       # Not Tracked
+                'GT': tracking_rate,     # Graduate Tracing Rate %
+                'total': total_for_year
+            })
+        
+        # Sort by year
+        chart_data.sort(key=lambda x: x['year'])
+        
+        return JsonResponse({
+            'success': True,
+            'chart_data': chart_data,
+            'years': [d['year'] for d in chart_data],
+            'programs': course
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in chart_statistics_by_year: {e}")
+        return JsonResponse({'success': False, 'message': 'Failed to generate chart data'}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminOrPeso])
+def ched_chart_statistics_by_year(request):
+    """
+    Get CHED statistics grouped by year for chart visualization.
+    Returns Pursuing Further Study, Job Alignment, Self-Employed for each year.
+    """
+    try:
+        year = request.GET.get('year', 'ALL')
+        course = request.GET.get('program', 'ALL')
+        
+        from apps.shared.models import TrackerData, EmploymentHistory
+        from django.db.models import Q, Count
+        
+        # Get base alumni queryset
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'academic_info', 'employment', 'tracker_data'
+        )
+        
+        # Filter by program if specified
+        if course and course != 'ALL':
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
+        
+        # Get all available years
+        all_years = alumni_qs.values_list(
+            'academic_info__year_graduated', flat=True
+        ).distinct().order_by('academic_info__year_graduated')
+        all_years = [y for y in all_years if y is not None]
+        
+        # If specific years are selected, filter to only those
+        if year and year != 'ALL':
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                all_years = [y for y in all_years if str(y) in years_list]
+        
+        chart_data = []
+        
+        for yr in all_years:
+            year_alumni = alumni_qs.filter(academic_info__year_graduated=yr)
+            total_for_year = year_alumni.count()
+            
+            if total_for_year == 0:
+                continue
+            
+            # Pursuing Further Study - using academic_info.pursue_further_study field
+            pursuing_study = year_alumni.filter(
+                Q(academic_info__pursue_further_study__iexact='yes')
+            ).count()
+            
+            # Job Alignment - using employment.job_alignment_status field
+            job_aligned = year_alumni.filter(
+                employment__job_alignment_status='aligned'
+            ).count()
+            
+            # Self-Employed - check employment type from TrackerData
+            tracker_data = TrackerData.objects.filter(user__in=year_alumni)
+            self_employed = tracker_data.filter(
+                Q(q_employment_type__icontains='self') |
+                Q(q_employment_type__icontains='business') |
+                Q(q_employment_type__icontains='freelance')
+            ).count()
+            
+            chart_data.append({
+                'year': str(yr),
+                'PFS': pursuing_study,      # Pursuing Further Study
+                'JA': job_aligned,          # Job Alignment
+                'SE': self_employed,        # Self-Employed
+                'total': total_for_year
+            })
+        
+        chart_data.sort(key=lambda x: x['year'])
+        
+        return JsonResponse({
+            'success': True,
+            'chart_data': chart_data,
+            'years': [d['year'] for d in chart_data],
+            'programs': course
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in ched_chart_statistics_by_year: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JsonResponse({'success': False, 'message': 'Failed to generate CHED chart data'}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminOrPeso])
+def suc_chart_statistics_by_year(request):
+    """
+    Get SUC statistics grouped by year for chart visualization.
+    Returns High Position, Government, Private, Local, International for each year.
+    """
+    try:
+        year = request.GET.get('year', 'ALL')
+        course = request.GET.get('program', 'ALL')
+        
+        from apps.shared.models import TrackerData, EmploymentHistory
+        from django.db.models import Q, Count
+        
+        # Get base alumni queryset
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'academic_info', 'employment', 'tracker_data'
+        )
+        
+        # Filter by program if specified
+        if course and course != 'ALL':
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
+        
+        # Get all available years
+        all_years = alumni_qs.values_list(
+            'academic_info__year_graduated', flat=True
+        ).distinct().order_by('academic_info__year_graduated')
+        all_years = [y for y in all_years if y is not None]
+        
+        # If specific years are selected, filter to only those
+        if year and year != 'ALL':
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                all_years = [y for y in all_years if str(y) in years_list]
+        
+        chart_data = []
+        
+        for yr in all_years:
+            year_alumni = alumni_qs.filter(academic_info__year_graduated=yr)
+            total_for_year = year_alumni.count()
+            
+            if total_for_year == 0:
+                continue
+            
+            # High Position count - using employment.high_position field
+            high_position = year_alumni.filter(employment__high_position=True).count()
+            
+            # Get TrackerData for sector and scope stats
+            tracker_data = TrackerData.objects.filter(user__in=year_alumni)
+            
+            # Government (Public sector) - using q_sector_current field
+            government = tracker_data.filter(
+                Q(q_sector_current__iexact='public') | 
+                Q(q_sector_current__iexact='government')
+            ).count()
+            
+            # Private sector - using q_sector_current field
+            private = tracker_data.filter(
+                Q(q_sector_current__iexact='private')
+            ).count()
+            
+            # Local employment - using q_scope_current field
+            local = tracker_data.filter(
+                Q(q_scope_current__iexact='local')
+            ).count()
+            
+            # International employment - using q_scope_current field
+            international = tracker_data.filter(
+                Q(q_scope_current__iexact='international')
+            ).count()
+            
+            chart_data.append({
+                'year': str(yr),
+                'HP': high_position,    # High Position
+                'GOV': government,      # Government
+                'PVT': private,         # Private
+                'LOC': local,           # Local
+                'INTL': international,  # International
+                'total': total_for_year
+            })
+        
+        chart_data.sort(key=lambda x: x['year'])
+        
+        return JsonResponse({
+            'success': True,
+            'chart_data': chart_data,
+            'years': [d['year'] for d in chart_data],
+            'programs': course
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in suc_chart_statistics_by_year: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JsonResponse({'success': False, 'message': 'Failed to generate SUC chart data'}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminOrPeso])
+def aacup_chart_statistics_by_year(request):
+    """
+    Get AACUP statistics grouped by year for chart visualization.
+    Returns Employed, Absorbed, High Position, Self-Employed, Awards Received for each year.
+    """
+    try:
+        year = request.GET.get('year', 'ALL')
+        course = request.GET.get('program', 'ALL')
+        
+        from apps.shared.models import TrackerData, EmploymentHistory
+        from django.db.models import Q, Count
+        
+        # Get base alumni queryset
+        alumni_qs = User.objects.filter(account_type__user=True).select_related(
+            'academic_info', 'employment', 'tracker_data'
+        )
+        
+        # Filter by program if specified
+        if course and course != 'ALL':
+            programs_list = [p.strip() for p in course.split(',') if p.strip()]
+            if programs_list:
+                alumni_qs = alumni_qs.filter(academic_info__program__in=programs_list)
+        
+        # Get all available years
+        all_years = alumni_qs.values_list(
+            'academic_info__year_graduated', flat=True
+        ).distinct().order_by('academic_info__year_graduated')
+        all_years = [y for y in all_years if y is not None]
+        
+        # If specific years are selected, filter to only those
+        if year and year != 'ALL':
+            years_list = [y.strip() for y in year.split(',') if y.strip()]
+            if years_list:
+                all_years = [y for y in all_years if str(y) in years_list]
+        
+        chart_data = []
+        
+        for yr in all_years:
+            year_alumni = alumni_qs.filter(academic_info__year_graduated=yr)
+            total_for_year = year_alumni.count()
+            
+            if total_for_year == 0:
+                continue
+            
+            # Get tracker data
+            tracker_data = TrackerData.objects.filter(user__in=year_alumni)
+            
+            # Employed count - using q_employment_status field
+            employed = tracker_data.filter(
+                Q(q_employment_status__iexact='yes')
+            ).count()
+            
+            # Absorbed - using employment.absorbed field
+            absorbed = year_alumni.filter(employment__absorbed=True).count()
+            
+            # High Position count - using employment.high_position field
+            high_position = year_alumni.filter(employment__high_position=True).count()
+            
+            # Self-Employed - check employment type from TrackerData
+            self_employed = tracker_data.filter(
+                Q(q_employment_type__icontains='self') |
+                Q(q_employment_type__icontains='business') |
+                Q(q_employment_type__icontains='freelance')
+            ).count()
+            
+            # Awards Received - check tracker data for awards (yes/no field)
+            awards = tracker_data.filter(
+                Q(q_awards_received__iexact='yes')
+            ).count()
+            
+            chart_data.append({
+                'year': str(yr),
+                'EMP': employed,        # Employed
+                'ABS': absorbed,        # Absorbed
+                'HP': high_position,    # High Position
+                'SE': self_employed,    # Self-Employed
+                'AWD': awards,          # Awards Received
+                'total': total_for_year
+            })
+        
+        chart_data.sort(key=lambda x: x['year'])
+        
+        return JsonResponse({
+            'success': True,
+            'chart_data': chart_data,
+            'years': [d['year'] for d in chart_data],
+            'programs': course
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in aacup_chart_statistics_by_year: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JsonResponse({'success': False, 'message': 'Failed to generate AACUP chart data'}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminOrPeso])
+def generate_ai_summary(request):
+    """
+    Generate AI-powered summary for statistics using Groq API (Llama 3.1 70B).
+    Accepts statistics data and returns a professional summary paragraph.
+    """
+    import requests
+    from django.conf import settings
+    
+    try:
+        stats_type = request.data.get('stats_type', 'QPRO')
+        stats_data = request.data.get('stats_data', {})
+        chart_data = request.data.get('chart_data', [])
+        year_filter = request.data.get('year_filter', 'ALL')
+        program_filter = request.data.get('program_filter', 'ALL')
+        
+        logger.info(f"AI Summary request received for {stats_type}")
+        logger.info(f"Stats data: {stats_data}")
+        
+        # Build the prompt based on statistics type
+        prompt = build_summary_prompt(stats_type, stats_data, chart_data, year_filter, program_filter)
+        
+        # Call Groq API
+        groq_api_key = getattr(settings, 'GROQ_API_KEY', None)
+        logger.info(f"Groq API Key configured: {bool(groq_api_key)}")
+        
+        if not groq_api_key:
+            return JsonResponse({
+                'success': False, 
+                'message': 'Groq API key not configured'
+            }, status=500)
+        
+        response = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {groq_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'llama-3.3-70b-versatile',  # Updated to latest supported model
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': 'You are a professional data analyst specializing in alumni employment statistics. Generate comprehensive, insightful summaries that highlight key findings, trends, patterns, and implications. Write 5-7 sentences that provide meaningful analysis including: overall performance assessment, notable trends across years, comparison of metrics, areas of strength, areas needing improvement, and actionable recommendations. Be professional, factual, and analytical.'
+                    },
+                    {
+                        'role': 'user',
+                        'content': prompt
+                    }
+                ],
+                'temperature': 0.7,
+                'max_tokens': 500
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            summary = result['choices'][0]['message']['content'].strip()
+            return JsonResponse({
+                'success': True,
+                'summary': summary,
+                'stats_type': stats_type
+            })
+        else:
+            logger.error(f"Groq API error: {response.status_code} - {response.text}")
+            return JsonResponse({
+                'success': False,
+                'message': f'AI service error: {response.status_code}'
+            }, status=500)
+            
+    except requests.exceptions.Timeout:
+        logger.error("Groq API timeout")
+        return JsonResponse({
+            'success': False,
+            'message': 'AI service timeout. Please try again.'
+        }, status=504)
+    except Exception as e:
+        logger.error(f"Error generating AI summary: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JsonResponse({
+            'success': False,
+            'message': 'Failed to generate AI summary'
+        }, status=500)
+
+
+def build_summary_prompt(stats_type, stats_data, chart_data, year_filter, program_filter):
+    """Build a detailed prompt for the AI based on statistics type and data."""
+    
+    base_context = f"Year Filter: {year_filter}, Program Filter: {program_filter}"
+    
+    if stats_type == 'QPRO':
+        total = stats_data.get('total_alumni', 0)
+        employed = stats_data.get('employed_count', 0)
+        unemployed = stats_data.get('unemployed_count', 0)
+        untracked = stats_data.get('untracked_count', 0)
+        emp_rate = stats_data.get('employment_rate', 0)
+        
+        # Calculate tracking rate
+        tracked = employed + unemployed
+        tracking_rate = round((tracked / total * 100), 2) if total > 0 else 0
+        
+        prompt = f"""Analyze and summarize the following QPRO (Quarterly Progress Report on Outcomes) employment statistics:
+
+{base_context}
+- Total Alumni: {total}
+- Employed: {employed} ({round(employed/total*100, 1) if total > 0 else 0}%)
+- Unemployed: {unemployed} ({round(unemployed/total*100, 1) if total > 0 else 0}%)
+- Not Tracked: {untracked} ({round(untracked/total*100, 1) if total > 0 else 0}%)
+- Employment Rate: {emp_rate}%
+- Graduate Tracking Rate: {tracking_rate}%
+
+Yearly breakdown: {chart_data if chart_data else 'N/A'}
+
+Provide a professional summary highlighting employment performance, tracking coverage, and any notable trends."""
+
+    elif stats_type == 'CHED':
+        total = stats_data.get('total_alumni', 0)
+        pursuing = stats_data.get('pursuing_further_study', 0)
+        job_aligned = stats_data.get('job_aligned_count', 0)
+        self_employed = stats_data.get('self_employed_count', 0)
+        
+        prompt = f"""Analyze and summarize the following CHED (Commission on Higher Education) statistics:
+
+{base_context}
+- Total Alumni: {total}
+- Pursuing Further Study: {pursuing} ({round(pursuing/total*100, 1) if total > 0 else 0}%)
+- Job Aligned with Course: {job_aligned} ({round(job_aligned/total*100, 1) if total > 0 else 0}%)
+- Self-Employed: {self_employed} ({round(self_employed/total*100, 1) if total > 0 else 0}%)
+
+Yearly breakdown: {chart_data if chart_data else 'N/A'}
+
+Provide a professional summary highlighting further education trends, job-course alignment, and entrepreneurship among graduates."""
+
+    elif stats_type == 'SUC':
+        total = stats_data.get('total_alumni', 0)
+        high_pos = stats_data.get('high_position_count', 0)
+        govt = stats_data.get('public_count', 0)
+        private = stats_data.get('private_count', 0)
+        local = stats_data.get('local_count', 0)
+        intl = stats_data.get('international_count', 0)
+        avg_salary = stats_data.get('average_salary', 'N/A')
+        
+        prompt = f"""Analyze and summarize the following SUC (State Universities and Colleges) statistics:
+
+{base_context}
+- Total Alumni: {total}
+- High Position Holders: {high_pos} ({round(high_pos/total*100, 1) if total > 0 else 0}%)
+- Government Sector: {govt} ({round(govt/total*100, 1) if total > 0 else 0}%)
+- Private Sector: {private} ({round(private/total*100, 1) if total > 0 else 0}%)
+- Local Employment: {local} ({round(local/total*100, 1) if total > 0 else 0}%)
+- International Employment: {intl} ({round(intl/total*100, 1) if total > 0 else 0}%)
+- Average Salary: {avg_salary}
+
+Yearly breakdown: {chart_data if chart_data else 'N/A'}
+
+Provide a professional summary highlighting career advancement, sector distribution, geographic employment patterns, and salary insights."""
+
+    elif stats_type == 'AACUP':
+        total = stats_data.get('total_alumni', 0)
+        employed = stats_data.get('employed_count', 0)
+        absorbed = stats_data.get('absorbed_count', 0)
+        high_pos = stats_data.get('high_position_count', 0)
+        self_emp = stats_data.get('self_employed_count', 0)
+        awards = stats_data.get('awards_count', 0)
+        
+        prompt = f"""Analyze and summarize the following AACUP (Accrediting Agency of Chartered Colleges and Universities in the Philippines) statistics:
+
+{base_context}
+- Total Alumni: {total}
+- Employed: {employed} ({round(employed/total*100, 1) if total > 0 else 0}%)
+- Absorbed (Job-Course Aligned): {absorbed} ({round(absorbed/total*100, 1) if total > 0 else 0}%)
+- High Position Holders: {high_pos} ({round(high_pos/total*100, 1) if total > 0 else 0}%)
+- Self-Employed: {self_emp} ({round(self_emp/total*100, 1) if total > 0 else 0}%)
+- Awards Received: {awards} ({round(awards/total*100, 1) if total > 0 else 0}%)
+
+Yearly breakdown: {chart_data if chart_data else 'N/A'}
+
+Provide a professional summary highlighting employment outcomes, career progression, entrepreneurship, and recognition/achievements among graduates."""
+
+    else:
+        prompt = f"""Analyze and summarize the following alumni statistics:
+
+{base_context}
+Statistics Data: {stats_data}
+Chart Data: {chart_data}
+
+Provide a professional summary of the key findings."""
+
+    return prompt
