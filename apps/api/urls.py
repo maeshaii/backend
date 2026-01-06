@@ -42,6 +42,8 @@ urlpatterns = [
     path('ojt/status/', ojt_status_update_view, name='ojt_status_update'),
     path('ojt/send-to-admin/', send_completed_to_admin_view, name='ojt_send_to_admin'),
     path('ojt/coordinator-requests/', coordinator_requests_count_view, name='ojt_coordinator_requests'),
+    path('ojt/new-users-count/', views.new_users_count_view, name='new_users_count'),
+    path('ojt/new-users-list/', views.new_users_list_view, name='new_users_list'),
     path('ojt/coordinator-requests/list/', coordinator_requests_list_view, name='ojt_coordinator_requests_list'),
     path('ojt/coordinator-requests/approve/', approve_coordinator_request_view, name='ojt_coordinator_requests_approve'),
     path('ojt/approve-to-alumni/', approve_ojt_to_alumni_view, name='ojt_approve_to_alumni'),
@@ -165,6 +167,7 @@ urlpatterns = [
     
     # Engagement Points & Leaderboard
     path('engagement/leaderboard/', views.engagement_leaderboard_view, name='engagement_leaderboard'),
+    path('engagement/user-points/', views.get_user_points_view, name='get_user_points'),
     path('engagement/tasks/', views.engagement_tasks_view, name='engagement_tasks'),
     path('engagement/points-tasks/', views.points_tasks_view, name='points_tasks'),
     path('engagement/points-settings/', views.engagement_points_settings_view, name='engagement_points_settings'),

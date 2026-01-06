@@ -16,4 +16,7 @@ urlpatterns = [
     
     # Summary and statistics
     path('summary/', views.ojt_users_summary, name='ojt_users_summary'),
+    
+    # Company suggestions
+    path('company-suggestions/', views.get_company_suggestions, name='get_company_suggestions'),
 ] 

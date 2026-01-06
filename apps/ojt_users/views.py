@@ -11,9 +11,11 @@ from django.http import JsonResponse, Http404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from apps.shared.models import User, UserProfile, AcademicInfo, OJTInfo, AccountType
+from django.utils import timezone
+from apps.shared.models import User, UserProfile, AcademicInfo, OJTInfo, AccountType, OJTCompanyProfile
 import json
 from django.db import models
+from collections import defaultdict, Counter
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +261,7 @@ def update_ojt_status(request, user_id):
         return JsonResponse({'success': False, 'error': 'Failed to update OJT status'}, status=500)
 
 # Update OJT user information
-@api_view(["PUT", "PATCH"])
+@api_view(["POST", "PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
 def update_ojt_user(request, user_id):
     """
@@ -270,6 +272,7 @@ def update_ojt_user(request, user_id):
         profile, _ = UserProfile.objects.get_or_create(user=user)
         academic, _ = AcademicInfo.objects.get_or_create(user=user)
         ojtinfo, _ = OJTInfo.objects.get_or_create(user=user)
+        ojt_company_profile, _ = OJTCompanyProfile.objects.get_or_create(user=user)
 
         data = json.loads(request.body)
 
@@ -294,16 +297,68 @@ def update_ojt_user(request, user_id):
                 updated_fields.append(f'academic.{field}')
 
         # OJT info fields
-        for field in ['ojt_end_date', 'job_code', 'ojtstatus']:
+        for field in ['ojt_end_date', 'job_code', 'ojtstatus', 'ojt_start_date']:
             if field in data:
                 setattr(ojtinfo, field, data[field])
                 updated_fields.append(f'ojt_info.{field}')
+
+        # OJT Company Profile fields
+        company_fields = {
+            'company_name': 'company_name',
+            'company_address': 'company_address',
+            'company_email': 'company_email',
+            'company_contact': 'company_contact',
+            'contact_person': 'contact_person',
+            'position': 'position',
+        }
+        
+        company_info_updated = False
+        for data_field, model_field in company_fields.items():
+            if data_field in data:
+                setattr(ojt_company_profile, model_field, data[data_field])
+                updated_fields.append(f'company_profile.{data_field}')
+                company_info_updated = True
+        
+        # Save coordinator when company info is updated
+        if company_info_updated:
+            # Get coordinator from request data, or from request user
+            coordinator_username = data.get('coordinator') or getattr(request.user, 'acc_username', None) or getattr(request.user, 'username', None)
+            if coordinator_username:
+                ojt_company_profile.coordinator = coordinator_username
+                updated_fields.append('company_profile.coordinator')
+        
+        # Automatically set start date when company info is updated (if not already set)
+        if company_info_updated and not ojtinfo.ojt_start_date:
+            from django.utils import timezone
+            today = timezone.now().date()
+            ojtinfo.ojt_start_date = today
+            ojt_company_profile.start_date = today
+            updated_fields.append('ojt_info.ojt_start_date (auto-set)')
+            updated_fields.append('company_profile.start_date (auto-set)')
+        
+        # When company info is updated, set status to "Ongoing" unless explicitly provided
+        if company_info_updated:
+            # Only auto-set status if it's not explicitly provided in the request
+            if 'ojtstatus' not in data and 'ojt_status' not in data:
+                # Set to "Ongoing" if currently "Not Started", empty, or "Completed"
+                current_status = (ojtinfo.ojtstatus or '').strip()
+                if not current_status or current_status == 'Not Started' or current_status == 'Completed':
+                    ojtinfo.ojtstatus = 'Ongoing'
+                    updated_fields.append('ojt_info.ojtstatus (auto-set to Ongoing)')
+        
+        # Handle ojt_start_date if explicitly provided
+        if 'ojt_start_date' in data and data['ojt_start_date']:
+            ojtinfo.ojt_start_date = data['ojt_start_date']
+            ojt_company_profile.start_date = data['ojt_start_date']
+            updated_fields.append('ojt_info.ojt_start_date')
+            updated_fields.append('company_profile.start_date')
 
         if updated_fields:
             user.save()
             profile.save()
             academic.save()
             ojtinfo.save()
+            ojt_company_profile.save()
             return JsonResponse({
                 'success': True,
                 'message': f'Updated fields: {", ".join(updated_fields)}',
@@ -449,3 +504,80 @@ def ojt_users_summary(request):
     except Exception as e:
         logger.error(f"Error in ojt_users_summary: {e}")
         return JsonResponse({'success': False, 'error': 'Failed to summarize OJT users'}, status=500)
+
+# Get company suggestions based on previous entries
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_company_suggestions(request):
+    """
+    Get company suggestions based on previous OJT company profiles.
+    Returns unique company names, addresses, emails, contacts, contact persons, and positions.
+    Only shows suggestions from the current coordinator's previous entries.
+    """
+    try:
+        field = request.GET.get('field', 'company_name')  # company_name, company_address, company_email, etc.
+        query = request.GET.get('query', '').strip()
+        limit = int(request.GET.get('limit', 10))
+        
+        # Validate field
+        valid_fields = ['company_name', 'company_address', 'company_email', 'company_contact', 'contact_person', 'position']
+        if field not in valid_fields:
+            return JsonResponse({'success': False, 'error': f'Invalid field. Must be one of: {", ".join(valid_fields)}'}, status=400)
+        
+        # Get coordinator username from request parameter or authenticated user
+        coordinator_username = request.GET.get('coordinator') or getattr(request.user, 'acc_username', None) or getattr(request.user, 'username', None)
+        
+        # Get distinct values from OJTCompanyProfile, filtered by coordinator
+        queryset = OJTCompanyProfile.objects.exclude(**{field: None}).exclude(**{field: ''})
+        
+        # Filter by coordinator if available (only show suggestions from this coordinator)
+        if coordinator_username:
+            queryset = queryset.filter(coordinator=coordinator_username)
+        
+        # Filter by query if provided
+        if query:
+            queryset = queryset.filter(**{f'{field}__icontains': query})
+        
+        # Get all values to count occurrences for case-insensitive grouping
+        all_values = list(queryset.values_list(field, 'updated_at', flat=False))
+        
+        # Group by lowercase version and track all variants with their timestamps
+        case_groups = defaultdict(list)
+        for value, updated_at in all_values:
+            if value:
+                case_groups[value.lower().strip()].append((value, updated_at))
+        
+        # For each case-insensitive group, pick the most common variant
+        # If tied, prefer the most recent one
+        unique_suggestions = []
+        seen_lower = set()
+        
+        # Sort groups by frequency (most common first), then by most recent timestamp
+        sorted_groups = sorted(
+            case_groups.items(),
+            key=lambda x: (-len(x[1]), max([ts for _, ts in x[1]], default=None) or timezone.now()),
+            reverse=False
+        )
+        
+        for lower_key, variants in sorted_groups:
+            if lower_key not in seen_lower:
+                seen_lower.add(lower_key)
+                # Pick the most common variant
+                variant_values = [v for v, _ in variants]
+                variant_counts = Counter(variant_values)
+                most_common_variant = variant_counts.most_common(1)[0][0]
+                unique_suggestions.append(most_common_variant)
+                
+                if len(unique_suggestions) >= limit:
+                    break
+        
+        return JsonResponse({
+            'success': True,
+            'field': field,
+            'suggestions': unique_suggestions,
+            'count': len(unique_suggestions)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in get_company_suggestions: {e}")
+        return JsonResponse({'success': False, 'error': 'Failed to get company suggestions'}, status=500)
